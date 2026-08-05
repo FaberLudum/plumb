@@ -257,6 +257,37 @@ mod tests {
         assert!(repo_root(dir.path()).is_err());
     }
 
+    /// git escapes a non-ASCII path into C-style octal by default, so
+    /// `café/requirements.txt` arrives as `"caf\303\251/requirements.txt"`,
+    /// quotes and all. Nothing downstream unquotes that: the path matches no
+    /// manifest, and the gate reports a clean run over a file it never opened.
+    ///
+    /// Asking git not to escape it is cheaper than teaching the parser to
+    /// unescape it, and it is the only place that knows the encoding for
+    /// certain. It does not cover a path containing a quote, a backslash or a
+    /// control character — those stay escaped whatever this setting says.
+    #[test]
+    fn working_diff_does_not_escape_a_non_ascii_path() {
+        let dir = init_repo();
+        let nested = dir.path().join("café");
+        fs::create_dir_all(&nested).expect("create dir");
+        fs::write(nested.join("requirements.txt"), "ruff==0.4.0\n").expect("write");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "add a non-ascii path"]);
+        fs::write(
+            nested.join("requirements.txt"),
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        )
+        .expect("write");
+
+        let diff = working_diff(dir.path()).expect("diff succeeds");
+
+        assert!(
+            diff.contains("+++ b/café/requirements.txt"),
+            "diff was: {diff}"
+        );
+    }
+
     #[test]
     fn show_at_head_returns_the_committed_contents() {
         let dir = init_repo();

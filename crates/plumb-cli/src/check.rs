@@ -398,6 +398,28 @@ mod tests {
         );
     }
 
+    /// The same silent skip as the test above, reached a different way: git
+    /// escapes a non-ASCII path unless told not to, and the escaped form
+    /// matches no manifest. A repository whose directories are not spelled in
+    /// English is not an edge case.
+    #[test]
+    fn a_manifest_under_a_non_ascii_path_is_checked() {
+        let dir = repo_with(&[("café/requirements.txt", "ruff==0.4.0\n")]);
+        write(
+            dir.path(),
+            "café/requirements.txt",
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        );
+
+        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(code, 1, "output was: {output}");
+        assert!(
+            output.contains("café/requirements.txt"),
+            "output was: {output}"
+        );
+    }
+
     #[test]
     fn a_missing_dependency_in_a_pyproject_is_flagged() {
         let dir = repo_with(&[(
