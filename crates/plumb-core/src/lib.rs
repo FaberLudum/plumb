@@ -3,3 +3,5 @@
 
 //! Pure logic for Plumb's gates. Nothing in this crate touches the network,
 //! the filesystem, or subprocesses; that all lives in `plumb-cli`.
+
+pub mod diff;
