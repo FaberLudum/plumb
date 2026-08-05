@@ -48,21 +48,18 @@ mod tests {
     use super::*;
     use crate::finding::{Finding, Tier};
 
-    fn sample() -> Vec<Finding> {
-        vec![Finding {
+    fn at_tier(tier: Tier) -> Finding {
+        Finding {
             rule: "package-exists".to_string(),
-            tier: Tier::A,
+            tier,
             message: "package `requestz` does not exist on PyPI".to_string(),
             location: "requirements.txt".to_string(),
             source: "taxonomy §4.1".to_string(),
-        }]
+        }
     }
 
-    fn at_tier(tier: Tier) -> Finding {
-        Finding {
-            tier,
-            ..sample().remove(0)
-        }
+    fn sample() -> Vec<Finding> {
+        vec![at_tier(Tier::A)]
     }
 
     #[test]
