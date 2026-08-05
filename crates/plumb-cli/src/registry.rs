@@ -510,7 +510,7 @@ mod tests {
     /// because the alternative is tempting: expiring it would only swap one
     /// non-blocking answer for another, buying no safety and costing an
     /// offline run the last signal it has. The remedy for staleness is to
-    /// report it — see `an_offline_run_counts_the_stale_answers_it_honoured`.
+    /// report it — see `an_offline_run_counts_the_distinct_stale_packages_it_honoured`.
     #[test]
     fn offline_honours_an_exists_of_any_age() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -555,7 +555,7 @@ mod tests {
     /// all take the offline path, and only the last of them is an answer taken
     /// from data past its lifetime.
     #[test]
-    fn an_offline_run_counts_the_stale_answers_it_honoured() {
+    fn an_offline_run_counts_the_distinct_stale_packages_it_honoured() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("registry.json");
         let age = well_past_every_lifetime();
@@ -570,30 +570,41 @@ mod tests {
         .expect("write cache");
 
         let registry = PyPiRegistry::new(true, cache_path);
-        assert_eq!(registry.stale_answers(), 0, "nothing has been asked yet");
+        assert_eq!(registry.stale_packages(), 0, "nothing has been asked yet");
 
         assert_eq!(registry.exists("black"), Existence::Exists);
-        assert_eq!(registry.stale_answers(), 0, "a fresh answer is not stale");
+        assert_eq!(registry.stale_packages(), 0, "a fresh answer is not stale");
 
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
         assert_eq!(
-            registry.stale_answers(),
+            registry.stale_packages(),
             0,
             "a stale answer that was refused was not honoured"
         );
 
         assert_eq!(registry.exists("nowhere"), Existence::Unknown);
         assert_eq!(
-            registry.stale_answers(),
+            registry.stale_packages(),
             0,
             "a cache miss is an absence, not a stale answer"
         );
 
         assert_eq!(registry.exists("ruff"), Existence::Exists);
         assert_eq!(
-            registry.stale_answers(),
+            registry.stale_packages(),
             1,
             "an honoured entry of unbounded age must be reported"
+        );
+
+        // The same package named in two manifests is asked about twice. It is
+        // still one package whose answer could not be confirmed, and the
+        // report says "packages", so counting the lookups would tell the
+        // reader there are two of something there is one of.
+        assert_eq!(registry.exists("ruff"), Existence::Exists);
+        assert_eq!(
+            registry.stale_packages(),
+            1,
+            "the same package asked about twice is one stale package"
         );
     }
 
@@ -618,7 +629,7 @@ mod tests {
             registry.exists_via("ruff", |_: &str| Outcome::Answered(Existence::Exists)),
             Existence::Exists
         );
-        assert_eq!(registry.stale_answers(), 0);
+        assert_eq!(registry.stale_packages(), 0);
 
         // Expired and latched, so it is refused rather than honoured.
         assert_eq!(
@@ -630,7 +641,7 @@ mod tests {
             registry.exists_via("black", |_: &str| Outcome::Unreachable),
             Existence::Unknown
         );
-        assert_eq!(registry.stale_answers(), 0);
+        assert_eq!(registry.stale_packages(), 0);
     }
 
     /// The concession is scoped to offline, and a dead network is not offline.
