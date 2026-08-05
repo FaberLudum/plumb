@@ -25,13 +25,10 @@ pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
                 path: path.to_string(),
                 added_lines: Vec::new(),
             });
-        } else if let Some(added) = line.strip_prefix('+') {
-            if line.starts_with("+++") {
-                continue;
-            }
-            if let Some(current) = files.last_mut() {
-                current.added_lines.push(added.to_string());
-            }
+        } else if let Some(added) = line.strip_prefix('+')
+            && let Some(current) = files.last_mut()
+        {
+            current.added_lines.push(added.to_string());
         }
     }
 
