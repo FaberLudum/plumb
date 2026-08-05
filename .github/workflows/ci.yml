@@ -18,11 +18,11 @@ jobs:
     # All three, because the suite shells out to a real `git` and builds real
     # repositories in temporary directories, and that is where the platforms
     # differ: path separators, the short and long spellings of a Windows
-    # temporary directory, the `/private` symlink in front of one on macOS,
-    # Unicode normalisation of a path such as `café/requirements.txt`, and what
-    # closing the read end of a pipe reports to the writer. Every one of those
-    # is exercised by a test in this suite. Development happened on Windows, so
-    # Linux and macOS are the platforms whose behaviour nobody has watched.
+    # temporary directory, the `/private` symlink in front of one on macOS, a
+    # non-ASCII path such as `café/requirements.txt` and how each filesystem
+    # normalises it, and what closing the read end of a pipe reports to the
+    # writer. Every one of those has a test. Development happened on Windows,
+    # so Linux and macOS are the platforms whose behaviour nobody has watched.
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -36,9 +36,10 @@ jobs:
 
       # No toolchain version appears in this file. `rust-toolchain.toml` names
       # the channel and the components, and `rustup toolchain install` with no
-      # argument installs the toolchain that file selects. Restating `1.97` here
-      # would create a second place to update and a silent drift when only one
-      # of them moves.
+      # toolchain named installs the one that file selects — run here it reports
+      # `it's active because: overridden by rust-toolchain.toml`. Restating
+      # `1.97` in this file would create a second place to update and a silent
+      # drift when only one of them moves.
       - name: Install the toolchain rust-toolchain.toml selects
         # `--no-self-update` because updating the toolchain manager is not
         # something a build should decide to do halfway through itself.
@@ -99,8 +100,15 @@ jobs:
       # The positive control. Without it, a `curl` that is missing or broken
       # would make the guard below report "no network" on a runner that has
       # one, and this job would assert nothing at all while staying green.
+      #
+      # Retried, because this step alone can fail for a reason that has nothing
+      # to do with the code under test. The guard inside the namespace is not
+      # retried: there it has to fail, and fail quickly.
       - name: Prove this runner can reach PyPI
-        run: curl --silent --show-error --fail --max-time 30 --output /dev/null https://pypi.org/simple/ruff/
+        run: >
+          curl --silent --show-error --fail --max-time 30
+          --retry 3 --retry-delay 5 --retry-all-errors
+          --output /dev/null https://pypi.org/simple/ruff/
 
       - name: Build the tests while there is still a network
         run: cargo test --workspace --locked --no-run
