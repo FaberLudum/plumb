@@ -73,17 +73,20 @@ warnings only. A run that could not happen — not a repository, no git — exit
 outside that contract instead, so a broken gate can never be read as a clean
 one.
 
-What it does not do yet, stated because a gate that stays quiet about its blind
-spots is worse than one that has none:
+What it does not do yet — the blind spots known today, listed because a gate
+that stays quiet about them is worse than one that has none. The list is what
+has been found, not a proof that nothing else is there:
 
 - PyPI only. TypeScript and .NET manifests are the same shape of code, one
   ecosystem at a time.
 - Three filenames, at any depth: `requirements.txt`, `requirements-*.txt` and
   `pyproject.toml`. From a `pyproject.toml` it reads PEP 621 `[project]`
   `dependencies` and `optional-dependencies`, nothing else.
-  `requirements_dev.txt` and `requirements.dev.txt` are knowingly given up —
-  prose and manifest are indistinguishable by name, and parsing prose
-  manufactures blocking findings, which is the more expensive mistake.
+  `requirements_dev.txt` and `requirements.dev.txt` are knowingly given up,
+  because admitting `_` or `.` as the separator would also admit
+  `requirements_notes.txt`, and prose read as a manifest manufactures blocking
+  findings. Restricting it to `-` narrows that problem without solving it — see
+  the first of the false positives below.
 - Two of the formats it does not read are worse than unread. A Poetry
   `pyproject.toml` with no `[project]` table is recognised as a manifest and
   read as declaring nothing, so every dependency it gains passes unexamined and
@@ -92,13 +95,16 @@ spots is worse than one that has none:
   the failure this project exists to catch, and they are the next thing to fix.
   PEP 735 `[dependency-groups]` and `[build-system].requires` are simply
   unread.
-- Two known false positives, both of which block a build that is fine. A
-  requirement given as a direct URL (`name @ https://…`) yields a name the
-  index does not have. And moving a manifest without editing it re-checks every
-  name in it, because nothing stands at its new path in HEAD — so a package
-  from a private index blocks a rename that changed no dependency at all. That
-  second one is a trade taken on purpose: before it, a manifest moved into
-  place carried its additions past the gate unlooked-at.
+- Three known false positives, each of which blocks a build that is fine. The
+  worst is prose: a file named `requirements-and-design.txt` is read as a
+  manifest, and the first word of every line becomes a name to look up — four
+  lines of English about a service and its latency budget block the build on
+  `latency`. Second, a requirement given as a direct URL (`name @ https://…`)
+  yields a name the index does not have. Third, moving a manifest without
+  editing it re-checks every name in it, because nothing stands at its new path
+  in HEAD, so a package from a private index blocks a rename that changed no
+  dependency at all. Only the third is a trade taken on purpose: before it, a
+  manifest moved into place carried its additions past the gate unlooked-at.
 - `git diff HEAD` reports tracked changes only, so a manifest that has never
   been staged is invisible.
 
