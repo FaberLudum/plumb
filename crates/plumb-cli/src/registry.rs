@@ -65,6 +65,21 @@ impl PyPiRegistry {
         }
     }
 
+    /// Records a definite answer and writes the cache back.
+    ///
+    /// [`Existence::Unknown`] is dropped: it describes this run's network, not
+    /// the package, and caching it would make one outage permanent.
+    fn record(&self, name: &str, outcome: Existence) {
+        if outcome == Existence::Unknown {
+            return;
+        }
+        self.cache
+            .borrow_mut()
+            .known
+            .insert(name.to_string(), outcome == Existence::Exists);
+        self.persist();
+    }
+
     /// Writes the cache back, ignoring every failure.
     ///
     /// A failed write costs the next run a round trip and nothing else, so
@@ -77,6 +92,22 @@ impl PyPiRegistry {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(&self.cache_path, text);
+    }
+}
+
+/// Turns one lookup result into an outcome.
+///
+/// Only a 200 and a 404 say anything about the package. Everything else — a
+/// 5xx, a 403 from a proxy, a dead host, a socket error, a timeout — is a
+/// failure to ask, and reports [`Existence::Unknown`].
+///
+/// Takes `Result<(), Error>` rather than the response so the mapping can be
+/// tested without a request; the body is never read either way.
+fn classify(result: Result<(), ureq::Error>) -> Existence {
+    match result {
+        Ok(()) => Existence::Exists,
+        Err(ureq::Error::StatusCode(404)) => Existence::Missing,
+        Err(_) => Existence::Unknown,
     }
 }
 
@@ -100,20 +131,9 @@ impl Registry for PyPiRegistry {
         }
 
         let url = format!("https://pypi.org/pypi/{name}/json");
-        let outcome = match ureq::get(&url).call() {
-            Ok(_) => Existence::Exists,
-            Err(ureq::Error::StatusCode(404)) => Existence::Missing,
-            Err(_) => Existence::Unknown,
-        };
+        let outcome = classify(ureq::get(&url).call().map(|_| ()));
 
-        if outcome != Existence::Unknown {
-            self.cache
-                .borrow_mut()
-                .known
-                .insert(name.to_string(), outcome == Existence::Exists);
-            self.persist();
-        }
-
+        self.record(name, outcome);
         outcome
     }
 }
