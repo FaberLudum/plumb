@@ -482,7 +482,7 @@ mod tests {
     /// because the alternative is tempting: expiring it would only swap one
     /// non-blocking answer for another, buying no safety and costing an
     /// offline run the last signal it has. The remedy for staleness is to
-    /// report it, which belongs to whoever owns output.
+    /// report it — see `an_offline_run_counts_the_stale_answers_it_honoured`.
     #[test]
     fn offline_honours_an_exists_of_any_age() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -516,6 +516,93 @@ mod tests {
 
         let after = std::fs::read_to_string(&cache_path).expect("read cache");
         assert_eq!(after, seeded, "reading a stale answer rewrote the cache");
+    }
+
+    /// The other half of the concession above. Answering `Exists` from an
+    /// entry of unbounded age is only defensible if the run says it did so, so
+    /// the count is what makes that trade honest rather than silent.
+    ///
+    /// Every step here is a mutation of the one before it: a fresh answer, a
+    /// refused stale `Missing`, a cache miss and an honoured stale `Exists`
+    /// all take the offline path, and only the last of them is an answer taken
+    /// from data past its lifetime.
+    #[test]
+    fn an_offline_run_counts_the_stale_answers_it_honoured() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let age = well_past_every_lifetime();
+        std::fs::write(
+            &cache_path,
+            cache_json(&[
+                ("ruff", true, age),
+                ("black", true, 0),
+                ("requestz", false, age),
+            ]),
+        )
+        .expect("write cache");
+
+        let registry = PyPiRegistry::new(true, cache_path);
+        assert_eq!(registry.stale_answers(), 0, "nothing has been asked yet");
+
+        assert_eq!(registry.exists("black"), Existence::Exists);
+        assert_eq!(registry.stale_answers(), 0, "a fresh answer is not stale");
+
+        assert_eq!(registry.exists("requestz"), Existence::Unknown);
+        assert_eq!(
+            registry.stale_answers(),
+            0,
+            "a stale answer that was refused was not honoured"
+        );
+
+        assert_eq!(registry.exists("nowhere"), Existence::Unknown);
+        assert_eq!(
+            registry.stale_answers(),
+            0,
+            "a cache miss is an absence, not a stale answer"
+        );
+
+        assert_eq!(registry.exists("ruff"), Existence::Exists);
+        assert_eq!(
+            registry.stale_answers(),
+            1,
+            "an honoured entry of unbounded age must be reported"
+        );
+    }
+
+    /// Only the offline path honours an expired entry, so only it can report
+    /// one. Online an expired entry is re-queried, and a latched run refuses
+    /// it outright — neither is an answer taken from stale data, and counting
+    /// either would put a warning in front of a user with nothing to fix.
+    #[test]
+    fn a_run_that_never_honoured_a_stale_answer_reports_none() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let age = well_past_every_lifetime();
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("ruff", true, age), ("black", true, age)]),
+        )
+        .expect("write cache");
+        let registry = PyPiRegistry::new(false, cache_path);
+
+        // Expired and online, so it is re-queried rather than honoured.
+        assert_eq!(
+            registry.exists_via("ruff", |_: &str| Outcome::Answered(Existence::Exists)),
+            Existence::Exists
+        );
+        assert_eq!(registry.stale_answers(), 0);
+
+        // Expired and latched, so it is refused rather than honoured.
+        assert_eq!(
+            registry.exists_via("ruff", |_: &str| Outcome::Unreachable),
+            Existence::Exists,
+            "the re-query above should have refreshed this entry"
+        );
+        assert_eq!(
+            registry.exists_via("black", |_: &str| Outcome::Unreachable),
+            Existence::Unknown
+        );
+        assert_eq!(registry.stale_answers(), 0);
     }
 
     /// The concession is scoped to offline, and a dead network is not offline.
