@@ -9,6 +9,9 @@ use std::path::Path;
 use std::process::Command;
 
 /// Returns `git diff HEAD` for the given repository.
+///
+/// Output is decoded lossily, so it can contain U+FFFD wherever the diff
+/// carried bytes that are not valid UTF-8. See the body for why.
 // `allow` and not `expect`: the tests below use this, so the lint fires only
 // for the binary target and an expectation would go unfulfilled in the other.
 #[allow(dead_code, reason = "wired into the gate in a later task")]
@@ -164,7 +167,12 @@ mod tests {
 
         let diff = working_diff(dir.path()).expect("diff succeeds despite non-UTF-8 content");
 
-        assert!(diff.contains("latin1.txt"), "diff was: {diff}");
+        // Assert on the replacement character, not on the path. A diff whose
+        // hunk is suppressed — which a global `core.attributesFile` marking
+        // `*.txt binary` produces, since `working_diff` honours ambient config
+        // while the fixture does not — still contains the path, so a path
+        // assertion would pass without the lossy decoding being exercised.
+        assert!(diff.contains('\u{FFFD}'), "diff was: {diff}");
     }
 
     #[test]
