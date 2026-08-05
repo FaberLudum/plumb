@@ -1,0 +1,130 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # A workflow that only runs on `main` and on pull requests cannot be tried
+  # from a branch before it is proposed, and an untested gate is the thing this
+  # project exists to complain about.
+  workflow_dispatch:
+
+# Nothing here writes anything back.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # All three, because the suite shells out to a real `git` and builds real
+    # repositories in temporary directories, and that is where the platforms
+    # differ: path separators, the short and long spellings of a Windows
+    # temporary directory, the `/private` symlink in front of one on macOS,
+    # Unicode normalisation of a path such as `café/requirements.txt`, and what
+    # closing the read end of a pipe reports to the writer. Every one of those
+    # is exercised by a test in this suite. Development happened on Windows, so
+    # Linux and macOS are the platforms whose behaviour nobody has watched.
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # A failure on one platform must not hide a different failure on another;
+      # telling those apart is the entire reason for the matrix.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # No toolchain version appears in this file. `rust-toolchain.toml` names
+      # the channel and the components, and `rustup toolchain install` with no
+      # argument installs the toolchain that file selects. Restating `1.97` here
+      # would create a second place to update and a silent drift when only one
+      # of them moves.
+      - name: Install the toolchain rust-toolchain.toml selects
+        run: rustup toolchain install
+
+      # And then check that it is the toolchain actually in front of cargo. An
+      # override, a stale rustup or a renamed key would leave the build running
+      # on whatever the runner image happens to ship, which is a green run that
+      # tested a different compiler from the one the crates claim to support.
+      - name: Fail if a different toolchain is what will run
+        shell: bash
+        run: |
+          declared=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          if [ -z "$declared" ]; then
+            echo "::error::no channel found in rust-toolchain.toml; this check would pass without checking anything"
+            exit 1
+          fi
+          active=$(rustc --version)
+          case "$active" in
+            "rustc $declared "*|"rustc $declared."*) ;;
+            *)
+              echo "::error::rust-toolchain.toml asks for $declared, but $active is what will run"
+              exit 1
+              ;;
+          esac
+          echo "$active against rust-toolchain.toml channel $declared"
+
+      # `cargo fmt` is the one command here without `--locked`: it is an
+      # external subcommand that never resolves dependencies, and it rejects the
+      # flag outright.
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  offline:
+    # No test in this suite may contact the network: every run either passes
+    # `--offline` or answers from a seeded cache. A runner has a route to the
+    # internet, so a test that started depending on a live PyPI lookup would go
+    # on passing here and only fail for whoever runs the suite on a train.
+    #
+    # This job runs the suite in a network namespace with no route out. What it
+    # catches is a test whose result depends on a real request: the lookup
+    # cannot be answered, the gate reports `Unknown`, and any assertion resting
+    # on a real answer fails. What it does not catch is a request whose answer
+    # is discarded — the gate is built to treat an unreachable registry as no
+    # evidence, so such a test would still pass. That is a slow and flaky test
+    # rather than a wrong one, and closing it would mean observing syscalls.
+    name: no network
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain rust-toolchain.toml selects
+        run: rustup toolchain install
+
+      # The positive control. Without it, a `curl` that is missing or broken
+      # would make the guard below report "no network" on a runner that has
+      # one, and this job would assert nothing at all while staying green.
+      - name: Prove this runner can reach PyPI
+        run: curl --silent --show-error --fail --max-time 30 --output /dev/null https://pypi.org/simple/ruff/
+
+      - name: Build the tests while there is still a network
+        run: cargo test --workspace --locked --no-run
+
+      - name: Run them with no route out
+        run: |
+          cat > "$RUNNER_TEMP/offline.sh" <<'SH'
+          set -euo pipefail
+          run_as=$1
+          run_path=$2
+          run_home=$3
+
+          # Loopback only. The claim under test is that nothing outside is
+          # reachable, not that the machine has no network stack.
+          ip link set lo up
+
+          # The negative control, inside the namespace the tests will run in.
+          # Same request as the positive control one step earlier, so a pass
+          # here means the isolation is real and not that the URL moved.
+          if curl --silent --fail --max-time 15 --output /dev/null https://pypi.org/simple/ruff/; then
+            echo "::error::the sandbox still reaches PyPI, so this job proves nothing"
+            exit 1
+          fi
+
+          # `--offline` so that cargo itself cannot be the thing that needs the
+          # network; everything it resolves was fetched by the step above.
+          exec runuser -u "$run_as" -- \
+            env "PATH=$run_path" "HOME=$run_home" \
+            cargo test --workspace --locked --offline
+          SH
+          sudo unshare --net bash "$RUNNER_TEMP/offline.sh" "$(id -un)" "$PATH" "$HOME"
