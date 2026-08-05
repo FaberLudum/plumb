@@ -1,6 +1,123 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
+//! Resolving distribution names against PyPI.
+//!
+//! This is the only part of the binary that touches the network, and it makes
+//! exactly one class of request: a lookup of one distribution name. Nothing
+//! else is ever sent.
+
+use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+/// Whether a package could be found in its registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "wired into the gate in a later task")]
+pub enum Existence {
+    Exists,
+    Missing,
+    /// The registry could not be consulted. Never a violation.
+    Unknown,
+}
+
+/// A source of truth for whether a package name resolves.
+///
+/// Object safe on purpose: callers hold `&dyn Registry` so tests can inject a
+/// stub instead of reaching the network.
+#[allow(dead_code, reason = "wired into the gate in a later task")]
+pub trait Registry {
+    fn exists(&self, name: &str) -> Existence;
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Cache {
+    known: BTreeMap<String, bool>,
+}
+
+/// Resolves names against PyPI, with an on-disk cache and an offline mode.
+#[allow(dead_code, reason = "wired into the gate in a later task")]
+pub struct PyPiRegistry {
+    offline: bool,
+    cache_path: PathBuf,
+    cache: RefCell<Cache>,
+}
+
+#[allow(dead_code, reason = "wired into the gate in a later task")]
+impl PyPiRegistry {
+    /// Reads the cache at `cache_path`, if there is a readable one.
+    ///
+    /// A missing, unreadable or malformed cache file yields an empty cache
+    /// rather than an error. The cache is an optimisation; losing it costs a
+    /// round trip, and refusing to start over a corrupt one would turn a
+    /// scratch file into a hard failure of the gate.
+    pub fn new(offline: bool, cache_path: PathBuf) -> Self {
+        let cache = std::fs::read_to_string(&cache_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Cache>(&text).ok())
+            .unwrap_or_default();
+
+        Self {
+            offline,
+            cache_path,
+            cache: RefCell::new(cache),
+        }
+    }
+
+    /// Writes the cache back, ignoring every failure.
+    ///
+    /// A failed write costs the next run a round trip and nothing else, so
+    /// there is no outcome worth interrupting the gate for.
+    fn persist(&self) {
+        let Ok(text) = serde_json::to_string(&*self.cache.borrow()) else {
+            return;
+        };
+        if let Some(parent) = self.cache_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&self.cache_path, text);
+    }
+}
+
+impl Registry for PyPiRegistry {
+    /// Answers from the cache, then from PyPI, then not at all.
+    ///
+    /// Anything that is not a definite 200 or 404 — a timeout, a proxy, a
+    /// firewall, a 5xx — is [`Existence::Unknown`], and `Unknown` is never
+    /// cached: it is a fact about this run's network, not about the package.
+    fn exists(&self, name: &str) -> Existence {
+        if let Some(&known) = self.cache.borrow().known.get(name) {
+            return if known {
+                Existence::Exists
+            } else {
+                Existence::Missing
+            };
+        }
+
+        if self.offline {
+            return Existence::Unknown;
+        }
+
+        let url = format!("https://pypi.org/pypi/{name}/json");
+        let outcome = match ureq::get(&url).call() {
+            Ok(_) => Existence::Exists,
+            Err(ureq::Error::StatusCode(404)) => Existence::Missing,
+            Err(_) => Existence::Unknown,
+        };
+
+        if outcome != Existence::Unknown {
+            self.cache
+                .borrow_mut()
+                .known
+                .insert(name.to_string(), outcome == Existence::Exists);
+            self.persist();
+        }
+
+        outcome
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
