@@ -798,6 +798,99 @@ dev = ["pytest"]
         assert_eq!(manifest.gaps, vec![Gap::DependencyGroups]);
     }
 
+    /// A declaration in the wrong shape is a declaration, and it was not read.
+    ///
+    /// The reader takes `as_array()`, so anything else falls through the `if
+    /// let` and the file reports as fully understood. That is the same silent
+    /// false negative as an unread format, reached by a typo rather than by a
+    /// tool: the key is right there in the file, positive evidence of an
+    /// intended declaration, and nothing came of it.
+    #[test]
+    fn a_project_dependencies_that_is_not_an_array_is_a_gap() {
+        let manifest = parse_pyproject("[project]\nname = \"demo\"\ndependencies = \"ruff\"\n");
+        assert!(manifest.names.is_empty());
+        assert_eq!(
+            manifest.gaps,
+            vec![Gap::Malformed("project.dependencies".to_string())]
+        );
+    }
+
+    /// The sharper half: a non-array `dependencies` also used to *suppress*
+    /// the Poetry gap, because the exemption was keyed on the key being
+    /// present while the read required an array. So a single typo turned a
+    /// Poetry manifest into a fully understood file with nothing in it — the
+    /// exemption firing on a `[project]` table that authoritatively declares
+    /// nothing at all.
+    #[test]
+    fn a_non_array_project_table_does_not_exempt_the_poetry_table() {
+        let text = r#"
+[project]
+name = "demo"
+dependencies = "ruff"
+
+[tool.poetry.dependencies]
+requests = "^2.0"
+"#;
+        let manifest = parse_pyproject(text);
+        assert!(manifest.names.is_empty());
+        assert_eq!(
+            manifest.gaps,
+            vec![
+                Gap::Malformed("project.dependencies".to_string()),
+                Gap::PoetryDependencies,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_optional_dependency_group_is_a_gap() {
+        let text = r#"
+[project]
+name = "demo"
+dependencies = ["ruff"]
+
+[project.optional-dependencies]
+dev = "pytest"
+docs = ["mkdocs"]
+"#;
+        let manifest = parse_pyproject(text);
+        // The groups that are readable are still read: a partly understood
+        // file keeps its names.
+        assert_eq!(manifest.names, set(&["mkdocs", "ruff"]));
+        assert_eq!(
+            manifest.gaps,
+            vec![Gap::Malformed(
+                "project.optional-dependencies.dev".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn optional_dependencies_that_is_not_a_table_is_a_gap() {
+        let text = "[project]\nname = \"demo\"\noptional-dependencies = [\"pytest\"]\n";
+        assert_eq!(
+            parse_pyproject(text).gaps,
+            vec![Gap::Malformed("project.optional-dependencies".to_string())]
+        );
+    }
+
+    /// The guard: a well-formed file must not acquire a malformed gap, or the
+    /// shape check has been widened into a warning on every project.
+    #[test]
+    fn a_well_formed_project_table_raises_no_malformed_gap() {
+        let text = r#"
+[project]
+name = "demo"
+dependencies = ["ruff"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+"#;
+        let manifest = parse_pyproject(text);
+        assert_eq!(manifest.names, set(&["pytest", "ruff"]));
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
     /// PEP 621's own way of saying "my dependencies are declared, but not
     /// here".
     ///
