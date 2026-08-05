@@ -1024,7 +1024,17 @@ fn requirement_name(spec: &str) -> Option<String> {
         .find(|c: char| c.is_whitespace() || "[<>=!~;@(".contains(c))
         .unwrap_or(spec.len());
     let name = normalise(&spec[..end]);
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    // PEP 508 requires a name to begin and end with an alphanumeric. Checking
+    // the characters alone is not enough: a bare `.` is a legal
+    // requirements.txt line and normalises to `-`, and `numpy_` normalises to
+    // `numpy-`. Both pass a character test, neither is a package, and each
+    // would have become a blocking finding.
+    let anchored = name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name.ends_with(|c: char| c.is_ascii_alphanumeric());
+    if !anchored {
         return None;
     }
     Some(name)
@@ -1041,10 +1051,15 @@ pub fn parse_requirements(text: &str) -> BTreeSet<String> {
 pub fn parse_pyproject(text: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
 
-    let Ok(value) = text.parse::<toml::Value>() else {
+    // `toml::Table`, not `toml::Value`: in toml 1.x `FromStr for Value` parses
+    // a single value expression, so a whole document fails and every
+    // pyproject.toml would look malformed — a silent gate bypass
+    // indistinguishable from the real malformed case. `Table` is the
+    // document-level type.
+    let Ok(document) = text.parse::<toml::Table>() else {
         return names;
     };
-    let Some(project) = value.get("project") else {
+    let Some(project) = document.get("project") else {
         return names;
     };
 
@@ -1098,7 +1113,7 @@ pub mod manifest;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core manifest`
-Expected: PASS, nine tests.
+Expected: PASS, eleven tests.
 
 - [ ] **Step 5: Commit**
 
