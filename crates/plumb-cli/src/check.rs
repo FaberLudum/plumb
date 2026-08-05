@@ -1,6 +1,140 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
+//! The `check --diff` gate: from a working diff to findings and an exit code.
+//!
+//! Wiring, and nothing else. Every decision this file makes was made somewhere
+//! testable: what a manifest is, what counts as an added dependency, whether a
+//! name resolves, what a finding costs. What is left here is the order they
+//! happen in, and one rule of its own — that only [`Existence::Missing`] is a
+//! violation. A firewall, an outage, an offline run and a manifest this
+//! version cannot read are all failures to establish anything, and a gate that
+//! blocked on those would be switched off within the week.
+
+use crate::git;
+use crate::registry::{Existence, Registry};
+use anyhow::Result;
+use plumb_core::deps::{self, AddedDependency};
+use plumb_core::diff::parse_unified_diff;
+use plumb_core::finding::{Finding, Tier, exit_code};
+use plumb_core::manifest::{self, Ecosystem};
+use plumb_core::report::{render_json, render_text};
+use std::path::Path;
+
+/// The taxonomy section behind the package existence rule.
+///
+/// Named once rather than spelled at the emission site. Every finding must
+/// cite the evidence for its rule, and a citation copied per call site is one
+/// that drifts — `every_finding_names_a_section_of_the_taxonomy` checks this
+/// against the taxonomy itself.
+const PACKAGE_EXISTS_SOURCE: &str = "taxonomy §4.1";
+
+/// Runs the diff-scoped gates and returns the rendered report and exit code.
+///
+/// `registry` is a `&dyn Registry` so a caller can hand in a stub and stay
+/// offline; it is one registry for the whole run, not one per file, because a
+/// registry is where the cache and the unreachable-network latch live and both
+/// are useless if they are thrown away between manifests.
+pub fn run(repo: &Path, registry: &dyn Registry, json: bool) -> Result<(String, i32)> {
+    let findings = collect(repo, registry)?;
+
+    let output = if json {
+        render_json(&findings)
+    } else {
+        render_text(&findings)
+    };
+
+    Ok((output, exit_code(&findings)))
+}
+
+/// Collects the findings for the working diff.
+///
+/// Separate from [`run`] so the findings can be inspected before rendering
+/// flattens them into a string.
+fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
+    let diff = git::working_diff(repo)?;
+    let mut findings = Vec::new();
+
+    for file in parse_unified_diff(&diff) {
+        // Ask the dispatch itself whether this path is a manifest, before
+        // reading a byte of it. A change touching a thousand source files
+        // would otherwise be a thousand files read into memory to be thrown
+        // away, and one of them is eventually a generated blob.
+        //
+        // The probe is `manifest::parse` rather than a filename rule spelled
+        // out here on purpose: a second copy of that rule in this crate is
+        // exactly the duplicated dispatch `deps::added` warns against, and it
+        // would drift the first time the real one learns a new name. It is
+        // sound only while the dispatch is a function of the path alone, which
+        // `a_manifest_is_recognised_from_its_path_alone` pins.
+        if manifest::parse(&file.path, "").is_none() {
+            continue;
+        }
+
+        // `git diff` paths are relative to the repository root and separated
+        // by `/`, which is what `manifest::parse` splits on and what `join`
+        // accepts on every platform this runs on.
+        //
+        // A manifest that cannot be read — deleted between the diff and now,
+        // or not UTF-8 — reads as empty, which yields no added dependencies
+        // and so no findings. Failing open is the right direction here: a file
+        // this process could not open is not evidence that a package does not
+        // exist.
+        let current = std::fs::read_to_string(repo.join(&file.path)).unwrap_or_default();
+        let Some(after) = manifest::parse(&file.path, &current) else {
+            continue;
+        };
+
+        // `None` means the manifest is new in this change, so every name in it
+        // is an addition.
+        //
+        // A manifest that exists at HEAD but does not parse is a different
+        // matter and is deliberately not special-cased: it yields `Some(empty
+        // set)`, so every current dependency reads as added and gets looked
+        // up. Nothing here can tell that apart from a manifest that genuinely
+        // declared nothing — a case where those names really are additions —
+        // without `manifest::parse` growing a way to say "I did not
+        // understand this", which is a change to the core contract rather than
+        // to this wiring. The cost of the honest reading is bounded: extra
+        // lookups, and a finding only for a name the registry actually lacks.
+        let before = git::show_at_head(repo, &file.path)?
+            .and_then(|text| manifest::parse(&file.path, &text));
+
+        for dependency in deps::added(&file.path, before.as_ref(), &after) {
+            if registry.exists(&dependency.name) == Existence::Missing {
+                findings.push(package_does_not_exist(&dependency));
+            }
+        }
+    }
+
+    Ok(findings)
+}
+
+/// The finding for a dependency no registry has.
+///
+/// Tier A: taxonomy §4.1 is peer-reviewed and the detection is objective — the
+/// name is in the registry or it is not.
+fn package_does_not_exist(dependency: &AddedDependency) -> Finding {
+    // Exhaustive on purpose, and it stops compiling the moment a second
+    // ecosystem lands — which is the moment this message becomes a lie and
+    // this whole function starts naming the wrong registry. It is the same
+    // guard `deps::added` keeps over the ecosystem it hard-codes.
+    let registry_name = match dependency.ecosystem {
+        Ecosystem::PyPi => "PyPI",
+    };
+
+    Finding {
+        rule: "package-exists".to_string(),
+        tier: Tier::A,
+        message: format!(
+            "package `{}` does not exist on {registry_name}",
+            dependency.name
+        ),
+        location: dependency.manifest.clone(),
+        source: PACKAGE_EXISTS_SOURCE.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +332,9 @@ mod tests {
     fn a_manifest_the_change_adds_has_every_name_checked() {
         let dir = repo_with_requirements("ruff==0.4.0\n");
         write(dir.path(), "requirements-dev.txt", "requestz==2.31.0\n");
+        // Staged, because `git diff HEAD` does not report untracked files —
+        // see `an_untracked_manifest_is_not_seen_until_it_is_staged`.
+        run_git(dir.path(), &["add", "-A"]);
         let registry = StubRegistry::default();
 
         let (output, code) = run(dir.path(), &registry, false).expect("check runs");
@@ -208,6 +345,34 @@ mod tests {
             "output was: {output}"
         );
         assert_eq!(registry.asked(), vec!["requestz"]);
+    }
+
+    /// Recorded, not endorsed.
+    ///
+    /// The gate reads `git diff HEAD`, which reports tracked changes only, so
+    /// a manifest that has never been added is invisible to it. That is right
+    /// where the gate is meant to run — a pre-commit hook and a CI checkout
+    /// both see staged or committed content — and wrong for a developer who
+    /// runs it by hand after creating a file. Widening it means asking git for
+    /// untracked files as well and deciding what an unstaged file even means
+    /// for a gate on a change, which is a scope decision, not wiring.
+    ///
+    /// Pinned so the limitation is visible rather than lurking: whoever
+    /// changes it will delete this test on purpose.
+    #[test]
+    fn an_untracked_manifest_is_not_seen_until_it_is_staged() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write(dir.path(), "requirements-dev.txt", "requestz==2.31.0\n");
+        let registry = StubRegistry::default();
+
+        let (_, unstaged) = run(dir.path(), &registry, false).expect("check runs");
+        assert_eq!(unstaged, 0);
+        assert!(registry.asked().is_empty(), "asked: {:?}", registry.asked());
+
+        run_git(dir.path(), &["add", "-A"]);
+
+        let (_, staged) = run(dir.path(), &registry, false).expect("check runs");
+        assert_eq!(staged, 1, "staging is what makes the manifest visible");
     }
 
     #[test]

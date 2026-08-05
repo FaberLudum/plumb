@@ -5,16 +5,48 @@
 //! `plumb-core`, which stays free of the outside world.
 
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Returns the root of the repository containing `from`.
+///
+/// Every path the gate handles is relative to the repository root: that is
+/// what [`working_diff`] prints, and what `git show HEAD:<path>` resolves
+/// against. So the root is the only directory those paths may be joined onto.
+/// Joining onto the working directory instead makes a run from a subdirectory
+/// read nothing, parse nothing and report a clean run over a manifest it never
+/// opened.
+///
+/// A failure here is also the gate's "this is not a repository" error, which is
+/// why it reports rather than quietly falling back to `from`.
+pub fn repo_root(from: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(from)
+        .output()
+        .context("failed to run git; is it installed and on PATH?")?;
+
+    if !output.status.success() {
+        bail!(
+            "not inside a git repository: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    // Strict about UTF-8, like `show_at_head`: this is a path this process is
+    // about to read files under, and a lossy decoding would produce one that
+    // silently resolves to nothing.
+    let root = String::from_utf8(output.stdout).context("git produced non-UTF-8 output")?;
+    // Only the line terminator is stripped. A trailing space is legal in a
+    // directory name on the platforms git runs on, so `trim_end` would be able
+    // to turn a real root into one that does not exist.
+    Ok(PathBuf::from(root.trim_end_matches(['\n', '\r'])))
+}
 
 /// Returns `git diff HEAD` for the given repository.
 ///
 /// Output is decoded lossily, so it can contain U+FFFD wherever the diff
 /// carried bytes that are not valid UTF-8. See the body for why.
-// `allow` and not `expect`: the tests below use this, so the lint fires only
-// for the binary target and an expectation would go unfulfilled in the other.
-#[allow(dead_code, reason = "wired into the gate in a later task")]
 pub fn working_diff(repo: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["diff", "HEAD"])
@@ -54,8 +86,6 @@ pub fn working_diff(repo: &Path) -> Result<String> {
 ///
 /// Unlike [`working_diff`] this stays strict about UTF-8: a manifest really
 /// should be UTF-8, and here the error names a file the user can fix.
-// See [`working_diff`] for why this is `allow` and not `expect`.
-#[allow(dead_code, reason = "wired into the gate in a later task")]
 pub fn show_at_head(repo: &Path, path: &str) -> Result<Option<String>> {
     let output = Command::new("git")
         .arg("show")

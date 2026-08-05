@@ -50,7 +50,6 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether a package could be found in its registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "wired into the gate in a later task")]
 pub enum Existence {
     Exists,
     Missing,
@@ -62,7 +61,6 @@ pub enum Existence {
 ///
 /// Object safe on purpose: callers hold `&dyn Registry` so tests can inject a
 /// stub instead of reaching the network.
-#[allow(dead_code, reason = "wired into the gate in a later task")]
 pub trait Registry {
     fn exists(&self, name: &str) -> Existence;
 }
@@ -122,7 +120,6 @@ struct Cache {
 /// than a race. It is `Send`, so a whole registry can still be moved to
 /// another thread. Nothing here assumes concurrency, and lookups run one at a
 /// time — which is also why the unreachable latch needs no synchronisation.
-#[allow(dead_code, reason = "wired into the gate in a later task")]
 pub struct PyPiRegistry {
     offline: bool,
     cache_path: PathBuf,
@@ -143,7 +140,6 @@ pub struct PyPiRegistry {
     honoured_stale: Cell<usize>,
 }
 
-#[allow(dead_code, reason = "wired into the gate in a later task")]
 impl PyPiRegistry {
     /// Reads the cache at `cache_path`, if there is a readable one.
     ///
