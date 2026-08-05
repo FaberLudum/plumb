@@ -186,4 +186,42 @@ index 4444444..5555555 100644
         assert_eq!(files[0].path, "requirements.txt");
         assert_eq!(files[0].added_lines, vec!["requestz==2.31.0"]);
     }
+
+    #[test]
+    fn ignores_header_shaped_lines_inside_a_hunk_body() {
+        const DIFF: &str = "\
+diff --git a/fixtures/sample.patch b/fixtures/sample.patch
+index 1111111..2222222 100644
+--- a/fixtures/sample.patch
++++ b/fixtures/sample.patch
+@@ -1,2 +1,2 @@
+--- old
++++ b/phantom.txt
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "fixtures/sample.patch");
+        assert_eq!(files[0].added_lines, vec!["++ b/phantom.txt"]);
+    }
+
+    #[test]
+    fn records_a_newly_added_file() {
+        const DIFF: &str = "\
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000..6666666
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,2 @@
++ruff==0.4.0
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "requirements.txt");
+        assert_eq!(
+            files[0].added_lines,
+            vec!["ruff==0.4.0", "requestz==2.31.0"]
+        );
+    }
 }
