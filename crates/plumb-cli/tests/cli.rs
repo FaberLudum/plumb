@@ -438,12 +438,25 @@ fn check_survives_a_hostile_but_ordinary_git_config() {
 /// The same config must not turn a clean run into a blocking one either.
 ///
 /// The pair matters: a gate hardened by making everything look changed would
-/// pass the test above and be useless. Here nothing was added, so nothing may
-/// be reported however the diff is spelled.
+/// pass the test above and be useless. Here `requestz` is *removed* by the
+/// change, so it must never be looked up — an implementation treating
+/// everything in either version as an addition reports it and fails here.
+///
+/// The mutation used to be written to `<tempdir>/requirements.txt`, outside
+/// the repository: the fixture moved the checkout into `<tempdir>/repo/` and
+/// this one call site was missed. The tree was therefore clean —
+/// `git status --porcelain` and `git diff --name-only HEAD` both empty — so
+/// the hostile config had no diff to reshape, no manifest was opened, and
+/// `no findings` was guaranteed for every implementation. Confirmed by
+/// mutation: with `deps::added` returning the union instead of the difference,
+/// this test fails as written and passed as it stood.
+///
+/// A guard that cannot fail is worse than no guard, because the suite counts
+/// it as coverage.
 #[test]
 fn a_hostile_git_config_does_not_manufacture_findings() {
     let dir = repo_with_requirements("ruff==0.4.0\nrequestz==2.31.0\n");
-    std::fs::write(dir.path().join("requirements.txt"), "ruff==0.4.1\n").expect("write");
+    std::fs::write(in_repo(dir.path(), "requirements.txt"), "ruff==0.4.1\n").expect("write");
     seed_cache(dir.path(), "requestz", false, 0);
 
     plumb_in(dir.path())
