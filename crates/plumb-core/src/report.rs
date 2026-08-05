@@ -107,6 +107,29 @@ mod tests {
         assert_eq!(starts("warning:"), 1, "was: {text}");
     }
 
+    /// Pins the wire spelling of every tier, not just the ones a sample
+    /// happens to use.
+    ///
+    /// The JSON payload is a public contract: CI and the command layer match
+    /// on these strings. Pinning only `A` and `Hygiene` leaves a rename of `B`
+    /// or `C` — to `"warn"` and `"note"`, say — passing the whole suite while
+    /// breaking every consumer.
+    #[test]
+    fn json_output_spells_every_tier_as_its_variant_name() {
+        let findings: Vec<Finding> = [Tier::A, Tier::B, Tier::C, Tier::Hygiene]
+            .into_iter()
+            .map(at_tier)
+            .collect();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&render_json(&findings)).expect("valid json");
+
+        assert_eq!(json[0]["tier"], "A");
+        assert_eq!(json[1]["tier"], "B");
+        assert_eq!(json[2]["tier"], "C");
+        assert_eq!(json[3]["tier"], "Hygiene");
+    }
+
     #[test]
     fn text_output_says_so_when_clean() {
         assert!(render_text(&[]).contains("no findings"));
