@@ -1106,9 +1106,18 @@ pub fn parse(path: &str, text: &str) -> Option<BTreeSet<String>> {
     // specification document in a non-Python repo — and the pip parser then
     // turns the first word of every line into a distribution name. Each is an
     // unresolvable lookup, so English text manufactures blocking findings.
+    //
+    // `_` is deliberately not accepted, which gives up `requirements_dev.txt`.
+    // It is indistinguishable by name from `requirements_notes.txt`, and the
+    // two errors are not symmetric: a missed manifest leaves dependencies
+    // unchecked, while parsed prose blocks a build over packages that never
+    // existed. `requirements-dev.txt` is the commoner spelling and still
+    // dispatches. `requirements-and-design.txt` still slips through, and a
+    // test asserts that rather than hiding it — no filename rule can separate
+    // it from `requirements-dev.txt`.
     if let Some(rest) = file_name.strip_prefix("requirements")
         && file_name.ends_with(".txt")
-        && (rest == ".txt" || rest.starts_with('-') || rest.starts_with('_'))
+        && (rest == ".txt" || rest.starts_with('-'))
     {
         return Some(parse_requirements(text));
     }
