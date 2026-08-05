@@ -8,23 +8,54 @@ pub struct ChangedFile {
     pub added_lines: Vec<String>,
 }
 
+/// Returns the content of `line` when it is an added line, given a marker
+/// column `marker_width` wide.
+///
+/// A combined diff from a merge carries one marker column per parent, so a
+/// line added relative to both parents reads `++foo` and one added relative to
+/// a single parent reads ` +foo`.
+fn added_content(line: &str, marker_width: usize) -> Option<&str> {
+    if !line.is_char_boundary(marker_width) {
+        return None;
+    }
+    let (markers, content) = line.split_at(marker_width);
+    if !markers.contains('+') {
+        return None;
+    }
+    if !markers.chars().all(|c| matches!(c, '+' | '-' | ' ')) {
+        return None;
+    }
+    Some(content)
+}
+
 /// Parses `git diff` output into one entry per changed file.
 ///
 /// Headers are only recognised inside a file section's header block — between
-/// a `diff --git ` line and the section's first `@@ `. Inside a hunk body every
-/// line carries a prefix, so an unprefixed line at column zero is always
-/// structural and content can never be mistaken for a header. Only the
-/// post-image path and added lines are extracted; hunk offsets, removals and
-/// renames are deliberately ignored.
+/// a `diff --` line and the section's first `@@`. Inside a hunk body every line
+/// carries a marker column, so an unprefixed line at column zero is always
+/// structural and content can never be mistaken for a header.
+///
+/// Combined diffs from a merge — `diff --cc`, emitted by plain `git diff` on a
+/// conflicted tree and by `git log -p --cc` — carry one marker column per
+/// parent and open their hunks with `@@@`. The marker width is read from the
+/// hunk header so their content is sliced correctly.
+///
+/// Only the post-image path and added lines are extracted; hunk offsets,
+/// removals and renames are deliberately ignored. Input is assumed to be git
+/// output: a bare `diff -u` patch, which has no `diff --` opener, yields
+/// nothing.
 pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
     let mut in_file_header = false;
+    let mut marker_width = 1usize;
 
     for line in diff.lines() {
-        if line.starts_with("diff --git ") {
+        if line.starts_with("diff --") {
             in_file_header = true;
-        } else if line.starts_with("@@ ") {
+            marker_width = 1;
+        } else if let Some(rest) = line.strip_prefix("@@") {
             in_file_header = false;
+            marker_width = 1 + rest.chars().take_while(|c| *c == '@').count();
         } else if in_file_header {
             // Do not collapse this into a let-chain on the arm above. The
             // nested form swallows every other header-block line; a let-chain
@@ -39,7 +70,7 @@ pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
                     });
                 }
             }
-        } else if let Some(added) = line.strip_prefix('+')
+        } else if let Some(added) = added_content(line, marker_width)
             && let Some(current) = files.last_mut()
         {
             current.added_lines.push(added.to_string());
