@@ -3,6 +3,7 @@
 
 use clap::Parser;
 
+mod check;
 mod git;
 mod registry;
 

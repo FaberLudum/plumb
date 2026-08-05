@@ -185,6 +185,48 @@ mod tests {
         assert!(diff.contains('\u{FFFD}'), "diff was: {diff}");
     }
 
+    /// Every path the gate handles is relative to the repository root: that is
+    /// what `git diff` prints and what `git show HEAD:…` resolves against. So
+    /// the root is what the gate must join those paths onto. Running from a
+    /// subdirectory and joining onto the working directory instead reads
+    /// nothing, parses nothing, and reports a clean run over a manifest it
+    /// never opened — a silent no-op, which is the worst thing a gate can be.
+    ///
+    /// Compares by content rather than by string. A temporary directory can be
+    /// reached by more than one spelling — a short path on Windows, a symlink
+    /// on macOS — and git answers with its own, so `assert_eq!` on the paths
+    /// would fail for reasons that have nothing to do with the behaviour.
+    #[test]
+    fn repo_root_is_found_from_a_subdirectory() {
+        let dir = init_repo();
+        let nested = dir.path().join("packages").join("api");
+        fs::create_dir_all(&nested).expect("create dirs");
+
+        let root = repo_root(&nested).expect("the root is found");
+
+        // The subdirectory holds no manifest, so this alone rules out the
+        // input being handed back unchanged.
+        assert!(
+            root.join("requirements.txt").is_file(),
+            "{} is not the repository root",
+            root.display()
+        );
+        assert!(
+            root.join("packages").join("api").is_dir(),
+            "{} is not an ancestor of the directory asked about",
+            root.display()
+        );
+    }
+
+    /// The one error the gate can give a useful message for. Every other
+    /// failure here is git being absent, which the context already names.
+    #[test]
+    fn repo_root_fails_outside_a_repository() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        assert!(repo_root(dir.path()).is_err());
+    }
+
     #[test]
     fn show_at_head_returns_the_committed_contents() {
         let dir = init_repo();
