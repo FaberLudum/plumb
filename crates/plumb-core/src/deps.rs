@@ -29,6 +29,16 @@ pub struct AddedDependency {
 ///
 /// Results come out in the sorted order of the underlying `BTreeSet`, so the
 /// findings a run reports do not depend on how the manifest was written.
+///
+/// Every result is labelled `Ecosystem::PyPi`. That is correct while
+/// `manifest::parse` recognises only Python manifests, and silently wrong
+/// afterwards: a name looked up in the wrong registry either blocks a build or
+/// passes a hallucinated package. The test
+/// `ecosystem_is_hard_coded_and_must_be_revisited_when_a_second_one_lands`
+/// stops compiling when that stops being true. The fix at that point is for
+/// `manifest::parse` to return the ecosystem alongside the names and for this
+/// function to take it as an argument — not a second filename switch here,
+/// which would duplicate a dispatch rule that is already subtle.
 pub fn added(
     manifest_path: &str,
     before: Option<&BTreeSet<String>>,
@@ -41,15 +51,7 @@ pub fn added(
         .difference(before)
         .map(|name| AddedDependency {
             name: name.clone(),
-            // Correct while `manifest::parse` recognises only Python
-            // manifests, and silently wrong the moment it does not: nothing
-            // here fails to compile when a second ecosystem appears, and a
-            // name looked up in the wrong registry either blocks a build or
-            // passes a hallucinated package. The fix then is for
-            // `manifest::parse` to return the ecosystem alongside the names
-            // and for this function to take it as an argument — not a second
-            // filename switch here, which would duplicate a dispatch rule
-            // that is already subtle.
+            // Hard-coded; see this function's documentation before changing.
             ecosystem: Ecosystem::PyPi,
             manifest: manifest_path.to_string(),
         })
