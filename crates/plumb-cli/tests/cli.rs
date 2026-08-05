@@ -9,5 +9,8 @@ fn reports_its_version() {
     cmd.arg("--version");
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("plumb 0.1.0"));
+        .stdout(predicates::str::contains(format!(
+            "plumb {}",
+            env!("CARGO_PKG_VERSION")
+        )));
 }
