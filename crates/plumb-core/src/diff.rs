@@ -91,4 +91,48 @@ index 2222222..3333333 100644
     fn returns_empty_for_an_empty_diff() {
         assert!(parse_unified_diff("").is_empty());
     }
+
+    #[test]
+    fn keeps_an_added_line_whose_content_starts_with_a_plus() {
+        const DIFF: &str = "\
+diff --git a/src/counter.c b/src/counter.c
+index 1111111..2222222 100644
+--- a/src/counter.c
++++ b/src/counter.c
+@@ -1 +1,2 @@
+ int total = 0;
+++i;
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files[0].added_lines, vec!["+i;"]);
+    }
+
+    #[test]
+    fn keeps_an_added_line_whose_content_starts_with_two_pluses() {
+        const DIFF: &str = "\
+diff --git a/src/counter.c b/src/counter.c
+index 4444444..5555555 100644
+--- a/src/counter.c
++++ b/src/counter.c
+@@ -1 +1,2 @@
+ int total = 0;
++++i;
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files[0].added_lines, vec!["++i;"]);
+    }
+
+    #[test]
+    fn skips_a_file_the_diff_deletes() {
+        const DIFF: &str = "\
+diff --git a/old.py b/old.py
+deleted file mode 100644
+index 3333333..0000000
+--- a/old.py
++++ /dev/null
+@@ -1 +0,0 @@
+-print('gone')
+";
+        assert!(parse_unified_diff(DIFF).is_empty());
+    }
 }
