@@ -359,9 +359,16 @@ mod tests {
             ("diff.colorMoved", "zebra"),
             ("diff.wsErrorHighlight", "all"),
             ("core.quotePath", "true"),
+            // A per-attribute content converter, reached through the
+            // `diff=hostile` attribute written below. Its command does not
+            // exist, which is what a converter for a format this machine has
+            // no tool for looks like; without `--no-textconv` git fails and
+            // takes the whole gate with it.
+            ("diff.hostile.textconv", "/nonexistent/textconv"),
         ] {
             run_git(dir, &["config", key, value]);
         }
+        fs::write(dir.join(".gitattributes"), "* diff=hostile\n").expect("write");
     }
 
     /// The gate reads paths out of this output, so anything that changes how a
@@ -387,10 +394,46 @@ mod tests {
             diff.contains("+++ b/requirements.txt\n"),
             "diff was: {diff:?}"
         );
+        // The pre-image line too. Nothing reads it today, so without this the
+        // `--src-prefix` half of the defence is unpinned and would be dropped
+        // by anyone tidying the invocation — and then the day something does
+        // read it, it is `w/…` or `src/…` again.
+        assert!(
+            diff.contains("--- a/requirements.txt\n"),
+            "diff was: {diff:?}"
+        );
         assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff:?}");
         // Colour is the one that leaves no path at all: an escape sequence in
         // front of `diff --git` stops the header being recognised.
         assert!(!diff.contains('\u{1b}'), "diff carried colour: {diff:?}");
+    }
+
+    /// Paths come back relative to the repository root whichever directory
+    /// inside the repository this is given.
+    ///
+    /// `diff.relative` breaks that: it limits the diff to the working
+    /// directory and prints what is left relative to it. Callers pass the root
+    /// today, which defuses it — so this calls it with a subdirectory on
+    /// purpose, because the contract is what the next caller will rely on and
+    /// the failure would be silence rather than an error.
+    #[test]
+    fn working_diff_reports_root_relative_paths_from_any_directory() {
+        let dir = init_repo();
+        make_git_hostile(dir.path());
+        let nested = dir.path().join("packages").join("api");
+        fs::create_dir_all(&nested).expect("create dirs");
+        fs::write(
+            dir.path().join("requirements.txt"),
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        )
+        .expect("write");
+
+        let diff = working_diff(&nested).expect("diff succeeds");
+
+        assert!(
+            diff.contains("+++ b/requirements.txt\n"),
+            "a manifest outside the directory asked about went missing: {diff:?}"
+        );
     }
 
     /// Checked rather than assumed. `git show <rev>:<path>` writes the blob

@@ -350,7 +350,7 @@ fn a_consumer_that_stops_reading_does_not_crash_the_run() {
         .args(["check", "--diff", "--offline"])
         .current_dir(dir.path())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the binary runs");
 
@@ -364,7 +364,8 @@ fn a_consumer_that_stops_reading_does_not_crash_the_run() {
         // `head` does once it has what it wants.
     }
 
-    let status = child.wait().expect("the child exits");
+    let finished = child.wait_with_output().expect("the child exits");
+    let status = finished.status;
 
     assert_ne!(
         status.code(),
@@ -375,6 +376,13 @@ fn a_consumer_that_stops_reading_does_not_crash_the_run() {
         status.code(),
         Some(1),
         "the verdict is still the verdict; the reader leaving does not change it"
+    );
+    // A reader that stopped reading made a decision; complaining about it puts
+    // a line on the stderr of every `plumb … | head` in the world.
+    let stderr = String::from_utf8_lossy(&finished.stderr);
+    assert!(
+        !stderr.contains("could not write"),
+        "a broken pipe was reported as a failure: {stderr:?}"
     );
 }
 
