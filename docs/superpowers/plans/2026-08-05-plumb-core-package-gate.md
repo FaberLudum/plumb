@@ -503,9 +503,15 @@ every other test still green.
 The fourth correction came from a re-reviewer who compiled the function and ran
 real git captures against it. Matching `diff --git ` and `@@ ` exactly dropped
 **combined diffs** entirely: plain `git diff` on a conflicted tree emits
-`diff --cc` sections with `@@@` hunk headers, and Task 8 runs `git diff HEAD`,
-so the case is reachable. Those files vanished, and their added lines were
-misattributed to whichever file preceded them.
+`diff --cc` sections with `@@@` hunk headers. Those files vanished, and their
+added lines were misattributed to whichever file preceded them.
+
+A correction to that correction, from the following review: `git diff HEAD` —
+the command Task 8 actually runs — never emits a combined diff. It compares the
+worktree against HEAD and always produces plain `diff --git` sections. Bare
+`git diff` and `git log -p --cc` do. The handling is still right, because this
+is a public function whose contract is "git diff output", but the urgency
+claimed for it was based on a command that does not behave that way.
 
 Widening the two prefixes alone would record the files but leave an extra
 marker column in the content — `++requestz==2.31.0` parses as a package named
@@ -535,22 +541,6 @@ pub struct ChangedFile {
     pub added_lines: Vec<String>,
 }
 
-/// Parses `git diff` output into one entry per changed file.
-///
-/// Headers are only recognised inside a file section's header block — between
-/// a `diff --` line and the section's first `@@`. Inside a hunk body every line
-/// carries a marker column, so an unprefixed line at column zero is always
-/// structural and content can never be mistaken for a header.
-///
-/// Combined diffs from a merge — `diff --cc`, emitted by plain `git diff` on a
-/// conflicted tree and by `git log -p --cc` — carry one marker column per
-/// parent and open their hunks with `@@@`. The marker width is read from the
-/// hunk header so their content is sliced correctly.
-///
-/// Only the post-image path and added lines are extracted; hunk offsets,
-/// removals and renames are deliberately ignored. Input is assumed to be git
-/// output: a bare `diff -u` patch, which has no `diff --` opener, yields
-/// nothing.
 /// Returns the content of `line` when it is an added line, given a marker
 /// column `marker_width` wide.
 ///
@@ -571,6 +561,22 @@ fn added_content(line: &str, marker_width: usize) -> Option<&str> {
     Some(content)
 }
 
+/// Parses `git diff` output into one entry per changed file.
+///
+/// Headers are only recognised inside a file section's header block — between
+/// a `diff --` line and the section's first `@@`. Inside a hunk body every line
+/// carries a marker column, so an unprefixed line at column zero is always
+/// structural and content can never be mistaken for a header.
+///
+/// Combined diffs from a merge — `diff --cc`, emitted by plain `git diff` on a
+/// conflicted tree and by `git log -p --cc` — carry one marker column per
+/// parent and open their hunks with `@@@`. The marker width is read from the
+/// hunk header so their content is sliced correctly.
+///
+/// Only the post-image path and added lines are extracted; hunk offsets,
+/// removals and renames are deliberately ignored. Input is assumed to be git
+/// output: a bare `diff -u` patch, which has no `diff --` opener, yields
+/// nothing.
 pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
     let mut in_file_header = false;
@@ -826,6 +832,12 @@ mod tests {
     }
 
     #[test]
+    fn requirements_rejects_lines_that_cannot_be_package_names() {
+        let text = "<<<<<<< HEAD\nruff==0.4.0\n=======\nhttpx==0.27.0\n>>>>>>> feature\n";
+        assert_eq!(parse_requirements(text), set(&["httpx", "ruff"]));
+    }
+
+    #[test]
     fn names_are_normalised_per_pep_503() {
         let text = "Flask_SQLAlchemy==3.0\nzope.interface==6.0\n";
         assert_eq!(parse_requirements(text), set(&["flask-sqlalchemy", "zope-interface"]));
@@ -916,11 +928,10 @@ fn requirement_name(spec: &str) -> Option<String> {
         .find(|c: char| c.is_whitespace() || "[<>=!~;@(".contains(c))
         .unwrap_or(spec.len());
     let name = normalise(&spec[..end]);
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
     }
+    Some(name)
 }
 
 /// Parses a `requirements.txt`-style file into a set of distribution names.
@@ -991,7 +1002,7 @@ pub mod manifest;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core manifest`
-Expected: PASS, eight tests.
+Expected: PASS, nine tests.
 
 - [ ] **Step 5: Commit**
 
