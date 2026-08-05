@@ -231,4 +231,34 @@ index 0000000..6666666
             vec!["ruff==0.4.0", "requestz==2.31.0"]
         );
     }
+
+    #[test]
+    fn records_a_combined_diff_section_from_a_merge() {
+        const DIFF: &str = "\
+diff --git a/requirements.txt b/requirements.txt
+index 1111111..2222222 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1 +1,2 @@
+ ruff==0.4.0
++httpx==0.27.0
+diff --cc setup.py
+index 3333333,4444444..5555555
+--- a/setup.py
++++ b/setup.py
+@@@ -1,1 -1,1 +1,3 @@@
+  import setuptools
+++import requestz
+ +from_one_parent
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "requirements.txt");
+        assert_eq!(files[0].added_lines, vec!["httpx==0.27.0"]);
+        assert_eq!(files[1].path, "setup.py");
+        assert_eq!(
+            files[1].added_lines,
+            vec!["import requestz", "from_one_parent"]
+        );
+    }
 }
