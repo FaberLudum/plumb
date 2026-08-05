@@ -186,32 +186,40 @@ mod tests {
     #[test]
     fn requirements_strips_version_specifiers() {
         let text = "ruff==0.4.0\npytest>=8.0\nhttpx\n";
-        assert_eq!(parse_requirements(text), set(&["httpx", "pytest", "ruff"]));
+        assert_eq!(
+            parse_requirements(text).names,
+            set(&["httpx", "pytest", "ruff"])
+        );
     }
 
     #[test]
     fn requirements_ignores_comments_blanks_and_flags() {
         let text = "# pinned\n\nruff==0.4.0\n-r other.txt\n-e .\n--index-url https://example.com\n";
-        assert_eq!(parse_requirements(text), set(&["ruff"]));
+        let manifest = parse_requirements(text);
+        assert_eq!(manifest.names, set(&["ruff"]));
+        // The `-r` line contributes no name, as it always did, but it is no
+        // longer *ignored*: it is the one option here that hides dependencies,
+        // so it leaves a gap behind. `-e` and `--index-url` do not.
+        assert_eq!(manifest.gaps, vec![Gap::Include("other.txt".to_string())]);
     }
 
     #[test]
     fn requirements_strips_extras_and_markers() {
         let text = "celery[redis]==5.3.0\nuvicorn ; python_version >= '3.9'\n";
-        assert_eq!(parse_requirements(text), set(&["celery", "uvicorn"]));
+        assert_eq!(parse_requirements(text).names, set(&["celery", "uvicorn"]));
     }
 
     #[test]
     fn requirements_rejects_lines_that_cannot_be_package_names() {
         let text = "<<<<<<< HEAD\nruff==0.4.0\n=======\nhttpx==0.27.0\n>>>>>>> feature\n";
-        assert_eq!(parse_requirements(text), set(&["httpx", "ruff"]));
+        assert_eq!(parse_requirements(text).names, set(&["httpx", "ruff"]));
     }
 
     #[test]
     fn names_are_normalised_per_pep_503() {
         let text = "Flask_SQLAlchemy==3.0\nzope.interface==6.0\n";
         assert_eq!(
-            parse_requirements(text),
+            parse_requirements(text).names,
             set(&["flask-sqlalchemy", "zope-interface"])
         );
     }
@@ -222,7 +230,7 @@ mod tests {
         // separator individually would yield `foo--bar---baz` and every lookup
         // for such a name would 404 and block the build.
         let text = "Foo--Bar_.-baz==1.0\n";
-        assert_eq!(parse_requirements(text), set(&["foo-bar-baz"]));
+        assert_eq!(parse_requirements(text).names, set(&["foo-bar-baz"]));
     }
 
     #[test]
@@ -234,7 +242,7 @@ mod tests {
         // `numpy_` pins the trailing anchor and `_leading` the leading one;
         // with either half dropped one of these reaches the registry.
         let text = ".\n..\nnumpy_\n_leading==1.0\nruff==0.4.0\n";
-        assert_eq!(parse_requirements(text), set(&["ruff"]));
+        assert_eq!(parse_requirements(text).names, set(&["ruff"]));
     }
 
     #[test]
@@ -246,9 +254,9 @@ mod tests {
         // conservative reading, and on a blocking gate that is the one to
         // take. Legal comments are unaffected — whitespace already ends the
         // name — which the neighbouring tests cover.
-        assert_eq!(parse_requirements("ruff#comment\n"), set(&[]));
+        assert_eq!(parse_requirements("ruff#comment\n").names, set(&[]));
         assert_eq!(
-            parse_requirements("ruff==0.4.0  # comment\n# whole line\n"),
+            parse_requirements("ruff==0.4.0  # comment\n# whole line\n").names,
             set(&["ruff"])
         );
     }
@@ -260,7 +268,7 @@ mod tests {
         // character check and vanish — a hallucinated package on line one
         // would go unreported.
         let text = "\u{feff}ruff==0.4.0\nhttpx\n";
-        assert_eq!(parse_requirements(text), set(&["httpx", "ruff"]));
+        assert_eq!(parse_requirements(text).names, set(&["httpx", "ruff"]));
     }
 
     #[test]
@@ -269,7 +277,7 @@ mod tests {
         // search stops on the leading space at index 0, the extracted name is
         // empty, and an indented requirement is dropped.
         let text = "    ruff==0.4.0\n\thttpx\n";
-        assert_eq!(parse_requirements(text), set(&["httpx", "ruff"]));
+        assert_eq!(parse_requirements(text).names, set(&["httpx", "ruff"]));
     }
 
     #[test]
@@ -277,19 +285,22 @@ mod tests {
         // Prose really does yield names, which is what makes the dispatch
         // rule load-bearing rather than cosmetic.
         const PROSE: &str = "The system must support X\nfast delivery\n";
-        assert_eq!(parse_requirements(PROSE), set(&["fast", "the"]));
+        assert_eq!(parse_requirements(PROSE).names, set(&["fast", "the"]));
 
-        assert_eq!(parse("requirements_notes.txt", PROSE), None);
-        assert_eq!(parse("requirements.notes.txt", PROSE), None);
-        assert_eq!(parse("requirementstxt.txt", PROSE), None);
+        assert!(parse("requirements_notes.txt", PROSE).is_none());
+        assert!(parse("requirements.notes.txt", PROSE).is_none());
+        assert!(parse("requirementstxt.txt", PROSE).is_none());
         // `_` and `.` are both excluded deliberately, giving up these two real
         // conventions to reject the prose above: see `parse`.
-        assert_eq!(parse("requirements_dev.txt", "ruff\n"), None);
-        assert_eq!(parse("requirements.dev.txt", "ruff\n"), None);
+        assert!(parse("requirements_dev.txt", "ruff\n").is_none());
+        assert!(parse("requirements.dev.txt", "ruff\n").is_none());
 
-        assert_eq!(parse("requirements.txt", "ruff\n"), Some(set(&["ruff"])));
         assert_eq!(
-            parse("requirements-dev.txt", "ruff\n"),
+            parse("requirements.txt", "ruff\n").map(|m| m.names),
+            Some(set(&["ruff"]))
+        );
+        assert_eq!(
+            parse("requirements-dev.txt", "ruff\n").map(|m| m.names),
             Some(set(&["ruff"]))
         );
 
@@ -298,7 +309,7 @@ mod tests {
         // then tell `requirements-and-design.txt` apart from it. The separator
         // requirement narrows this hole; it does not close it.
         assert_eq!(
-            parse("requirements-and-design.txt", PROSE),
+            parse("requirements-and-design.txt", PROSE).map(|m| m.names),
             Some(set(&["fast", "the"]))
         );
     }
@@ -310,7 +321,7 @@ mod tests {
 name = "demo"
 dependencies = ["ruff==0.4.0", "httpx>=0.27"]
 "#;
-        assert_eq!(parse_pyproject(text), set(&["httpx", "ruff"]));
+        assert_eq!(parse_pyproject(text).names, set(&["httpx", "ruff"]));
     }
 
     #[test]
@@ -324,35 +335,165 @@ dependencies = ["ruff"]
 dev = ["pytest>=8.0"]
 docs = ["mkdocs"]
 "#;
-        assert_eq!(parse_pyproject(text), set(&["mkdocs", "pytest", "ruff"]));
-    }
-
-    #[test]
-    fn pyproject_returns_empty_when_malformed() {
-        assert!(parse_pyproject("this is not toml {{{").is_empty());
+        assert_eq!(
+            parse_pyproject(text).names,
+            set(&["mkdocs", "pytest", "ruff"])
+        );
     }
 
     #[test]
     fn parse_dispatches_on_filename_and_ignores_other_files() {
-        assert_eq!(parse("requirements.txt", "ruff\n"), Some(set(&["ruff"])));
         assert_eq!(
-            parse("requirements-dev.txt", "pytest>=8.0\n"),
+            parse("requirements.txt", "ruff\n").map(|m| m.names),
+            Some(set(&["ruff"]))
+        );
+        assert_eq!(
+            parse("requirements-dev.txt", "pytest>=8.0\n").map(|m| m.names),
             Some(set(&["pytest"]))
         );
         // Asserting the names, not just `is_some`, pins which parser each name
         // reaches: run through parse_requirements this document would yield
         // `dependencies` from the assignment's left-hand side.
         assert_eq!(
-            parse("pyproject.toml", "[project]\ndependencies = [\"httpx\"]\n"),
+            parse("pyproject.toml", "[project]\ndependencies = [\"httpx\"]\n").map(|m| m.names),
             Some(set(&["httpx"]))
         );
         assert_eq!(
             parse(
                 "packages/api/pyproject.toml",
                 "[project]\ndependencies = []\n"
-            ),
+            )
+            .map(|m| m.names),
             Some(BTreeSet::new())
         );
-        assert_eq!(parse("src/app.py", "import os\n"), None);
+        assert!(parse("src/app.py", "import os\n").is_none());
+    }
+
+    #[test]
+    fn an_ordinary_pyproject_has_no_gaps() {
+        let text = r#"
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "demo"
+dependencies = ["ruff==0.4.0"]
+
+[tool.ruff]
+line-length = 100
+"#;
+        let manifest = parse_pyproject(text);
+        assert_eq!(manifest.names, set(&["ruff"]));
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
+    #[test]
+    fn a_pyproject_declaring_nothing_has_no_gaps() {
+        let text =
+            "[build-system]\nrequires = [\"setuptools\"]\n\n[tool.ruff]\nline-length = 100\n";
+        let manifest = parse_pyproject(text);
+        assert!(manifest.names.is_empty());
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
+    #[test]
+    fn poetry_dependencies_without_a_project_table_are_a_gap() {
+        let text = "[tool.poetry.dependencies]\nrequests = \"^2.0\"\n";
+        let manifest = parse_pyproject(text);
+        assert!(manifest.names.is_empty());
+        assert_eq!(manifest.gaps, vec![Gap::PoetryDependencies]);
+    }
+
+    #[test]
+    fn a_poetry_table_beside_project_dependencies_is_not_a_gap() {
+        let text = r#"
+[project]
+name = "demo"
+dependencies = ["ruff==0.4.0"]
+
+[tool.poetry.dependencies]
+ruff = "^0.4"
+"#;
+        let manifest = parse_pyproject(text);
+        assert_eq!(manifest.names, set(&["ruff"]));
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
+    #[test]
+    fn dependency_groups_are_a_gap_even_beside_a_read_project_table() {
+        let text = r#"
+[project]
+name = "demo"
+dependencies = ["ruff==0.4.0"]
+
+[dependency-groups]
+dev = ["pytest"]
+"#;
+        let manifest = parse_pyproject(text);
+        assert_eq!(manifest.names, set(&["ruff"]));
+        assert_eq!(manifest.gaps, vec![Gap::DependencyGroups]);
+    }
+
+    #[test]
+    fn malformed_toml_is_a_gap_rather_than_an_empty_manifest() {
+        let manifest = parse_pyproject("this is not toml {{{");
+        assert!(manifest.names.is_empty());
+        assert_eq!(manifest.gaps, vec![Gap::Unparseable]);
+    }
+
+    #[test]
+    fn a_requirements_include_is_a_gap_and_the_direct_names_survive() {
+        let text = "ruff==0.4.0\n-r requirements/base.txt\nhttpx==0.27.0\n";
+        let manifest = parse_requirements(text);
+        assert_eq!(manifest.names, set(&["httpx", "ruff"]));
+        assert_eq!(
+            manifest.gaps,
+            vec![Gap::Include("requirements/base.txt".to_string())]
+        );
+    }
+
+    #[test]
+    fn every_spelling_of_an_include_is_recognised() {
+        for line in [
+            "-r base.txt",
+            "-rbase.txt",
+            "--requirement base.txt",
+            "--requirement=base.txt",
+        ] {
+            let manifest = parse_requirements(&format!("{line}\n"));
+            assert_eq!(
+                manifest.gaps,
+                vec![Gap::Include("base.txt".to_string())],
+                "line: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_editable_install_is_not_an_include() {
+        let manifest = parse_requirements("-e .\n--index-url https://example.com\n");
+        assert!(manifest.names.is_empty());
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
+    #[test]
+    fn a_gap_says_what_was_not_read() {
+        assert!(
+            Gap::PoetryDependencies
+                .describe()
+                .contains("tool.poetry.dependencies")
+        );
+        assert!(
+            Gap::DependencyGroups
+                .describe()
+                .contains("dependency-groups")
+        );
+        assert!(
+            Gap::Include("base.txt".to_string())
+                .describe()
+                .contains("base.txt")
+        );
+        assert!(!Gap::Unparseable.describe().is_empty());
     }
 }
