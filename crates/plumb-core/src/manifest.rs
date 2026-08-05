@@ -50,6 +50,16 @@ fn normalise(name: &str) -> String {
 /// directory, and it normalises to `-`, which a check on the character set
 /// alone would accept and send to the registry as a package.
 fn requirement_name(spec: &str) -> Option<String> {
+    // Strip a UTF-8 BOM before trimming: U+FEFF is not `char::is_whitespace`,
+    // so without this the first requirement of a BOM-prefixed file fails the
+    // character check and is silently dropped. `toml` strips the BOM itself,
+    // so this only matters for the requirements path.
+    let spec = spec.trim_start_matches('\u{feff}');
+    // The `#` split cannot be pinned by a test: pip only treats `#` as a
+    // comment at line start or after whitespace, and whitespace already
+    // terminates the name, so no legal line changes result if it is removed.
+    // It stays as a second barrier — without it a malformed `ruff#x` would
+    // rest solely on the character check below to avoid becoming a lookup.
     let spec = spec.split('#').next().unwrap_or(spec).trim();
     if spec.is_empty() || spec.starts_with('-') {
         return None;
@@ -126,7 +136,24 @@ pub fn parse(path: &str, text: &str) -> Option<BTreeSet<String>> {
     if file_name == "pyproject.toml" {
         return Some(parse_pyproject(text));
     }
-    if file_name.starts_with("requirements") && file_name.ends_with(".txt") {
+    // The character after `requirements` must be a separator. A bare prefix
+    // match pulls in any prose file whose name merely starts that way —
+    // `requirements_notes.txt` — and the pip parser then turns the first word
+    // of every line into a distribution name. Each is an unresolvable lookup,
+    // so English text manufactures blocking findings.
+    //
+    // `_` is not accepted, though `requirements_dev.txt` is a real
+    // convention. Accepting it would re-admit `requirements_notes.txt`, the
+    // very case this rule exists to reject, making the rule a no-op against
+    // its own motivating input. The two are indistinguishable by name, so one
+    // has to be given up, and the costs are not symmetric: missing a manifest
+    // leaves dependencies unchecked, while parsing prose blocks a build over
+    // packages that never existed. This module already prefers the first
+    // error — malformed TOML yields an empty set rather than a violation.
+    if let Some(rest) = file_name.strip_prefix("requirements")
+        && rest.ends_with(".txt")
+        && (rest == ".txt" || rest.starts_with('-'))
+    {
         return Some(parse_requirements(text));
     }
 
@@ -193,6 +220,53 @@ mod tests {
         // with either half dropped one of these reaches the registry.
         let text = ".\n..\nnumpy_\n_leading==1.0\nruff==0.4.0\n";
         assert_eq!(parse_requirements(text), set(&["ruff"]));
+    }
+
+    #[test]
+    fn requirements_survive_a_leading_utf8_bom() {
+        // U+FEFF is not `char::is_whitespace`, so `trim()` leaves it in place
+        // and the first requirement of a BOM-prefixed file would fail the
+        // character check and vanish — a hallucinated package on line one
+        // would go unreported.
+        let text = "\u{feff}ruff==0.4.0\nhttpx\n";
+        assert_eq!(parse_requirements(text), set(&["httpx", "ruff"]));
+    }
+
+    #[test]
+    fn requirements_tolerate_leading_whitespace() {
+        // Pins the `trim()` in `requirement_name`. Without it the terminator
+        // search stops on the leading space at index 0, the extracted name is
+        // empty, and an indented requirement is dropped.
+        let text = "    ruff==0.4.0\n\thttpx\n";
+        assert_eq!(parse_requirements(text), set(&["httpx", "ruff"]));
+    }
+
+    #[test]
+    fn parse_requires_a_separator_after_requirements() {
+        // Prose really does yield names, which is what makes the dispatch
+        // rule load-bearing rather than cosmetic.
+        const PROSE: &str = "The system must support X\nfast delivery\n";
+        assert_eq!(parse_requirements(PROSE), set(&["fast", "the"]));
+
+        assert_eq!(parse("requirements_notes.txt", PROSE), None);
+        assert_eq!(parse("requirementstxt.txt", PROSE), None);
+        // `_` is excluded deliberately: see `parse`.
+        assert_eq!(parse("requirements_dev.txt", "ruff\n"), None);
+
+        assert_eq!(parse("requirements.txt", "ruff\n"), Some(set(&["ruff"])));
+        assert_eq!(
+            parse("requirements-dev.txt", "ruff\n"),
+            Some(set(&["ruff"]))
+        );
+
+        // Recorded, not endorsed. `requirements-dev.txt` is the dominant real
+        // manifest name, so `-` has to be accepted, and no filename rule can
+        // then tell `requirements-and-design.txt` apart from it. The separator
+        // requirement narrows this hole; it does not close it.
+        assert_eq!(
+            parse("requirements-and-design.txt", PROSE),
+            Some(set(&["fast", "the"]))
+        );
     }
 
     #[test]
