@@ -111,6 +111,14 @@ mod tests {
     fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temp dir");
         run_git(dir.path(), &["init", "-b", "main"]);
+        // Per-directory attributes outrank the global attributes file and the
+        // XDG default at `~/.config/git/attributes`. Without this, a developer
+        // whose global attributes mark `*.txt` as `binary` or `-diff` gets a
+        // suppressed hunk from `working_diff` — which honours ambient config,
+        // as production does — while the fixture neutralises that config for
+        // its own commands. Pinning it here removes the one variable the tests
+        // cannot otherwise control.
+        fs::write(dir.path().join(".gitattributes"), "* diff\n").expect("write");
         run_git(dir.path(), &["config", "user.email", "test@example.com"]);
         run_git(dir.path(), &["config", "user.name", "Test"]);
         fs::write(dir.path().join("requirements.txt"), "ruff==0.4.0\n").expect("write");
@@ -167,11 +175,13 @@ mod tests {
 
         let diff = working_diff(dir.path()).expect("diff succeeds despite non-UTF-8 content");
 
-        // Assert on the replacement character, not on the path. A diff whose
-        // hunk is suppressed — which a global `core.attributesFile` marking
-        // `*.txt binary` produces, since `working_diff` honours ambient config
-        // while the fixture does not — still contains the path, so a path
-        // assertion would pass without the lossy decoding being exercised.
+        // Assert on the replacement character, not on the path: a suppressed
+        // hunk still carries the path, so a path assertion would pass without
+        // the lossy decoding ever being exercised. Suppression needs no
+        // configuration key at all — `*.txt -diff` in the XDG default
+        // `~/.config/git/attributes` is enough, and `-diff` alone does it
+        // without the full `binary` macro — which is why `init_repo` pins
+        // `* diff` inside the repository, where it outranks both.
         assert!(diff.contains('\u{FFFD}'), "diff was: {diff}");
     }
 
