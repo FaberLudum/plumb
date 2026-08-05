@@ -126,27 +126,30 @@ nothing else is there:
   `requirements_notes.txt`, and prose read as a manifest manufactures blocking
   findings. Restricting it to `-` narrows that problem without solving it — see
   the first of the false positives below.
-- Some of the formats it does not read are worse than unread, because they are
-  unread while *looking* checked. A Poetry `pyproject.toml` with no `[project]`
-  table is recognised as a manifest and read as declaring nothing, so every
-  dependency it gains passes unexamined and unreported. A `requirements/`
-  directory is the same trap and is easy to underestimate: the common layout is
-  a top-level `requirements.txt` that does little more than
-  `-r requirements/base.txt`,
-  and that top-level file **is** recognised — but every `-`-prefixed line is
-  dropped, so it reads as declaring nothing, reports nothing, and exits `0`
-  while `requirements/base.txt` gains whatever it likes. Includes are not
-  followed and `requirements/base.txt` is not recognised on its own either.
-  `requirements.in`, the hand-edited pip-compile source — which is exactly
-  where a hallucinated name is introduced, before it is ever compiled into a
-  pinned `requirements.txt` — is not recognised at all. All of these are silent
-  false negatives on a blocking gate, which is the failure this project exists
-  to catch, and they are the next thing to fix. PEP 735 `[dependency-groups]`
-  and `[build-system].requires` are simply unread.
-- A manifest that is not valid UTF-8 is not checked. One Latin-1 byte in a
-  comment is enough, and it costs the whole file, not the line: nothing in it
-  is looked up. The run says so on stderr and still exits `0`, because a file
-  the tool could not decode is not evidence that a package does not exist.
+- Several declaration shapes inside a recognised manifest are still unread,
+  but no longer silently: a Poetry `[tool.poetry.dependencies]` table, PEP 735
+  `[dependency-groups]`, and an `-r`/`--requirement` include each produce a
+  Tier B `manifest-understood` warning naming the file and the shape that was
+  missed, and the run exits `2`. On a Poetry manifest it prints
+  `pyproject.toml was not fully read: dependencies are declared under
+  [tool.poetry] — in [tool.poetry.dependencies] or a
+  [tool.poetry.group.<name>.dependencies] table — which Plumb does not read`.
+  The dependencies in those shapes are still not looked up — the warning
+  reports the gap, it does not close it.
+- Two formats are still silent, because they are not recognised as manifests
+  at all and recognition is by filename: `requirements/base.txt` reached
+  through an include (the include warns, the file it names is never read on
+  its own), and `requirements.in`, the hand-edited pip-compile source — which
+  is exactly where a hallucinated name is introduced, before it is ever
+  compiled into a pinned `requirements.txt`. These remain silent false
+  negatives on a blocking gate, which is the failure this project exists to
+  catch, and they are the next thing to fix. `[build-system].requires` is
+  simply unread, with no warning either.
+- A manifest that is not valid UTF-8 is not checked, and says so the same way:
+  one Latin-1 byte costs the whole file, nothing in it is looked up, and the
+  run warns — `requirements.txt was not fully read: not valid UTF-8 at byte 5`
+  — and exits `2`. Not a blocking `1`, because a file the tool could not
+  decode is not evidence that a package does not exist.
 - Three known false positives, each of which blocks a build that is fine. The
   worst is prose: a file named `requirements-and-design.txt` is read as a
   manifest, and the first word of every line becomes a name to look up — four
