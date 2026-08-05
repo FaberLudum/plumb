@@ -93,7 +93,7 @@ fn check_diff(offline: bool, json: bool) -> ExitCode {
             // Exactly one trailing newline either way: `render_text` ends with
             // one and `render_json` does not.
             println!("{}", output.trim_end_matches('\n'));
-            report_stale_answers(&registry);
+            report_stale_packages(&registry);
             // `exit_code` returns 0, 1 or 2. The fallback is unreachable, and
             // is an internal error rather than a 0 so that a gate which
             // somehow produced a code it cannot report never reports success.
@@ -106,15 +106,15 @@ fn check_diff(offline: bool, json: bool) -> ExitCode {
 /// Says so when the run answered from cache entries past their lifetime.
 ///
 /// Offline, an `Exists` is honoured at any age — see
-/// [`registry::PyPiRegistry::stale_answers`]. That trade is defensible only
+/// [`registry::PyPiRegistry::stale_packages`]. That trade is defensible only
 /// because the run reports it, so this is part of the gate's output, not a
 /// nicety.
 ///
 /// On stderr, and with no effect on the exit code. Stale data here can only
 /// have produced a non-blocking answer, so it is not a finding; and stdout
 /// carries a report that `--json` promises is parseable.
-fn report_stale_answers(registry: &registry::PyPiRegistry) {
-    let stale = registry.stale_answers();
+fn report_stale_packages(registry: &registry::PyPiRegistry) {
+    let stale = registry.stale_packages();
     if stale == 0 {
         return;
     }

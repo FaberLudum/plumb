@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -38,7 +38,7 @@ const MISSING_TTL: Duration = Duration::from_secs(60 * 60);
 /// `Unknown` are both non-blocking, so expiring the entry would change no
 /// blocking decision — it would only replace an answer with silence. The
 /// remedy for the staleness is to report it, not to discard it — which is
-/// what [`PyPiRegistry::stale_answers`] is for.
+/// what [`PyPiRegistry::stale_packages`] is for.
 const EXISTS_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// How long one lookup may take before it reports [`Existence::Unknown`].
@@ -132,12 +132,14 @@ pub struct PyPiRegistry {
     /// In memory only. It describes this process's network for the length of
     /// this run and must not outlive it, so it is deliberately not persisted.
     unreachable: Cell<bool>,
-    /// How many answers this run took from entries past their lifetime.
+    /// The names this run answered from entries past their lifetime.
     ///
-    /// Counted rather than flagged so the report can say how much of the run
-    /// rested on old data. Like the latch, this describes this run and is
-    /// deliberately not persisted.
-    honoured_stale: Cell<usize>,
+    /// Names rather than a count, because the same package named in two
+    /// manifests is asked about twice and is still one package whose answer
+    /// could not be confirmed. Collected rather than flagged so the report can
+    /// say how much of the run rested on old data. Like the latch, this
+    /// describes this run and is deliberately not persisted.
+    honoured_stale: RefCell<BTreeSet<String>>,
 }
 
 impl PyPiRegistry {
@@ -167,11 +169,17 @@ impl PyPiRegistry {
             cache: RefCell::new(cache),
             agent: lookup_agent(),
             unreachable: Cell::new(false),
-            honoured_stale: Cell::new(0),
+            honoured_stale: RefCell::new(BTreeSet::new()),
         }
     }
 
-    /// How many answers this run took from cache entries past their lifetime.
+    /// How many distinct packages this run answered from cache entries past
+    /// their lifetime.
+    ///
+    /// Distinct packages, not lookups: a name declared in two manifests is
+    /// asked about twice, and the reader is being told how much of their
+    /// dependency set went unconfirmed, not how many times this process
+    /// consulted a map.
     ///
     /// Only the offline path can produce one: online an expired entry is
     /// re-queried, and a latched run refuses it rather than honouring it. See
@@ -181,8 +189,8 @@ impl PyPiRegistry {
     /// Read once after a run rather than pushed through [`Registry`]: the
     /// trait has to stay trivially stubbable, and a method a stub must answer
     /// meaningfully is a method every stub gets wrong.
-    pub fn stale_answers(&self) -> usize {
-        self.honoured_stale.get()
+    pub fn stale_packages(&self) -> usize {
+        self.honoured_stale.borrow().len()
     }
 
     /// Answers from the cache, then from `lookup`, then not at all.
@@ -226,7 +234,7 @@ impl PyPiRegistry {
             // `Unknown`s too would report staleness for a cache miss, which is
             // an absence rather than an old answer.
             if answer != Existence::Unknown {
-                self.honoured_stale.set(self.honoured_stale.get() + 1);
+                self.honoured_stale.borrow_mut().insert(name.to_string());
             }
             return answer;
         }
@@ -268,7 +276,7 @@ impl PyPiRegistry {
     /// non-blocking answer into a different non-blocking answer, which buys no
     /// safety and loses the one signal an offline run still has. What makes
     /// that defensible is that the run says so: every answer honoured here is
-    /// counted by [`PyPiRegistry::stale_answers`] and reported.
+    /// counted by [`PyPiRegistry::stale_packages`] and reported.
     fn honour_offline(cached: Option<Entry>) -> Existence {
         match cached {
             Some(entry) if entry.exists => Existence::Exists,
