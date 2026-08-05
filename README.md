@@ -162,6 +162,9 @@ the taxonomy in the same pull request.
 A rule without a source is closed, however sensible it sounds. That is the only
 thing separating this project from another opinionated linter.
 
+The rest of it — tiers, where code goes, why no test may reach the network — is
+in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Mascot
 
 Plumby. The friendly name belongs on the mascot, not on the command.
