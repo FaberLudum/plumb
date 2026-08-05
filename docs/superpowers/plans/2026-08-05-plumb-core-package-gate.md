@@ -335,6 +335,44 @@ index 4444444..5555555 100644
     }
 
     #[test]
+    fn ignores_header_shaped_lines_inside_a_hunk_body() {
+        const DIFF: &str = "\
+diff --git a/fixtures/sample.patch b/fixtures/sample.patch
+index 1111111..2222222 100644
+--- a/fixtures/sample.patch
++++ b/fixtures/sample.patch
+@@ -1,2 +1,2 @@
+--- old
++++ b/phantom.txt
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "fixtures/sample.patch");
+        assert_eq!(files[0].added_lines, vec!["++ b/phantom.txt"]);
+    }
+
+    #[test]
+    fn records_a_newly_added_file() {
+        const DIFF: &str = "\
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000..6666666
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,2 @@
++ruff==0.4.0
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "requirements.txt");
+        assert_eq!(
+            files[0].added_lines,
+            vec!["ruff==0.4.0", "requestz==2.31.0"]
+        );
+    }
+
+    #[test]
     fn returns_empty_for_an_empty_diff() {
         assert!(parse_unified_diff("").is_empty());
     }
@@ -405,14 +443,32 @@ The added-line branch is a let-chain rather than a nested `if let`. Nesting
 trips clippy's `collapsible_if` under `-D warnings`; let-chains are stable in
 edition 2024 and the semantics are identical.
 
-The header branch has the mirror-image problem, so it carries the mirror-image
-defence: `+++ ` is only treated as a post-image header when the previous line
-began with `--- `. Git always emits the pair together, including `--- /dev/null`
-for a newly added file. Without the precondition, an added line whose content
-starts with `++ ` renders as `+++ foo`, invents a `ChangedFile` for a path that
-does not exist, and then swallows every subsequent added line of the real file
-— a false negative on a blocking gate, which is the worst failure this parser
-can produce. A committed `.patch` fixture is enough to trigger it.
+Header recognition is confined to a file section's header block, and this is
+the third attempt at that rule — the first two chased individual cases and both
+leaked.
+
+A line is only read as a header between a `diff --git ` line and the section's
+first `@@ `. Inside a hunk body no line can be a header, because every hunk
+line carries a prefix: added lines start with `+`, removed with `-`, context
+with a space. So an unprefixed `diff --git ` or `@@ ` at column zero is always
+structural, never content.
+
+What the two earlier attempts missed, in order. Matching `+++ ` anywhere let an
+added line whose content begins with `++ ` render as `+++ foo`, invent a
+`ChangedFile` for a path no commit touched, and swallow every subsequent added
+line of the real file. Requiring a preceding `--- ` narrowed that but did not
+close it: a *removed* line whose content begins with `-- ` renders as `--- …`
+and reopens the gate, so an adjacent removed/added pair inside a committed
+`.patch` fixture reproduces the same phantom file.
+
+The failure mode is the same each time and it is the worst one this parser can
+produce: a false negative on a blocking gate. The real file ends up with no
+added lines, so a hallucinated package added to a manifest goes unreported.
+
+`records_a_newly_added_file` pins the case the rule most depends on. New files
+arrive as `--- /dev/null` followed by `+++ b/…`, and a rule that tightened the
+pre-image match would make every newly added manifest vanish from the gate with
+every other test still green.
 
 `pub mod diff;` belongs in the **test** commit, not the implementation commit.
 Left to step 3, `diff.rs` is not part of the crate during the RED run, so
@@ -438,35 +494,36 @@ pub struct ChangedFile {
 
 /// Parses `git diff` output into one entry per changed file.
 ///
-/// A file is recorded when a `+++ b/...` post-image header directly follows a
-/// `--- ` pre-image header, which git always emits alongside it. Requiring the
-/// pair keeps an added line whose content begins with `++ ` from being mistaken
-/// for a header. Only the post-image path and added lines are extracted; hunk
-/// offsets, removals and renames are deliberately ignored.
+/// Headers are only recognised inside a file section's header block — between
+/// a `diff --git ` line and the section's first `@@ `. Inside a hunk body every
+/// line carries a prefix, so an unprefixed line at column zero is always
+/// structural and content can never be mistaken for a header. Only the
+/// post-image path and added lines are extracted; hunk offsets, removals and
+/// renames are deliberately ignored.
 pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
-    let mut after_pre_image_header = false;
+    let mut in_file_header = false;
 
     for line in diff.lines() {
-        let is_pre_image_header = line.starts_with("--- ");
-
-        if after_pre_image_header
-            && let Some(path) = line.strip_prefix("+++ ")
-        {
-            let path = path.strip_prefix("b/").unwrap_or(path);
-            if path != "/dev/null" {
-                files.push(ChangedFile {
-                    path: path.to_string(),
-                    added_lines: Vec::new(),
-                });
+        if line.starts_with("diff --git ") {
+            in_file_header = true;
+        } else if line.starts_with("@@ ") {
+            in_file_header = false;
+        } else if in_file_header {
+            if let Some(path) = line.strip_prefix("+++ ") {
+                let path = path.strip_prefix("b/").unwrap_or(path);
+                if path != "/dev/null" {
+                    files.push(ChangedFile {
+                        path: path.to_string(),
+                        added_lines: Vec::new(),
+                    });
+                }
             }
         } else if let Some(added) = line.strip_prefix('+')
             && let Some(current) = files.last_mut()
         {
             current.added_lines.push(added.to_string());
         }
-
-        after_pre_image_header = is_pre_image_header;
     }
 
     files
@@ -482,7 +539,7 @@ pub mod diff;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core diff`
-Expected: PASS, nine tests.
+Expected: PASS, eleven tests.
 
 - [ ] **Step 5: Commit**
 
