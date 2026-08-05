@@ -10,7 +10,9 @@
 
 ## Global Constraints
 
-- Rust edition 2021. MSRV 1.78, declared as `rust-version` in every crate manifest.
+- Rust edition 2024. MSRV 1.97, declared as `rust-version` in the workspace package table and inherited by every crate manifest.
+- Dependencies track current releases. No version is pinned by hand, ever. `Cargo.lock` is committed and builds use `--locked`. Plumb ships as a binary, so a low MSRV serves no consumer and buys nothing but dependency-resolution friction.
+- Before writing code against any crate, check its current version and its current API. Guessing a version from memory is how this plan first shipped a two-year-old MSRV and a `ureq` 2 error match that no longer compiles.
 - License Apache-2.0. Every source file starts with the two-line SPDX header: `// SPDX-License-Identifier: Apache-2.0` followed by `// Copyright 2026 The Plumb Authors`.
 - Exit codes are fixed: `0` clean, `1` Tier A violation, `2` warnings only. Nothing else.
 - No telemetry. The binary makes exactly one class of outbound request — registry lookups — and nothing else, ever.
@@ -85,7 +87,7 @@ Create `rust-toolchain.toml`:
 
 ```toml
 [toolchain]
-channel = "1.78"
+channel = "1.97"
 components = ["rustfmt", "clippy"]
 ```
 
@@ -98,20 +100,20 @@ resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.78"
+edition = "2024"
+rust-version = "1.97"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-clap = { version = "4", features = ["derive"] }
-ureq = { version = "2", features = ["json"] }
-assert_cmd = "2"
-predicates = "3"
-tempfile = "3"
+anyhow = "1.0.104"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.4"
+clap = { version = "4.6.5", features = ["derive"] }
+ureq = "3.3.0"
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"
 ```
 
 Create `crates/plumb-core/Cargo.toml`:
@@ -1226,7 +1228,7 @@ impl Registry for PyPiRegistry {
         let url = format!("https://pypi.org/pypi/{name}/json");
         let outcome = match ureq::get(&url).call() {
             Ok(_) => Existence::Exists,
-            Err(ureq::Error::Status(404, _)) => Existence::Missing,
+            Err(ureq::Error::StatusCode(404)) => Existence::Missing,
             Err(_) => Existence::Unknown,
         };
 
@@ -1593,12 +1595,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.78
+      - uses: dtolnay/rust-toolchain@1.97
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --all --locked
 ```
 
 - [ ] **Step 2: Run the checks locally to see them fail or pass**
