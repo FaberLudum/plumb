@@ -95,6 +95,28 @@ mod tests {
         assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff}");
     }
 
+    /// Pins the `HEAD` in `git diff HEAD`. A plain `git diff` reports nothing
+    /// once the change is staged, so without this the other tests would pass
+    /// against an implementation that silently misses a pre-commit hook's view.
+    #[test]
+    fn working_diff_reports_staged_changes() {
+        let dir = init_repo();
+        fs::write(
+            dir.path().join("requirements.txt"),
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        )
+        .expect("write");
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
+
+        let diff = working_diff(dir.path()).expect("diff succeeds");
+
+        assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff}");
+    }
+
     #[test]
     fn show_at_head_returns_the_committed_contents() {
         let dir = init_repo();
