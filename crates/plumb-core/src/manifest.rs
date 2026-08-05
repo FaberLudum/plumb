@@ -29,6 +29,10 @@
 //! produce no gap. That is a real remaining silence, not a case this module has
 //! an answer for.
 //!
+//! Conda is silent too, but by decision rather than by omission: this module
+//! reads one registry, and a conda name is not an unread part of the PyPI set.
+//! See [`is_conda_dependency_path`].
+//!
 //! One exemption is worth knowing about, because it rests on someone else's
 //! documented behaviour rather than on anything checkable here.
 //! `[tool.poetry.dependencies]` raises no gap when `[project].dependencies` is

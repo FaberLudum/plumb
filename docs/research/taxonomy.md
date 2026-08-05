@@ -355,5 +355,20 @@ Both are silent false negatives on a blocking gate. They are recorded here
 rather than in the README alone because the README describes a version and this
 describes the rule.
 
+A third silence is a decision rather than a gap, and belongs here for the same
+reason `[build-system].requires` does. **Conda dependencies are out of scope.**
+The rule in §4.1 is about a package that does not exist in the registry the
+project installs from, and Plumb reads one registry, PyPI. Conda tables —
+pixi's `dependencies`, `build-`, `host-` and `run-dependencies` at any scope,
+and `[tool.conda-lock.dependencies]` — produce no finding, while pixi's
+`pypi-dependencies` tables still do.
+
+A hallucinated conda package is a real defect and this is not a claim
+otherwise; it is a claim that it needs its own rule with its own evidence and
+its own registry. It is excluded rather than warned about because it is the one
+gap that could never be closed by writing a parser, so the warning would be
+permanent and unactionable — the failure mode the Tier B argument above depends
+on avoiding.
+
 This section has no invalidation condition, because it rests on no claim that
 new evidence could refute. It goes away when the formats are read.

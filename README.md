@@ -145,16 +145,17 @@ nothing else is there:
     `[tool.poetry.dev-dependencies]` — none of which is named anywhere in the
     code.
 
-    Three things keep it off ordinary configuration. A matched key is not
+    Four things keep it off ordinary configuration. A matched key is not
     descended into, so a package called `dependencies` inside a pixi or Poetry
     table is not read as a second declaration. Only an array or a table
     counts, which is what excludes hatch's boolean
-    `require-runtime-dependencies`. And two exclusions are carried explicitly,
+    `require-runtime-dependencies`. Two exclusions are carried explicitly,
     both against a published schema: `[tool.ruff.analyze.include-dependencies]`
     maps file paths to file globs rather than to packages, and uv's
     `constraint-`, `build-constraint-`, `override-`, `exclude-` and rye's
     `excluded-dependencies` are documented as never installing anything, so a
-    project using them is read in full and does not warn.
+    project using them is read in full and does not warn. And the conda
+    namespaces are out of scope — see below.
   - A declaration whose value is not the shape the reader takes, such as
     `dependencies = "ruff"` instead of a list.
 
@@ -190,6 +191,25 @@ nothing else is there:
   this project exists to catch. The list is what was measured, not what was
   assumed, and it is not a proof that nothing else is missing: any tool that
   spells its dependency list some third way is silent until someone finds it.
+- **Conda dependencies are out of scope, and are not checked at all.** This is
+  a decision rather than a gap, and it is stated here because the difference is
+  invisible from the outside: a pixi or conda-lock project gets a clean run, and
+  a clean run must not be read as "these dependencies were checked".
+
+  Plumb checks one registry, PyPI. A hallucinated conda package is a real
+  defect and Plumb does not look for it. Concretely, no warning and no lookup
+  for `[tool.pixi.dependencies]`, `[tool.pixi.feature.<name>.dependencies]`,
+  pixi's `build-`, `host-` and `run-dependencies` under `package`, its
+  per-platform `[tool.pixi.target.<platform>.…]` variants, or
+  `[tool.conda-lock.dependencies]`. The PyPI side of the same file *is*
+  checked: `[tool.pixi.pypi-dependencies]` and its scoped forms warn like any
+  other unread table.
+
+  Excluded rather than warned about because this gap has no resolution path.
+  Every other one ends when someone teaches Plumb the format; this one never
+  would, since Plumb will not look a conda name up on PyPI — so it would be a
+  permanent warning that no action could clear, landing on projects that did
+  nothing wrong. Checking conda needs a conda rule with its own evidence.
 - A manifest that is not valid UTF-8 is not checked, and says so the same way:
   one Latin-1 byte costs the whole file, nothing in it is looked up, and the
   run warns — `requirements.txt was not fully read: not valid UTF-8 at byte 5`
