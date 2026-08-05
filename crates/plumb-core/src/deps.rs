@@ -88,6 +88,17 @@ mod tests {
     }
 
     #[test]
+    fn treats_an_empty_before_set_the_same_as_a_missing_manifest() {
+        let before = BTreeSet::new();
+        let after = set(&["ruff", "httpx"]);
+
+        let added = added("pyproject.toml", Some(&before), &after);
+
+        let names: Vec<&str> = added.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["httpx", "ruff"]);
+    }
+
+    #[test]
     fn reports_nothing_when_a_dependency_is_only_removed() {
         let before = set(&["ruff", "httpx"]);
         let after = set(&["ruff"]);
@@ -101,5 +112,21 @@ mod tests {
         let after = set(&["ruff"]);
 
         assert!(added("requirements.txt", Some(&before), &after).is_empty());
+    }
+
+    /// Fails to compile the moment a second `Ecosystem` variant is added.
+    ///
+    /// `added` hard-codes `Ecosystem::PyPi`, which is correct while only
+    /// Python manifests are parsed. Without this test, landing a parser for
+    /// another ecosystem changes nothing here and nothing stops compiling —
+    /// Task 7 would then look an npm name up on PyPI, blocking a build over a
+    /// package that was never meant to be there. Exhaustiveness does not need
+    /// a second variant to exist; it fires the moment one is added, which is
+    /// precisely when this code becomes wrong.
+    #[test]
+    fn ecosystem_is_hard_coded_and_must_be_revisited_when_a_second_one_lands() {
+        match Ecosystem::PyPi {
+            Ecosystem::PyPi => {}
+        }
     }
 }
