@@ -1,6 +1,58 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
+//! What a rule violation is, and what it costs.
+//!
+//! A tier is not a severity, it is the strength of the evidence behind the
+//! rule. Whether a finding blocks the build follows from what is known about
+//! the defect it reports, not from how annoying the defect feels, which is why
+//! `source` is a required field: a finding that cannot name the taxonomy
+//! section justifying its rule has no business blocking anyone's build.
+
+use serde::Serialize;
+
+/// How strongly a rule is enforced, and on what strength of evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Tier {
+    /// Peer-reviewed evidence, objective detection. Blocks the build.
+    A,
+    /// Preprint evidence, or thresholds still needing calibration. Warns.
+    B,
+    /// Instrumentation for open hypotheses. Never affects the exit code.
+    C,
+    /// Style consistency, delegated to formatters. Excluded from defect
+    /// counts, so like `C` it never affects the exit code.
+    Hygiene,
+}
+
+/// A single rule violation, with the evidence that justifies the rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Finding {
+    pub rule: String,
+    pub tier: Tier,
+    pub message: String,
+    pub location: String,
+    /// The taxonomy section justifying this rule. Callers must supply one;
+    /// the type makes it mandatory, nothing here checks that it is non-empty.
+    pub source: String,
+}
+
+/// Maps findings to a process exit code: 0 clean, 1 Tier A, 2 warnings only.
+///
+/// The three codes are a public contract — CI blocks on 1 — so they may not be
+/// renumbered. `Tier::C` and `Tier::Hygiene` are deliberately absent from the
+/// mapping: instrumentation and style are excluded from defect counts, and a
+/// run reporting nothing else is a clean run.
+pub fn exit_code(findings: &[Finding]) -> i32 {
+    if findings.iter().any(|f| f.tier == Tier::A) {
+        return 1;
+    }
+    if findings.iter().any(|f| f.tier == Tier::B) {
+        return 2;
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
