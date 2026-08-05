@@ -10,13 +10,20 @@
 //! report a phantom addition when a manifest is merely respelled.
 //!
 //! A name this module does not extract is not a name that is absent, and a
-//! [`Manifest`] says which of the two it is. Poetry's `[tool.poetry]`, PEP 735
-//! dependency groups and requirements includes are all unread here, and each is
-//! reported as a [`Gap`] instead of passing for a file with nothing in it. The
-//! rule that keeps a gap worth reading is that it is raised on evidence of an
-//! unread declaration and never on the absence of one: a `pyproject.toml`
+//! [`Manifest`] says which of the two it is. `[tool.poetry.dependencies]`, PEP
+//! 735 `[dependency-groups]` and requirements includes are all unread here, and
+//! each is reported as a [`Gap`] instead of passing for a file with nothing in
+//! it. The rule that keeps a gap worth reading is that it is raised on evidence
+//! of an unread declaration and never on the absence of one: a `pyproject.toml`
 //! holding only a build system and some tool settings declares no runtime
 //! dependencies and produces no gap.
+//!
+//! The coverage is not total, and the parts outside it are still silent.
+//! Poetry's per-group tables — `[tool.poetry.group.dev.dependencies]` — raise
+//! no gap of their own, so a project that used only those and no
+//! `[tool.poetry.dependencies]` would still read as understood. Poetry writes
+//! the main table in practice, which is why that shape is the one covered
+//! first; the remainder is a known hole rather than a decided non-goal.
 
 use std::collections::BTreeSet;
 
