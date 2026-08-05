@@ -375,6 +375,29 @@ mod tests {
         assert_eq!(staged, 1, "staging is what makes the manifest visible");
     }
 
+    /// A directory with a space in its name is ordinary, and git terminates
+    /// the path with a tab when it contains one. End to end because that is
+    /// where it bites: the parser hands on a path ending in a tab, the
+    /// manifest dispatch does not recognise it, and the gate reports a clean
+    /// run over a manifest it never opened.
+    #[test]
+    fn a_manifest_under_a_path_containing_a_space_is_checked() {
+        let dir = repo_with(&[("my project/requirements.txt", "ruff==0.4.0\n")]);
+        write(
+            dir.path(),
+            "my project/requirements.txt",
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        );
+
+        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(code, 1, "output was: {output}");
+        assert!(
+            output.contains("my project/requirements.txt"),
+            "output was: {output}"
+        );
+    }
+
     #[test]
     fn a_missing_dependency_in_a_pyproject_is_flagged() {
         let dir = repo_with(&[(

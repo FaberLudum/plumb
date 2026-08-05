@@ -242,6 +242,51 @@ index 1111111..2222222 100644
         assert_eq!(files[0].added_lines, vec!["++ b/phantom.txt"]);
     }
 
+    /// A tab ends the filename field of a `---`/`+++` line. git appends one
+    /// whenever the path contains a space, and other tools put a timestamp
+    /// after it.
+    ///
+    /// Keeping the terminator makes the path match nothing: `manifest::parse`
+    /// dispatches on the file name, and `requirements.txt\t` is not
+    /// `requirements.txt`. So a manifest under `my project/` is not reported
+    /// as unreadable, it is silently never checked — and a directory with a
+    /// space in it is ordinary, not exotic.
+    #[test]
+    fn strips_the_tab_that_terminates_a_path_containing_a_space() {
+        const DIFF: &str = "\
+diff --git a/my project/requirements.txt b/my project/requirements.txt
+index 1111111..2222222 100644
+--- a/my project/requirements.txt\t
++++ b/my project/requirements.txt\t
+@@ -1 +1,2 @@
+ ruff==0.4.0
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "my project/requirements.txt");
+        assert_eq!(files[0].added_lines, vec!["requestz==2.31.0"]);
+    }
+
+    /// The same field rule, with the timestamp a POSIX unified diff carries.
+    /// Only the terminator and what follows it are dropped, never part of a
+    /// name — a path with no tab must survive untouched, which every other
+    /// test here covers.
+    #[test]
+    fn drops_a_timestamp_following_the_path() {
+        const DIFF: &str = "\
+diff --git a/requirements.txt b/requirements.txt
+--- a/requirements.txt\t2026-08-05 10:00:00.000000000 +0200
++++ b/requirements.txt\t2026-08-05 10:05:00.000000000 +0200
+@@ -1 +1,2 @@
+ ruff==0.4.0
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "requirements.txt");
+    }
+
     #[test]
     fn records_a_newly_added_file() {
         const DIFF: &str = "\
