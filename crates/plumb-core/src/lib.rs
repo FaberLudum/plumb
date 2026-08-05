@@ -5,3 +5,4 @@
 //! the filesystem, or subprocesses; that all lives in `plumb-cli`.
 
 pub mod diff;
+pub mod manifest;
