@@ -1,284 +1,284 @@
-# Tassonomia empirica dei difetti del codice generato da LLM
+# Empirical taxonomy of defects in LLM-generated code
 
-**Versione:** 1.0
-**Data:** 2026-08-05
-**Stato:** base di evidenza per lo Strato 0 del framework
+**Version:** 1.0
+**Date:** 2026-08-05
+**Status:** evidence base for the framework's Layer 0
 
 ---
 
-## 1. A cosa serve questo documento
+## 1. What this document is for
 
-Questo è il fondamento empirico del framework. Ogni regola dello Strato 0 deve
-essere tracciabile a una riga di questa tassonomia. **Regola senza fonte, regola
-che non entra.**
+This is the framework's empirical foundation. Every Layer 0 rule must trace
+back to a row in this taxonomy. **No source, no rule.**
 
-Il documento serve anche al contrario: elenca i difetti che il framework
-**non** deve combattere, perché i dati dicono che non esistono o che il codice
-AI se la cava meglio dell'umano. Enforcement sprecato su un non-difetto costa
-attrito e credibilità.
+The document also works in reverse: it lists the defects the framework must
+**not** fight, because the data says they either do not exist or the AI
+outperforms humans on them. Enforcement spent on a non-defect costs friction
+and credibility.
 
-## 2. Metodo
+## 2. Method
 
-Ogni voce riporta fonte citabile, metrica, dimensione dell'effetto e limiti.
-Le fonti sono classificate su due assi indipendenti.
+Each entry records a citable source, the metric, the effect size and the
+study's limits. Sources are classified along two independent axes.
 
-**Forza dell'evidenza:**
+**Strength of evidence:**
 
-| Categoria | Significato |
+| Category | Meaning |
 |---|---|
-| MISURATO | Dato pubblicato con metrica esplicita e campione dichiarato |
-| CONTESTATO | Misurato, ma un'altra fonte con metrica diversa conclude l'opposto |
-| QUALITATIVO | Osservato e descritto, non quantificato con una metrica consolidata |
-| NON MISURATO | Nessuno studio noto lo misura. Non equivale a "falso" |
+| MEASURED | Published data with an explicit metric and a stated sample |
+| CONTESTED | Measured, but another source using a different metric concludes the opposite |
+| QUALITATIVE | Observed and described, not quantified with an established metric |
+| UNMEASURED | No known study measures it. This is not the same as "false" |
 
-**Stato di verifica** (chi ha controllato la fonte primaria):
+**Verification status** (who checked the primary source):
 
-| Stato | Significato |
+| Status | Meaning |
 |---|---|
-| VERIFICATA | Fonte primaria aperta e controllata il 2026-08-05: titolo, autori e cifre corrispondono |
-| RIPORTATA | Proviene dalla ricerca di letteratura, fonte primaria non ancora aperta |
+| VERIFIED | Primary source opened and checked on 2026-08-05: title, authors and figures match |
+| REPORTED | Comes from the literature sweep, primary source not yet opened |
 
-Una fonte RIPORTATA non è sospetta, è solo non ancora controllata. Prima di
-usarla per giustificare un gate bloccante va promossa a VERIFICATA.
+A REPORTED source is not suspect, merely unchecked. It must be promoted to
+VERIFIED before it can justify a blocking gate.
 
-## 3. Il risultato centrale
+## 3. The central finding
 
-> **A livello di unità il codice AI è pari o migliore di quello umano.
-> A livello di sistema degrada.**
+> **At the unit level, AI code is equal to or better than human code.
+> At the system level, it degrades.**
 
-Complessità ciclomatica: 2,62 AI contro 2,47 umana, differenza trascurabile.
-Funzioni AI più piccole di quelle umane. Leggibilità giudicata superiore
-nell'RCT GitHub. Duplicazione su file reali più bassa che nel codice umano.
+Cyclomatic complexity: 2.62 for AI against 2.47 for humans, a negligible
+difference. AI functions are smaller than human ones. Readability was judged
+higher in the GitHub RCT. Duplication measured on real files is lower than in
+human code.
 
-Sull'altro versante: il 22,7% del debito introdotto dall'AI è ancora vivo
-all'ultima versione, le dipendenze caricate a runtime sono 13,5 volte quelle
-dichiarate, e il decadimento architetturale cresce col volume di codice
-prodotto.
+On the other side: 22.7% of AI-introduced debt is still alive at the latest
+version, runtime dependencies outnumber declared ones by 13.5x, and
+architectural decay grows with the volume of code produced.
 
-Da qui discendono due decisioni di progetto, entrambe non negoziabili.
+Two design decisions follow, both non-negotiable.
 
-**Prima: questo non è un framework di code quality.** I vincoli operano a
-livello di sistema, non di riga. Le metriche classiche — lunghezza funzione,
-complessità ciclomatica, nesting — sono tarate sui difetti umani e sul codice
-AI non trovano nulla mentre il sistema si degrada.
+**First: this is not a code quality framework.** Constraints operate at the
+system level, not the line level. The classic metrics — function length,
+cyclomatic complexity, nesting — are calibrated on human defects. On AI code
+they find nothing while the system decays underneath them.
 
-**Seconda: i vincoli devono essere eseguibili, non scritti.** Zhu et al.
-verificano che né la correttezza funzionale né un prompting dettagliato
-mitigano il decadimento architetturale. Un framework fatto di sole regole in
-markdown è già stato provato e non funziona.
+**Second: constraints must be executable, not written.** Zhu et al. verify
+that neither functional correctness nor detailed prompting mitigates
+architectural decay. A framework made only of markdown rules has already been
+tried and does not work.
 
-## 4. Difetti misurati
+## 4. Measured defects
 
 ### 4.1 Package hallucination
 
-| Campo | Valore |
+| Field | Value |
 |---|---|
-| Categoria | MISURATO |
-| Verifica | VERIFICATA |
-| Fonte | Spracklen et al., *We Have a Package for You!*, USENIX Security 2025 (peer-reviewed) |
-| Replica | Churilov, arXiv 2605.17062 (2026-05), modelli frontier |
-| Metrica | Percentuale di pacchetti inesistenti sui pacchetti citati |
-| Effetto 2025 | 440.445 su 2,23M campioni (19,7%); open-source 21,7% contro commerciali 5,2% |
-| Effetto 2026 | 4,62% (Claude Haiku 4.5) – 6,10% (GPT-5.4-mini) su circa 200k prompt |
-| Limiti | Python e JavaScript; sensibile alla temperatura; la replica copre 5 modelli |
+| Category | MEASURED |
+| Verification | VERIFIED |
+| Source | Spracklen et al., *We Have a Package for You!*, USENIX Security 2025 (peer-reviewed) |
+| Replication | Churilov, arXiv 2605.17062 (2026-05), frontier models |
+| Metric | Share of non-existent packages among packages referenced |
+| Effect, 2025 | 440,445 of 2.23M samples (19.7%); open-source 21.7% against commercial 5.2% |
+| Effect, 2026 | 4.62% (Claude Haiku 4.5) to 6.10% (GPT-5.4-mini) across roughly 200k prompts |
+| Limits | Python and JavaScript only; temperature-sensitive; the replication covers 5 models |
 
-Il tasso è calato di 3-4 volte sui modelli recenti ma non è a zero, e la
-replica 2026 segnala che 53 nomi allucinati restano registrabili da un
-attaccante. Il 43% dei nomi allucinati si ripete identico su tutte e dieci le
-run, il che rende lo slopsquatting un attacco praticabile e non teorico.
+The rate has dropped three- to fourfold on recent models but is not zero, and
+the 2026 replication notes that 53 hallucinated names remain registrable by an
+attacker. 43% of hallucinated names recur identically across all ten runs,
+which makes slopsquatting a practical attack rather than a theoretical one.
 
-**Nota di manutenzione:** questa è la voce che invecchia più in fretta. Va
-ricontrollata a ogni cambio di modello di riferimento.
+**Maintenance note:** this is the entry that ages fastest. Recheck it whenever
+the reference model changes.
 
-### 4.2 Vulnerabilità di sicurezza
+### 4.2 Security vulnerabilities
 
-| Campo | Valore |
+| Field | Value |
 |---|---|
-| Categoria | MISURATO |
-| Verifica | RIPORTATA |
-| Fonti | Pearce et al., IEEE S&P 2022 (peer-reviewed); Perry et al., ACM CCS 2023 (peer-reviewed); Veracode 2025 (vendor) |
-| Metrica | Percentuale di programmi o campioni con CWE rilevata da analisi statica |
-| Effetto | Pearce: 39,33% delle opzioni top e 40,73% del totale su 1.689 programmi. Perry: codice meno sicuro su 4 task su 5. Veracode: 45% dei campioni fallisce i test |
-| Limiti | Pearce e Perry usano modelli 2021-2022, oggi obsoleti; scenari costruiti per essere sensibili; nessun prompt orientato alla sicurezza |
+| Category | MEASURED |
+| Verification | REPORTED |
+| Sources | Pearce et al., IEEE S&P 2022 (peer-reviewed); Perry et al., ACM CCS 2023 (peer-reviewed); Veracode 2025 (vendor) |
+| Metric | Share of programs or samples with a CWE flagged by static analysis |
+| Effect | Pearce: 39.33% of top options and 40.73% of all options across 1,689 programs. Perry: less secure code on 4 of 5 tasks. Veracode: 45% of samples fail |
+| Limits | Pearce and Perry use 2021-2022 models, now obsolete; scenarios built to be security-sensitive; no security-oriented prompting |
 
-Tre fonti indipendenti, di cui due peer-reviewed, convergono nella fascia
-40-45%. La convergenza vale più dei singoli numeri. Perry aggiunge un dato che
-conta per il design: chi usa l'assistente **crede** di aver scritto codice più
-sicuro. La percezione va nella direzione sbagliata, quindi il controllo non può
-essere lasciato al giudizio di chi scrive.
+Three independent sources, two of them peer-reviewed, converge on the 40-45%
+band. The convergence matters more than any single number. Perry adds a
+finding that shapes the design: developers using an assistant **believe** they
+wrote more secure code. Perception moves the wrong way, so the check cannot be
+left to the judgement of whoever wrote the code.
 
-Il valore assoluto va però trattato come limite superiore: gli studi usano
-scenari scelti per essere rischiosi e modelli vecchi.
+The absolute value should be read as an upper bound: the studies use scenarios
+chosen to be risky and models that are now several generations old.
 
-### 4.3 Dipendenze non dichiarate
+### 4.3 Undeclared dependencies
 
-| Campo | Valore |
+| Field | Value |
 |---|---|
-| Categoria | MISURATO |
-| Verifica | VERIFICATA |
-| Fonte | Vangala, Adibifar, Gehani, Malik, arXiv 2512.22387 (preprint AAAI) |
-| Metrica | Pacchetti dichiarati contro pacchetti effettivamente caricati a runtime |
-| Effetto | Moltiplicatore medio 13,5x; solo il 68,3% dei progetti esegue senza interventi; Python 89,2%, Java 44,0% |
-| Limiti | 300 progetti, 3 agent, ambiente controllato; task sintetici |
+| Category | MEASURED |
+| Verification | VERIFIED |
+| Source | Vangala, Adibifar, Gehani, Malik, arXiv 2512.22387 (AAAI preprint) |
+| Metric | Declared packages against packages actually loaded at runtime |
+| Effect | 13.5x average multiplier; only 68.3% of projects run out of the box; Python 89.2%, Java 44.0% |
+| Limits | 300 projects, 3 agents, controlled environment; synthetic tasks |
 
-Attenzione all'attribuzione: la ricerca iniziale citava "Bhandari et al.", il
-primo autore reale è **Vangala**.
+Watch the attribution: the initial sweep cited "Bhandari et al."; the actual
+first author is **Vangala**.
 
-Difetto pulito da rilevare: la distanza fra manifest e closure runtime è
-calcolabile in modo deterministico, senza euristiche.
+A clean defect to detect: the gap between manifest and runtime closure is
+computable deterministically, with no heuristics involved.
 
-### 4.4 Debito tecnico persistente
+### 4.4 Persistent technical debt
 
-| Campo | Valore |
+| Field | Value |
 |---|---|
-| Categoria | MISURATO |
-| Verifica | VERIFICATA |
-| Fonte | Liu, Widyasari, Zhao, Irsan, Chen, Lo, arXiv 2603.28592 (preprint) |
-| Metrica | Analisi statica prima e dopo commit con autore AI verificato |
-| Effetto | 484.366 issue su 302,6k commit in 6.299 repo; code smell l'89,3%; oltre il 15% dei commit di ogni assistente introduce almeno una issue; **22,7% ancora vivo all'ultima versione** |
-| Limiti | Solo commit con firma AI esplicita in Git, quindi campione auto-selezionato; solo debito a livello di codice, esclude quello architetturale |
+| Category | MEASURED |
+| Verification | VERIFIED |
+| Source | Liu, Widyasari, Zhao, Irsan, Chen, Lo, arXiv 2603.28592 (preprint) |
+| Metric | Static analysis before and after commits with a verified AI author |
+| Effect | 484,366 issues across 302.6k commits in 6,299 repos; code smells are 89.3%; over 15% of commits from every assistant introduce at least one issue; **22.7% still alive at the latest version** |
+| Limits | Only commits with an explicit AI signature in Git, so a self-selected sample; only code-level debt, architectural debt excluded |
 
-Il 22,7% è il numero che detta il design del gate: il debito introdotto **non
-viene ripulito dopo**. Un controllo che gira a valle arriva tardi. Deve
-intercettare al momento dell'introduzione, cioè sul diff.
+The 22.7% figure dictates the gate design: introduced debt **does not get
+cleaned up later**. A check that runs downstream arrives too late. It has to
+intercept at the moment of introduction, which means on the diff.
 
-### 4.5 Decadimento architetturale col volume
+### 4.5 Architectural decay scaling with volume
 
-| Campo | Valore |
+| Field | Value |
 |---|---|
-| Categoria | MISURATO (preprint) |
-| Verifica | VERIFICATA |
-| Fonte | Zhu, Tsantalis, Rigby, *AI-Generated Smells*, arXiv 2605.02741 (preprint) |
-| Metrica | Smell architetturali e accoppiamento, su task a file singolo e su sistemi generati da agent |
-| Effetto | **Volume-Quality Inverse Law**: il volume di codice è un predittore quasi perfetto del degrado strutturale. **Reasoning-Complexity Trade-off**: modelli più capaci producono codice più gonfio e accoppiato |
-| Limiti | Preprint maggio 2026, non ancora peer-reviewed; nessuna replica indipendente |
+| Category | MEASURED (preprint) |
+| Verification | VERIFIED |
+| Source | Zhu, Tsantalis, Rigby, *AI-Generated Smells*, arXiv 2605.02741 (preprint) |
+| Metric | Architectural smells and coupling, across single-file tasks and agent-generated systems |
+| Effect | **Volume-Quality Inverse Law**: code volume is a near-perfect predictor of structural degradation. **Reasoning-Complexity Trade-off**: more capable models produce more bloated and coupled code |
+| Limits | May 2026 preprint, not yet peer-reviewed; no independent replication |
 
-È la fonte più importante per il framework, per tre affermazioni:
+This is the most important source for the framework, for three claims:
 
-1. Il degrado **scala col volume**, non con la qualità del singolo pezzo.
-2. Modelli migliori peggiorano il problema, non lo risolvono. Aspettare il
-   prossimo modello non è una strategia.
-3. **Né la correttezza funzionale né il prompting dettagliato lo mitigano.**
+1. Decay **scales with volume**, not with the quality of any individual piece.
+2. Better models make the problem worse, not better. Waiting for the next
+   model is not a strategy.
+3. **Neither functional correctness nor detailed prompting mitigates it.**
 
-Il punto 3 è il più consequenziale. Esclude empiricamente il framework fatto di
-sole istruzioni e giustifica il costo dei gate eseguibili. Gli autori concludono
-che serve dotare gli agent di "explicit architectural foresight", che è la
-formulazione accademica dell'architettura come contratto verificabile.
+Point 3 carries the most weight. It empirically rules out the
+instructions-only framework and justifies the cost of executable gates. The
+authors conclude that agents need "explicit architectural foresight", which is
+the academic phrasing of architecture as a verifiable contract.
 
-L'affermazione "Modular Mirage" attribuita a questo paper dalla ricerca
-iniziale **non compare nell'abstract** e non è stata confermata nel corpo. Non
-va citata finché non è verificata.
+The phrase "Modular Mirage" attributed to this paper by the initial sweep
+**does not appear in the abstract** and has not been confirmed in the body. Do
+not cite it until verified.
 
-### 4.6 Verbosità e nesting
+### 4.6 Verbosity and nesting
 
-| Campo | Valore |
+| Field | Value |
 |---|---|
-| Categoria | MISURATO, effetto piccolo |
-| Verifica | VERIFICATA (titolo e impianto; cifre di dettaglio RIPORTATE) |
-| Fonte | Mao, Zhao, Tang, Wang, Zhang, *A Large-Scale Comprehensive Measurement of AI-Generated Code in Real-World Repositories*, arXiv 2603.27130 |
-| Metrica | PLOC, SLOC, densità lessicale, profondità di nesting; 19.816 file AI contro 36.467 file umani abbinati |
-| Effetto | PLOC 256,6 contro 192,7; densità lessicale 0,531 contro 0,692 (d = -0,555); nesting massimo d = 0,172 |
-| Limiti | L'abstract stesso conclude che le differenze code-level nel mondo reale sono **piccole**; pipeline di detection euristica |
+| Category | MEASURED, small effect |
+| Verification | VERIFIED (title and design; detailed figures REPORTED) |
+| Source | Mao, Zhao, Tang, Wang, Zhang, *A Large-Scale Comprehensive Measurement of AI-Generated Code in Real-World Repositories*, arXiv 2603.27130 |
+| Metric | PLOC, SLOC, lexical density, nesting depth; 19,816 AI files against 36,467 matched human files |
+| Effect | PLOC 256.6 against 192.7; lexical density 0.531 against 0.692 (d = -0.555); max nesting d = 0.172 |
+| Limits | The abstract itself concludes that real-world code-level differences are **small**; heuristic detection pipeline |
 
-Il codice AI è più prolisso e leggermente più annidato, ma gli effect size sono
-da trascurabili a medi. **Non giustifica gate bloccanti.** L'unico segnale
-azionabile è la densità lessicale: gli umani comprimono di più, l'AI diluisce.
+AI code is wordier and slightly more nested, but the effect sizes run from
+negligible to medium. **This does not justify blocking gates.** The only
+actionable signal is lexical density: humans compress more, AI dilutes.
 
-## 5. Difetti che il framework NON deve combattere
+## 5. Defects the framework must NOT fight
 
-Questa sezione esiste per impedire di reintrodurre contromisure inutili.
+This section exists to stop useless countermeasures from creeping back in.
 
-| Presunto difetto | Perché no |
+| Alleged defect | Why not |
 |---|---|
-| Funzioni troppo lunghe | Funzioni AI 138,97 nodi AST contro 201,82 umani. L'AI scrive funzioni **più piccole** |
-| File monolitici | 6,62 funzioni per file AI contro 11,67 umane |
-| Complessità ciclomatica alta | 2,62 contro 2,47, d = 0,030, trascurabile. Altri studi trovano l'AI nettamente sotto l'umano |
-| Bassa leggibilità | RCT GitHub 2024: +3,62% leggibilità, +2,47% manutenibilità con assistente |
-| Duplicazione come metrica primaria | CONTESTATO: GitClear misura +8x sui commit, Mao misura 18,69% AI contro 25,89% umano sui file. Metriche diverse, conclusioni opposte |
+| Overly long functions | AI functions average 138.97 AST nodes against 201.82 for humans. AI writes **smaller** functions |
+| Monolithic files | 6.62 functions per file for AI against 11.67 for humans |
+| High cyclomatic complexity | 2.62 against 2.47, d = 0.030, negligible. Other studies place AI well below humans |
+| Poor readability | GitHub RCT 2024: +3.62% readability, +2.47% maintainability with an assistant |
+| Duplication as a primary metric | CONTESTED: GitClear measures +8x across commits, Mao measures 18.69% for AI against 25.89% for humans across files. Different metrics, opposite conclusions |
 
-Sulla duplicazione: il disaccordo è reale e non è un artefatto. GitClear
-osserva il flusso dei commit nel tempo, Mao lo stato dei file. Possono essere
-vere entrambe — si può duplicare molto durante la scrittura e avere comunque
-meno duplicazione a riposo. Finché la contraddizione non si scioglie, la
-duplicazione resta un segnale osservato, mai un gate bloccante.
+On duplication: the disagreement is real, not an artefact. GitClear observes
+the flow of commits over time, Mao observes the state of files. Both can be
+true — code can be duplicated heavily while being written and still end up
+less duplicated at rest. Until the contradiction resolves, duplication stays
+an observed signal and never a blocking gate.
 
-Nota trasversale sulla distribuzione, utile a capire perché i linter esistenti
-non bastano: il codice umano ha una **coda pesante**, poche funzioni enormi in
-mezzo a molte normali. Il codice AI è uniformemente moderato. Gli strumenti
-tradizionali cercano i picchi, e sul codice AI non ne trovano, mentre il
-sistema si degrada in modo diffuso e invisibile a quelle soglie.
+A cross-cutting note on distribution, which explains why existing tools fall
+short: human code has a **heavy tail**, a few enormous functions among many
+ordinary ones. AI code is uniformly moderate. Traditional tools hunt for peaks;
+on AI code they find none, while the system decays diffusely and invisibly
+below those thresholds.
 
-## 6. Verdetto sulle cinque ipotesi iniziali
+## 6. Verdict on the five initial hypotheses
 
-| ID | Ipotesi | Verdetto | Conseguenza |
+| ID | Hypothesis | Verdict | Consequence |
 |---|---|---|---|
-| H1 | Astrazione speculativa | QUALITATIVO, supporto parziale | Protocollo, nessun gate bloccante |
-| H2 | Crescita monolitica | **CONTRADDETTA** | Rimossa dal design |
-| H3 | Deriva tra sessioni | **NON MISURATA** | Ipotesi dichiarata; opportunità di misura |
-| H4 | Dependency sprawl | **CONFERMATA** | Gate bloccante Tier A |
-| H5 | Confini architetturali assenti | QUALITATIVO, rafforzato da Zhu | Gate Tier B |
+| H1 | Speculative abstraction | QUALITATIVE, partial support | Protocol, no blocking gate |
+| H2 | Monolithic growth | **CONTRADICTED** | Removed from the design |
+| H3 | Cross-session drift | **UNMEASURED** | Declared hypothesis; measurement opportunity |
+| H4 | Dependency sprawl | **CONFIRMED** | Tier A blocking gate |
+| H5 | Missing architectural boundaries | QUALITATIVE, strengthened by Zhu | Tier B gate |
 
-**Su H3.** Nessuno studio peer-reviewed né preprint misura la deriva di stile
-fra sessioni successive sullo stesso progetto. Esistono cose vicine ma diverse:
-l'incoerenza stilistica su singola generazione (Wang et al. 2025), i trend di
-naming a livello di ecosistema (Xu et al.), la consistenza nel refactoring.
-Nessuna è la deriva cross-sessione.
+**On H3.** No peer-reviewed study or preprint measures style drift across
+successive sessions on the same project. Adjacent but different things exist:
+stylistic inconsistency within a single generation (Wang et al. 2025),
+ecosystem-level naming trends (Xu et al.), behavioural consistency in
+refactoring. None of them is cross-session drift.
 
-Non è stata cercata e non trovata: non è stata cercata affatto, perché servono
-repository longitudinali con attribuzione di sessione, un dato che quasi nessuno
-conserva. Resta plausibile ed è un buco di ricerca aperto.
+It was not looked for and missed; it was not looked for at all, because
+measuring it needs longitudinal repositories with session attribution, a kind
+of data almost nobody keeps. It remains plausible and is an open research gap.
 
-Il detector del framework **può misurarla** — la coerenza delle convenzioni fra
-commit nel tempo è calcolabile. Costruiamo lo strumento senza rivendicare il
-risultato. Se dai nostri dati emerge un segnale, sarà un contributo; finché non
-emerge, H3 resta etichettata come ipotesi.
+The framework's detector **can measure it** — convention consistency across
+commits over time is computable. Build the instrument without claiming the
+finding. If a signal emerges from our own data it will be a contribution;
+until then H3 stays labelled as a hypothesis.
 
-## 7. Da tassonomia a regole
+## 7. From taxonomy to rules
 
-| Tier | Regola | Fonte | Enforcement |
+| Tier | Rule | Source | Enforcement |
 |---|---|---|---|
-| A | Ogni pacchetto verificato nel registry prima dell'uso | 4.1 | Bloccante |
-| A | SAST obbligatorio sui diff a contributo AI | 4.2 | Bloccante |
-| A | Dipendenze dichiarate coincidono con la closure runtime | 4.3 | Bloccante |
-| A | Nuova dipendenza esterna richiede giustificazione esplicita | 4.3 | Bloccante |
-| B | Controllo del volume come indicatore anticipatore di degrado | 4.5 | Warning |
-| B | Confini architetturali dichiarati e verificati sugli import | 4.5, H5 | Warning, promuovibile |
-| B | Analisi del debito sul diff, al momento dell'introduzione | 4.4 | Warning |
-| C | Coerenza delle convenzioni fra sessioni | H3 | Solo misura |
+| A | Every package verified against the registry before use | 4.1 | Blocking |
+| A | SAST mandatory on AI-contributed diffs | 4.2 | Blocking |
+| A | Declared dependencies match the runtime closure | 4.3 | Blocking |
+| A | A new external dependency requires explicit justification | 4.3 | Blocking |
+| B | Volume control as a leading indicator of decay | 4.5 | Warning |
+| B | Architectural boundaries declared and checked against imports | 4.5, H5 | Warning, promotable |
+| B | Debt analysis on the diff, at the moment of introduction | 4.4 | Warning |
+| C | Convention consistency across sessions | H3 | Measurement only |
 
-I gate Tier A sono bloccanti perché poggiano su fonti peer-reviewed e rilevano
-condizioni oggettive: un pacchetto esiste o non esiste, una dipendenza è
-dichiarata o non lo è. Nessun giudizio, nessun falso positivo di merito.
+Tier A gates block because they rest on peer-reviewed sources and detect
+objective conditions: a package either exists or it does not, a dependency is
+either declared or it is not. No judgement calls, no false positives of
+substance.
 
-I Tier B poggiano su preprint non ancora replicati e su soglie che vanno
-calibrate per progetto. Restano warning finché non abbiamo dati nostri.
+Tier B rests on preprints without independent replication and on thresholds
+that need per-project calibration. These stay warnings until we have data of
+our own.
 
-## 8. Condizioni di invalidamento
+## 8. Invalidation conditions
 
-Questa tassonomia è datata per costruzione. Va rivista se:
+This taxonomy is dated by construction. Revisit it if:
 
-- Zhu et al. viene smentito o non replicato: cade la giustificazione dei Tier B
-- Il tasso di package hallucination scende sotto l'1% sui modelli di
-  riferimento: il gate 4.1 passa da bloccante a warning
-- Uno studio peer-reviewed su progetti greenfield reali misura i confini
-  architetturali o la deriva cross-sessione con d > 0,5: H3 e H5 salgono a
-  MISURATO
-- I preprint del 2026 qui citati vengono pubblicati con numeri diversi da
-  quelli riportati
+- Zhu et al. is refuted or fails to replicate: the justification for Tier B falls
+- Package hallucination drops below 1% on the reference models: gate 4.1 moves
+  from blocking to warning
+- A peer-reviewed study on real greenfield projects measures architectural
+  boundaries or cross-session drift with d > 0.5: H3 and H5 rise to MEASURED
+- The 2026 preprints cited here are published with figures different from
+  those reported
 
-**Prossima revisione: 2027-02-05**, o prima se cambia il modello di riferimento.
+**Next review: 2027-02-05**, or sooner if the reference model changes.
 
-## 9. Avvertenze permanenti
+## 9. Standing caveats
 
-- Quattro fonti su sei sono preprint 2025-2026 non ancora peer-reviewed.
-- Gli studi di sicurezza usano modelli 2021-2022. Il 40-45% è verosimilmente
-  un limite superiore per i modelli attuali.
-- I report vendor hanno conflitti d'interesse in direzioni opposte: GitClear e
-  Veracode hanno interesse a mostrare problemi, GitHub a mostrarne pochi.
-  Inclusi solo dove la metodologia è ispezionabile, sempre etichettati.
-- La differenza fra risultati su benchmark e risultati su repository reali è la
-  prima causa di conclusioni opposte in questa letteratura. Va esplicitata ogni
-  volta che si cita un numero.
-- In Mao et al. molte differenze sono statisticamente significative ma
-  trascurabili come magnitudine, per via del campione enorme. Leggere sempre
-  p-value e Cohen's d insieme.
+- Four of the six primary sources are 2025-2026 preprints, not yet peer-reviewed.
+- The security studies use 2021-2022 models. The 40-45% band is most likely an
+  upper bound for current models.
+- Vendor reports carry conflicts of interest in opposite directions: GitClear
+  and Veracode benefit from showing problems, GitHub from showing few. Included
+  only where the methodology is inspectable, and always labelled.
+- The gap between benchmark results and real-repository results is the leading
+  cause of opposite conclusions in this literature. State it every time a
+  number is cited.
+- In Mao et al. many differences are statistically significant yet negligible
+  in magnitude, because the sample is enormous. Always read the p-value and
+  Cohen's d together.
