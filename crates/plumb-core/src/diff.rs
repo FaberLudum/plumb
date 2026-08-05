@@ -10,33 +10,36 @@ pub struct ChangedFile {
 
 /// Parses `git diff` output into one entry per changed file.
 ///
-/// A file is recorded when a `+++ b/...` post-image header directly follows a
-/// `--- ` pre-image header, which git always emits alongside it. Requiring the
-/// pair keeps an added line whose content begins with `++ ` from being mistaken
-/// for a header. Only the post-image path and added lines are extracted; hunk
-/// offsets, removals and renames are deliberately ignored.
+/// Headers are only recognised inside a file section's header block — between
+/// a `diff --git ` line and the section's first `@@ `. Inside a hunk body every
+/// line carries a prefix, so an unprefixed line at column zero is always
+/// structural and content can never be mistaken for a header. Only the
+/// post-image path and added lines are extracted; hunk offsets, removals and
+/// renames are deliberately ignored.
 pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
-    let mut after_pre_image_header = false;
+    let mut in_file_header = false;
 
     for line in diff.lines() {
-        let is_pre_image_header = line.starts_with("--- ");
-
-        if after_pre_image_header && let Some(path) = line.strip_prefix("+++ ") {
-            let path = path.strip_prefix("b/").unwrap_or(path);
-            if path != "/dev/null" {
-                files.push(ChangedFile {
-                    path: path.to_string(),
-                    added_lines: Vec::new(),
-                });
+        if line.starts_with("diff --git ") {
+            in_file_header = true;
+        } else if line.starts_with("@@ ") {
+            in_file_header = false;
+        } else if in_file_header {
+            if let Some(path) = line.strip_prefix("+++ ") {
+                let path = path.strip_prefix("b/").unwrap_or(path);
+                if path != "/dev/null" {
+                    files.push(ChangedFile {
+                        path: path.to_string(),
+                        added_lines: Vec::new(),
+                    });
+                }
             }
         } else if let Some(added) = line.strip_prefix('+')
             && let Some(current) = files.last_mut()
         {
             current.added_lines.push(added.to_string());
         }
-
-        after_pre_image_header = is_pre_image_header;
     }
 
     files
