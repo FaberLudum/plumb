@@ -453,10 +453,16 @@ mod tests {
     /// the larger blind spot below read as handled. A CI checkout has a
     /// **clean tree**: `git diff HEAD` lists nothing, so the run checks
     /// nothing and exits 0 no matter what the commit under test added. The
-    /// scope of `--diff` is the working tree and the index against HEAD, and
-    /// anything already committed is outside it — see
+    /// scope of `--diff` is the working tree against HEAD, and anything
+    /// already committed is outside it — see
     /// `a_committed_change_is_outside_the_scope_of_diff`, which pins that
     /// directly rather than leaving it to a comment.
+    ///
+    /// Note what staging does and does not do here. It does not put the
+    /// staged *content* in scope — `git diff HEAD` compares the working tree,
+    /// not the index. What it does is make the file **tracked**, and an
+    /// untracked file is not reported at all. That is the whole of the index's
+    /// role in this gate, and it is what this test pins.
     ///
     /// Pinned so the limitation is visible rather than lurking: whoever
     /// changes it will delete this test on purpose.
@@ -476,9 +482,9 @@ mod tests {
         assert_eq!(staged, 1, "staging is what makes the manifest visible");
     }
 
-    /// The scope of `--diff` is the working tree and the index against HEAD,
-    /// so a change that is already committed has nothing left to compare and
-    /// is not checked at all.
+    /// The scope of `--diff` is the working tree against HEAD, so a change
+    /// that is already committed has nothing left to compare and is not
+    /// checked at all.
     ///
     /// Recorded, not endorsed, and it is the sharpest edge this version has.
     /// The same content blocks while it is uncommitted and passes the moment
@@ -537,24 +543,38 @@ mod tests {
         );
     }
 
-    /// A partially staged manifest is checked on the side that is not being
-    /// committed.
+    /// A staged addition is invisible once the working tree matches HEAD
+    /// again.
     ///
-    /// Recorded, not endorsed. `git diff HEAD` lists a path when *either* the
-    /// index or the worktree differs from HEAD, and the after-side is then
-    /// read from the **worktree**. For a manifest that is staged one way and
-    /// left another way on disk those are different files, and the gate reads
-    /// the one that is not about to be committed. Here the commit lands with a
-    /// package PyPI does not have, and the gate said nothing.
+    /// Recorded, not endorsed. `changed_paths` runs `git diff --name-only -z
+    /// HEAD` with no `--cached`, which compares the **working tree** against
+    /// HEAD and says nothing about the index. So a path is listed only when
+    /// the working tree differs, and an addition that is staged and then
+    /// reverted on disk is not listed at all — the manifest is never opened.
+    /// Measured on git 2.47.1, with the addition staged and the working tree
+    /// restored to HEAD content:
     ///
-    /// This defeats the pre-commit use case specifically, which is the one
-    /// place a gate on a working diff is meant to be wired in.
+    /// ```text
+    /// git diff --cached --name-only HEAD  ->  requirements.txt
+    /// git diff --name-only HEAD           ->  (nothing)
+    /// ```
+    ///
+    /// The commit then lands the package, because `git commit` commits the
+    /// index. This defeats the pre-commit use case specifically, which is the
+    /// one place a gate on a working diff is meant to be wired in.
+    ///
+    /// An earlier version of this comment said `git diff HEAD` lists a path
+    /// when *either* the index or the working tree differs from HEAD. That is
+    /// false — it is the `--cached` form that consults the index — and the two
+    /// lines above are what settles it. The assertions below were right for
+    /// the wrong stated reason.
     ///
     /// Not fixed in this version, and the obvious fix is worse than it looks.
     /// Reading the after-side from `git show :<path>` — the index — regresses
     /// the case the README leads with: an ordinary unstaged edit has an index
     /// copy identical to HEAD, so it would add nothing and report nothing.
-    /// Measured on git 2.47.1, with `requirements.txt` edited and not staged:
+    /// Measured on the same git, with `requirements.txt` edited and not
+    /// staged:
     ///
     /// ```text
     /// git diff --name-only HEAD  ->  requirements.txt
@@ -563,12 +583,12 @@ mod tests {
     /// git show :requirements.txt ->  ruff==0.4.0
     /// ```
     ///
-    /// So the honest fix is the union of the index and the worktree as the
+    /// So the honest fix is the union of the index and the working tree as the
     /// after-side, which changes what "added" means and needs its own round of
     /// evidence. Until then the README says the pre-commit story is not yet
     /// honest.
     #[test]
-    fn a_partially_staged_manifest_is_checked_on_the_wrong_side() {
+    fn a_staged_addition_is_invisible_once_the_working_tree_matches_head() {
         let dir = repo_with_requirements("ruff==0.4.0\n");
         write(
             dir.path(),
@@ -576,10 +596,19 @@ mod tests {
             "ruff==0.4.0\nrequestz==2.31.0\n",
         );
         run_git(dir.path(), &["add", "requirements.txt"]);
-        // The worktree goes back to what HEAD holds; the index keeps the
+        // The working tree goes back to what HEAD holds; the index keeps the
         // addition. `git commit` will commit the index.
         write(dir.path(), "requirements.txt", "ruff==0.4.0\n");
         let registry = StubRegistry::default();
+
+        // The path is not even listed, so this is a manifest never opened
+        // rather than one read on the wrong side.
+        assert!(
+            git::changed_paths(dir.path())
+                .expect("git succeeds")
+                .is_empty(),
+            "an index-only change must not be listed by `git diff HEAD`"
+        );
 
         let outcome = run(dir.path(), &registry, false).expect("check runs");
 
@@ -602,6 +631,59 @@ mod tests {
         assert!(
             committed.contains("requestz"),
             "the fixture did not actually commit the staged addition: {committed:?}"
+        );
+    }
+
+    /// The other half, and the one that genuinely earns the phrase "checked on
+    /// the wrong side".
+    ///
+    /// When the working tree differs from HEAD the path *is* listed, and the
+    /// after-side is then read from the working tree — while `git commit`
+    /// commits the index. A manifest staged one way and edited another is
+    /// therefore checked on content that is not about to be committed: here
+    /// the gate looks up `httpx`, which is in the working tree and will not be
+    /// committed, and never looks at `requestz`, which is staged and will be.
+    ///
+    /// Recorded, not endorsed, and it is the case that survives any fix aimed
+    /// only at listing more paths — the path is already listed. Only reading
+    /// the after-side as the union of the index and the working tree closes
+    /// it.
+    #[test]
+    fn a_manifest_staged_one_way_and_edited_another_is_checked_on_the_working_tree() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write(
+            dir.path(),
+            "requirements.txt",
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        );
+        run_git(dir.path(), &["add", "requirements.txt"]);
+        // Same path, different content on disk: this is what gets read.
+        write(
+            dir.path(),
+            "requirements.txt",
+            "ruff==0.4.0\nhttpx==0.27.0\n",
+        );
+        let registry = StubRegistry::default();
+
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+
+        assert_eq!(
+            outcome.code, 0,
+            "recorded, not endorsed: the staged addition was never examined"
+        );
+        assert_eq!(
+            registry.asked(),
+            vec!["httpx"],
+            "the gate asked about the working-tree name and not the staged one"
+        );
+
+        run_git(dir.path(), &["commit", "-m", "land the staged version"]);
+        let committed = git::show_at_head(dir.path(), "requirements.txt")
+            .expect("show succeeds")
+            .unwrap_or_default();
+        assert!(
+            committed.contains("requestz") && !committed.contains("httpx"),
+            "the commit should carry the staged content, not the checked one: {committed:?}"
         );
     }
 

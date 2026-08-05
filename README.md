@@ -75,10 +75,11 @@ one.
 
 ### What `--diff` compares, and what that rules out
 
-**`--diff` compares the working tree and the index against HEAD.** Anything
-already committed is outside that comparison: there is nothing left to compare,
-so the run checks nothing and exits `0`. The same manifest blocks while it is
-uncommitted and passes the moment it is committed.
+**`--diff` compares the working tree against HEAD** — it runs
+`git diff --name-only HEAD`, and a path is listed only when the working tree
+differs. Anything already committed is outside that comparison: there is
+nothing left to compare, so the run checks nothing and exits `0`. The same
+manifest blocks while it is uncommitted and passes the moment it is committed.
 
 The consequence is worth stating plainly, because it is the opposite of what a
 gate is usually assumed to do. **On a fresh clone or a CI checkout the tree is
@@ -89,16 +90,25 @@ commit range needs `plumb check --repo`, which the design spec reserves and
 **which is not implemented yet**. Until it is, the useful place for `--diff` is
 a developer's working copy.
 
-The pre-commit story is not honest yet either. `git diff HEAD` lists a path when
-*either* the index or the worktree differs from HEAD, and the after-side is then
-read from the **worktree**. For a partially staged manifest those are different
-files, and the gate reads the one that is not being committed: staging an
-addition and reverting the worktree passes, and the commit lands carrying it. So
-a pre-commit hook catches the ordinary case and not the partially staged one.
-Fixing it properly means reading the after-side as the union of the index and
-the worktree, which changes what "added" means; `git show :<path>` alone is not
-the fix, because an unstaged edit has an index copy identical to HEAD and would
-then report nothing.
+The pre-commit story is not honest yet either, and for a reason worth stating
+precisely: **`git commit` commits the index, and this gate never reads the
+index.** Two consequences follow.
+
+- An addition that is staged and then reverted on disk is **not listed at all**,
+  so the manifest is never opened. `git diff --cached --name-only HEAD` prints
+  the path; `git diff --name-only HEAD` prints nothing.
+- A manifest staged one way and edited another **is** listed, and the after-side
+  is read from the working tree — so the gate checks content that is not about
+  to be committed, and misses the content that is.
+
+Either way the commit can land a package the gate never looked up. Staging does
+matter, but only in one narrower way than it sounds: it makes an untracked file
+*tracked*, and an untracked file is not reported at all.
+
+Fixing this means reading the after-side as the union of the index and the
+working tree, which changes what "added" means. `git show :<path>` alone is not
+the fix: an unstaged edit has an index copy identical to HEAD, so it would add
+nothing and report nothing.
 
 ### Blind spots
 
