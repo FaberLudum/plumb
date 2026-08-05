@@ -193,6 +193,29 @@ impl Gap {
     }
 }
 
+/// Drops a pip comment from a requirements line.
+///
+/// pip starts a comment at `#` only when it begins the line or follows
+/// whitespace. That rule is why this is not `split('#')`: `base.txt#fragment`
+/// is a path containing a `#`, not a path with a note after it, and truncating
+/// it would name a file that does not exist just as surely as keeping the
+/// comment does.
+///
+/// Scoped to the requirements path deliberately. `requirement_name` does its
+/// own comment handling — the terminator search ends a name at whitespace, and
+/// an unspaced `#` fails the character check — and it is also called on
+/// `pyproject.toml` array entries, where pip's rule does not apply at all.
+fn strip_comment(line: &str) -> &str {
+    let mut previous_was_whitespace = true;
+    for (index, ch) in line.char_indices() {
+        if ch == '#' && previous_was_whitespace {
+            return &line[..index];
+        }
+        previous_was_whitespace = ch.is_whitespace();
+    }
+    line
+}
+
 /// Returns the path a `-r` or `--requirement` line includes.
 ///
 /// pip accepts four spellings and all of them appear in the wild: `-r path`,
@@ -202,8 +225,11 @@ impl Gap {
 /// Requiring that is what keeps the match narrow: a bare `strip_prefix` would
 /// read any future `--requirement`-prefixed option as an include. The short
 /// form needs no such guard because pip glues its argument straight on.
+///
+/// The trailing comment goes before the path is taken, so the gap names a file
+/// a reader can open. A gap naming `base.txt  # shared pins` points at nothing.
 fn include_target(line: &str) -> Option<String> {
-    let line = line.trim_start_matches('\u{feff}').trim();
+    let line = strip_comment(line.trim_start_matches('\u{feff}')).trim();
 
     let rest = if let Some(rest) = line.strip_prefix("--requirement") {
         match rest.strip_prefix('=') {
