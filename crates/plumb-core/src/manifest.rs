@@ -170,8 +170,21 @@ pub enum Gap {
     /// enough to act on whichever one the file actually has.
     PoetryDependencies,
     DependencyGroups,
+    /// `[project].dynamic` lists a dependency field.
+    ///
+    /// The listed fields, in the order PEP 621 documents them, never empty.
+    /// One gap naming both rather than one per field, for the reason
+    /// [`Gap::PoetryDependencies`] gives: it is one unread layout, so it is one
+    /// action.
+    Dynamic(Vec<String>),
     Include(String),
 }
+
+/// The `[project]` fields whose value being `dynamic` hides dependencies.
+///
+/// `dynamic` itself is ordinary — nearly every backend-built project marks
+/// `version` dynamic — so the trigger is these two names and not the key.
+const DYNAMIC_DEPENDENCY_FIELDS: [&str; 2] = ["dependencies", "optional-dependencies"];
 
 impl Gap {
     /// A sentence naming what was not read, for a human reading a finding.
@@ -186,6 +199,16 @@ impl Gap {
                 "dependencies are declared in [dependency-groups], which Plumb does not read"
                     .to_string()
             }
+            Gap::Dynamic(fields) => format!(
+                "[project].dynamic lists {}, so the build backend supplies them and \
+                 PEP 621 forbids declaring them in [project] — Plumb does not read where \
+                 they come from",
+                fields
+                    .iter()
+                    .map(|field| format!("`{field}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
             Gap::Include(path) => {
                 format!("requirements are included from `{path}`, which Plumb does not follow")
             }
@@ -315,6 +338,26 @@ pub fn parse_pyproject(text: &str) -> Manifest {
                     }
                 }
             }
+        }
+    }
+
+    // `dynamic` is the one trigger the file states itself, in the standard's
+    // own vocabulary, rather than leaving it to be inferred from a tool table.
+    // A backend that supplies `dependencies` may keep them in `setup.py`, in a
+    // `requirements.txt` named by `[tool.setuptools.dynamic]`, or anywhere else
+    // it likes — and PEP 621 forbids `[project].dependencies` alongside, so
+    // there is nothing for the reader above to find.
+    if let Some(dynamic) = project
+        .and_then(|p| p.get("dynamic"))
+        .and_then(|d| d.as_array())
+    {
+        let listed: Vec<String> = DYNAMIC_DEPENDENCY_FIELDS
+            .iter()
+            .filter(|field| dynamic.iter().any(|entry| entry.as_str() == Some(**field)))
+            .map(|field| (*field).to_string())
+            .collect();
+        if !listed.is_empty() {
+            gaps.push(Gap::Dynamic(listed));
         }
     }
 
