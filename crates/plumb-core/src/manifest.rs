@@ -10,20 +10,26 @@
 //! report a phantom addition when a manifest is merely respelled.
 //!
 //! A name this module does not extract is not a name that is absent, and a
-//! [`Manifest`] says which of the two it is. `[tool.poetry.dependencies]`, PEP
-//! 735 `[dependency-groups]` and requirements includes are all unread here, and
-//! each is reported as a [`Gap`] instead of passing for a file with nothing in
-//! it. The rule that keeps a gap worth reading is that it is raised on evidence
-//! of an unread declaration and never on the absence of one: a `pyproject.toml`
-//! holding only a build system and some tool settings declares no runtime
-//! dependencies and produces no gap.
+//! [`Manifest`] says which of the two it is. Poetry's dependency tables — the
+//! main one and the per-group ones — PEP 735 `[dependency-groups]`, and
+//! requirements includes are all unread here, and each is reported as a [`Gap`]
+//! instead of passing for a file with nothing in it. The rule that keeps a gap
+//! worth reading is that it is raised on evidence of an unread declaration and
+//! never on the absence of one: a `pyproject.toml` holding only a build system
+//! and some tool settings declares no runtime dependencies and produces no gap.
 //!
-//! The coverage is not total, and the parts outside it are still silent.
-//! Poetry's per-group tables — `[tool.poetry.group.dev.dependencies]` — raise
-//! no gap of their own, so a project that used only those and no
-//! `[tool.poetry.dependencies]` would still read as understood. Poetry writes
-//! the main table in practice, which is why that shape is the one covered
-//! first; the remainder is a known hole rather than a decided non-goal.
+//! One exemption is worth knowing about, because it rests on someone else's
+//! documented behaviour rather than on anything checkable here.
+//! `[tool.poetry.dependencies]` raises no gap when `[project].dependencies` is
+//! present, on Poetry's statement that in that configuration the Poetry table
+//! only enriches the PEP 621 one for locking and cannot introduce a name. If
+//! that ever stops holding, such a file reads as fully understood while it is
+//! not. Group tables carry no such exemption — see [`parse_pyproject`].
+//!
+//! A file this module does not dispatch on at all — `setup.py`, `Pipfile`, a
+//! lock file — is a separate silence and not one a [`Gap`] can express: [`parse`]
+//! returning `None` says "not a manifest I handle", never "this project has no
+//! dependencies".
 
 use std::collections::BTreeSet;
 
@@ -123,9 +129,45 @@ pub struct Manifest {
 /// Each variant names what was missed rather than carrying a flag, because the
 /// warning has to tell a reader what to act on. "This file may declare more
 /// dependencies" is true, useless, and the kind of message people learn to skip.
+///
+/// # Why this warns on every run, and why that is the intended cost
+///
+/// A repository that declares its dependencies with Poetry or PEP 735 gets a
+/// gap on every change that touches its `pyproject.toml`, for as long as those
+/// formats go unparsed. A caller that turns gaps into warnings therefore exits
+/// `2` every time. That is deliberate, and it is not the failure mode a warning
+/// that always fires is.
+///
+/// The distinction is what the warning is keyed to. `[build-system].requires`
+/// is excluded from these variants precisely because it is in nearly every
+/// `pyproject.toml`, so a gap for it would fire independently of whether Plumb
+/// could see anything — noise carrying no information. A gap here fires exactly
+/// when Plumb cannot see a project's dependencies, which is information, and it
+/// is information the person reading a clean run most needs: a gate reporting
+/// success over a file it did not understand is the silent false negative this
+/// whole project exists to catch. It is what these formats did for the entire
+/// previous version.
+///
+/// The exit code is the right channel for it rather than a side note. `2` means
+/// warnings only and the contract blocks on `1`, so a pipeline wired to that
+/// contract is unaffected; one that treats any non-zero as failure has decided
+/// warnings block, which is its decision to make. The alternative — a channel
+/// that never touches the exit code — is what the unreadable-manifest note
+/// already is, and it is what let these formats pass as clean.
+///
+/// The noise is proportional to the blindness and has an obvious off switch: it
+/// stops when someone teaches Plumb to read the format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gap {
     Unparseable,
+    /// Dependencies under `[tool.poetry]`, in the main table or in a group.
+    ///
+    /// One variant for two tables. They are separate declarations with
+    /// different conditions — see `parse_pyproject` — but the reader's action
+    /// is identical, and a project with both is the ordinary Poetry layout, so
+    /// splitting them would put two findings on one file saying the same thing
+    /// twice. `describe` names both tables, so the sentence stays specific
+    /// enough to act on whichever one the file actually has.
     PoetryDependencies,
     DependencyGroups,
     Include(String),
@@ -136,10 +178,10 @@ impl Gap {
     pub fn describe(&self) -> String {
         match self {
             Gap::Unparseable => "the file does not parse as TOML".to_string(),
-            Gap::PoetryDependencies => {
-                "dependencies are declared in [tool.poetry.dependencies], which Plumb does not read"
-                    .to_string()
-            }
+            Gap::PoetryDependencies => "dependencies are declared under [tool.poetry] — in \
+                 [tool.poetry.dependencies] or a [tool.poetry.group.<name>.dependencies] table \
+                 — which Plumb does not read"
+                .to_string(),
             Gap::DependencyGroups => {
                 "dependencies are declared in [dependency-groups], which Plumb does not read"
                     .to_string()
@@ -254,23 +296,48 @@ pub fn parse_pyproject(text: &str) -> Manifest {
         gaps.push(Gap::DependencyGroups);
     }
 
-    // Only a gap when nothing authoritative was read. A Poetry table beside a
-    // PEP 621 `[project].dependencies` mirrors it, and warning there would fire
-    // on projects Plumb reads correctly.
+    // The two Poetry tables take different conditions, and the asymmetry is
+    // Poetry's rather than a lapse here.
+    //
+    // The main table is a gap only when nothing authoritative was read. With
+    // `[project].dependencies` present, Poetry 2.x documents
+    // `[tool.poetry.dependencies]` as enriching it for locking and not as a
+    // place to add a name, so the two mirror each other and warning would fire
+    // on a project Plumb reads correctly.
+    //
+    // A group table has no such counterpart: PEP 621 gives `[project]` no
+    // notion of dependency groups, so nothing in `[project]` can mirror one and
+    // its contents are unread whatever else the file holds. Groups are also
+    // where the ordinary Poetry project keeps its dev, test and docs
+    // dependencies, so exempting them would leave the common layout silent.
     //
     // `[build-system].requires` is deliberately absent from this list. It
     // appears in nearly every pyproject.toml, so treating it as a gap would
     // fire the warning universally — and a warning that always fires is a
     // warning nobody reads. Build-time dependencies are a separate rule with
-    // separate evidence, not an unread part of the runtime set.
+    // separate evidence, not an unread part of the runtime set. See [`Gap`] for
+    // why a gap that fires on every run of a Poetry project is a different
+    // thing from that.
     let project_declares_dependencies = project.and_then(|p| p.get("dependencies")).is_some();
-    let poetry_declares_dependencies = document
-        .get("tool")
-        .and_then(|t| t.get("poetry"))
-        .and_then(|p| p.get("dependencies"))
-        .is_some();
+    let poetry = document.get("tool").and_then(|t| t.get("poetry"));
+    let poetry_declares_dependencies = poetry.and_then(|p| p.get("dependencies")).is_some();
+    // Keyed to a group's `dependencies` child, not to the group itself: a
+    // `[tool.poetry.group.dev]` holding only `optional = true` declares
+    // nothing, and warning on it would be warning on absence.
+    let poetry_groups_declare_dependencies = poetry
+        .and_then(|p| p.get("group"))
+        .and_then(|g| g.as_table())
+        .is_some_and(|groups| {
+            groups
+                .values()
+                .any(|group| group.get("dependencies").is_some())
+        });
 
-    if poetry_declares_dependencies && !project_declares_dependencies {
+    // One gap however many of these hold, because the reader's action is one
+    // action. `describe` names both tables.
+    if poetry_groups_declare_dependencies
+        || (poetry_declares_dependencies && !project_declares_dependencies)
+    {
         gaps.push(Gap::PoetryDependencies);
     }
 
