@@ -192,14 +192,12 @@ mod tests {
     fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temp dir");
         run_git(dir.path(), &["init", "-b", "main"]);
-        // Per-directory attributes outrank the global attributes file and the
-        // XDG default at `~/.config/git/attributes`. Without this, a developer
-        // whose global attributes mark `*.txt` as `binary` or `-diff` gets a
-        // suppressed hunk from `working_diff` — which honours ambient config,
-        // as production does — while the fixture neutralises that config for
-        // its own commands. Pinning it here removes the one variable the tests
-        // cannot otherwise control.
-        fs::write(dir.path().join(".gitattributes"), "* diff\n").expect("write");
+        // No `* diff` attribute here, deliberately. It used to be needed:
+        // hunk suppression cost the old parser the `+++` line and with it the
+        // path, so the fixture had to forbid it, which meant no test could
+        // observe the failure it was hiding. `changed_paths` does not read
+        // hunks, so the fixture can now run against the same git a developer
+        // has — and `changed_paths_survives_hunk_suppression` proves it.
         run_git(dir.path(), &["config", "user.email", "test@example.com"]);
         run_git(dir.path(), &["config", "user.name", "Test"]);
         fs::write(dir.path().join("requirements.txt"), "ruff==0.4.0\n").expect("write");
@@ -209,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn working_diff_reports_uncommitted_changes() {
+    fn changed_paths_reports_an_uncommitted_change() {
         let dir = init_repo();
         fs::write(
             dir.path().join("requirements.txt"),
@@ -217,16 +215,16 @@ mod tests {
         )
         .expect("write");
 
-        let diff = working_diff(dir.path()).expect("diff succeeds");
+        let paths = changed_paths(dir.path()).expect("git succeeds");
 
-        assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff}");
+        assert_eq!(paths, vec!["requirements.txt"]);
     }
 
     /// Pins the `HEAD` in `git diff HEAD`. A plain `git diff` reports nothing
     /// once the change is staged, so without this the other tests would pass
     /// against an implementation that silently misses a pre-commit hook's view.
     #[test]
-    fn working_diff_reports_staged_changes() {
+    fn changed_paths_reports_a_staged_change() {
         let dir = init_repo();
         fs::write(
             dir.path().join("requirements.txt"),
@@ -235,18 +233,71 @@ mod tests {
         .expect("write");
         run_git(dir.path(), &["add", "-A"]);
 
-        let diff = working_diff(dir.path()).expect("diff succeeds");
+        let paths = changed_paths(dir.path()).expect("git succeeds");
 
-        assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff}");
+        assert_eq!(paths, vec!["requirements.txt"]);
     }
 
-    /// `git diff` writes hunk bytes verbatim for anything its NUL heuristic
-    /// calls text, so one Latin-1 or Shift-JIS file changed anywhere in the
-    /// repository must not fail the whole gate. A lone `0xE9` is valid Latin-1,
-    /// invalid UTF-8, and carries no NUL, so git emits it raw rather than
-    /// suppressing the hunk as binary.
     #[test]
-    fn working_diff_tolerates_non_utf8_content() {
+    fn changed_paths_is_empty_for_a_clean_tree() {
+        let dir = init_repo();
+
+        assert!(changed_paths(dir.path()).expect("git succeeds").is_empty());
+    }
+
+    /// The whole reason this asks git for names instead of a diff.
+    ///
+    /// A global attributes file marking everything `-diff` makes git replace
+    /// every hunk with `Binary files a/… and b/… differ`, which carries no
+    /// `+++` line — so a parser reading the diff loses the path and the gate
+    /// reports a clean run over a manifest it never opened. It needs no
+    /// cooperation from the repository: `core.attributesFile` is an ordinary
+    /// dotfile setting, and `$XDG_CONFIG_HOME/git/attributes` is read with no
+    /// configuration at all.
+    ///
+    /// `core.bigFileThreshold` reaches the same suppression by a different
+    /// road, without attributes, for any manifest larger than the threshold.
+    /// Both are here because they are one class, and the class is what a name
+    /// listing closes: there is no hunk to suppress.
+    #[test]
+    fn changed_paths_survives_hunk_suppression() {
+        for (key, value, attributes) in [
+            ("core.attributesFile", Some("* -diff"), true),
+            ("core.bigFileThreshold", None, false),
+        ] {
+            let dir = init_repo();
+            if attributes {
+                let attrs = dir.path().join("global-attributes");
+                fs::write(&attrs, format!("{}\n", value.unwrap_or_default())).expect("write");
+                // Forward slashes: a backslash is an escape character inside a
+                // git config value.
+                let spelled = attrs.display().to_string().replace('\\', "/");
+                run_git(dir.path(), &["config", key, &spelled]);
+            } else {
+                run_git(dir.path(), &["config", key, "1"]);
+            }
+            fs::write(
+                dir.path().join("requirements.txt"),
+                "ruff==0.4.0\nrequestz==2.31.0\n",
+            )
+            .expect("write");
+
+            let paths = changed_paths(dir.path()).expect("git succeeds");
+
+            assert_eq!(paths, vec!["requirements.txt"], "defeated by {key}");
+        }
+    }
+
+    /// A file whose *content* is not UTF-8 must not fail the gate. Under the
+    /// old diff-reading invocation this was a live hazard, because the hunk
+    /// bytes came back verbatim and one Latin-1 file anywhere in the repository
+    /// put invalid UTF-8 into the output. Asking for names removes the hazard
+    /// at the source: content never reaches this process.
+    ///
+    /// Kept because the guarantee still has to hold, and now it holds for a
+    /// better reason than lossy decoding.
+    #[test]
+    fn changed_paths_is_indifferent_to_non_utf8_file_content() {
         let dir = init_repo();
         let latin1 = dir.path().join("latin1.txt");
         fs::write(&latin1, [0xE9, b'\n']).expect("write");
@@ -254,16 +305,37 @@ mod tests {
         run_git(dir.path(), &["commit", "-m", "add a latin-1 file"]);
         fs::write(&latin1, [0xE9, 0xE9, b'\n']).expect("write");
 
-        let diff = working_diff(dir.path()).expect("diff succeeds despite non-UTF-8 content");
+        let paths = changed_paths(dir.path()).expect("git succeeds despite non-UTF-8 content");
 
-        // Assert on the replacement character, not on the path: a suppressed
-        // hunk still carries the path, so a path assertion would pass without
-        // the lossy decoding ever being exercised. Suppression needs no
-        // configuration key at all — `*.txt -diff` in the XDG default
-        // `~/.config/git/attributes` is enough, and `-diff` alone does it
-        // without the full `binary` macro — which is why `init_repo` pins
-        // `* diff` inside the repository, where it outranks both.
-        assert!(diff.contains('\u{FFFD}'), "diff was: {diff}");
+        assert_eq!(paths, vec!["latin1.txt"]);
+    }
+
+    /// Deletions, renames and mode-only changes all reach the caller.
+    ///
+    /// The old parser dropped every one of them: a deletion writes
+    /// `+++ /dev/null`, and a pure rename or a mode change writes no `+++`
+    /// line at all. None of them can add a dependency, so no verdict changes
+    /// — but a pure rename of a manifest was invisible, and `check` treats a
+    /// path with no version at HEAD as a new manifest, so the renamed one is
+    /// now checked exactly as a rename *with* an edit already was.
+    #[test]
+    fn changed_paths_reports_deletions_renames_and_mode_changes() {
+        let dir = init_repo();
+        fs::write(dir.path().join("gone.txt"), "x\n").expect("write");
+        fs::write(dir.path().join("old-name.txt"), "content\n").expect("write");
+        fs::write(dir.path().join("mode.txt"), "y\n").expect("write");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "more files"]);
+
+        fs::remove_file(dir.path().join("gone.txt")).expect("remove");
+        run_git(dir.path(), &["mv", "old-name.txt", "new-name.txt"]);
+        run_git(dir.path(), &["update-index", "--chmod=+x", "mode.txt"]);
+
+        let paths = changed_paths(dir.path()).expect("git succeeds");
+
+        for expected in ["gone.txt", "new-name.txt", "mode.txt"] {
+            assert!(paths.iter().any(|p| p == expected), "{paths:?}");
+        }
     }
 
     /// Every path the gate handles is relative to the repository root: that is
@@ -318,24 +390,38 @@ mod tests {
     /// certain. It does not cover a path containing a quote, a backslash or a
     /// control character — those stay escaped whatever this setting says.
     #[test]
-    fn working_diff_does_not_escape_a_non_ascii_path() {
+    fn changed_paths_reports_awkward_paths_verbatim() {
         let dir = init_repo();
-        let nested = dir.path().join("café");
-        fs::create_dir_all(&nested).expect("create dir");
-        fs::write(nested.join("requirements.txt"), "ruff==0.4.0\n").expect("write");
+        // A non-ASCII directory and one with a space: git escapes the first
+        // into C-style octal and wraps it in quotes, and terminates the second
+        // with a tab, in every output format except the NUL-separated one.
+        for directory in ["café", "my project"] {
+            let nested = dir.path().join(directory);
+            fs::create_dir_all(&nested).expect("create dir");
+            fs::write(nested.join("requirements.txt"), "ruff==0.4.0\n").expect("write");
+        }
         run_git(dir.path(), &["add", "-A"]);
-        run_git(dir.path(), &["commit", "-m", "add a non-ascii path"]);
-        fs::write(
-            nested.join("requirements.txt"),
-            "ruff==0.4.0\nrequestz==2.31.0\n",
-        )
-        .expect("write");
+        run_git(dir.path(), &["commit", "-m", "add awkward paths"]);
+        // `core.quotePath` is left at its default on purpose: `-z` is what
+        // makes it irrelevant, and a test that turned it off would pass
+        // against an implementation relying on the override instead.
+        for directory in ["café", "my project"] {
+            fs::write(
+                dir.path().join(directory).join("requirements.txt"),
+                "ruff==0.4.0\nrequestz==2.31.0\n",
+            )
+            .expect("write");
+        }
 
-        let diff = working_diff(dir.path()).expect("diff succeeds");
+        let paths = changed_paths(dir.path()).expect("git succeeds");
 
         assert!(
-            diff.contains("+++ b/café/requirements.txt"),
-            "diff was: {diff}"
+            paths.iter().any(|p| p == "café/requirements.txt"),
+            "{paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p == "my project/requirements.txt"),
+            "{paths:?}"
         );
     }
 
@@ -343,9 +429,10 @@ mod tests {
     /// output, in the repository's own config.
     ///
     /// Local rather than global because the process environment is shared with
-    /// every other test in this binary; command-line arguments outrank both, so
-    /// this exercises the same defence. `tests/cli.rs` sets the same settings
-    /// through `GIT_CONFIG_GLOBAL`, which is how they reach a developer.
+    /// every other test in this binary. `tests/cli.rs` sets the same settings
+    /// through `GIT_CONFIG_GLOBAL`, which is how they reach a developer, and
+    /// is the spelling that matters: none of this needs a repository's
+    /// cooperation.
     fn make_git_hostile(dir: &Path) {
         for (key, value) in [
             ("color.ui", "always"),
@@ -362,8 +449,7 @@ mod tests {
             // A per-attribute content converter, reached through the
             // `diff=hostile` attribute written below. Its command does not
             // exist, which is what a converter for a format this machine has
-            // no tool for looks like; without `--no-textconv` git fails and
-            // takes the whole gate with it.
+            // no tool for looks like; it used to fail the whole gate.
             ("diff.hostile.textconv", "/nonexistent/textconv"),
         ] {
             run_git(dir, &["config", key, value]);
@@ -379,7 +465,7 @@ mod tests {
     /// somewhere: `src/requirements.txt` and `w/requirements.txt` both contain
     /// the name, and both resolve to nothing on disk.
     #[test]
-    fn working_diff_ignores_configuration_that_reshapes_its_output() {
+    fn changed_paths_ignores_configuration_that_reshapes_diff_output() {
         let dir = init_repo();
         make_git_hostile(dir.path());
         fs::write(
@@ -388,24 +474,13 @@ mod tests {
         )
         .expect("write");
 
-        let diff = working_diff(dir.path()).expect("diff succeeds");
+        let paths = changed_paths(dir.path()).expect("git succeeds");
 
-        assert!(
-            diff.contains("+++ b/requirements.txt\n"),
-            "diff was: {diff:?}"
-        );
-        // The pre-image line too. Nothing reads it today, so without this the
-        // `--src-prefix` half of the defence is unpinned and would be dropped
-        // by anyone tidying the invocation — and then the day something does
-        // read it, it is `w/…` or `src/…` again.
-        assert!(
-            diff.contains("--- a/requirements.txt\n"),
-            "diff was: {diff:?}"
-        );
-        assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff:?}");
-        // Colour is the one that leaves no path at all: an escape sequence in
-        // front of `diff --git` stops the header being recognised.
-        assert!(!diff.contains('\u{1b}'), "diff carried colour: {diff:?}");
+        // Exact, not "contains the name". Every one of these settings used to
+        // produce a path that still held the word `requirements.txt` — `w/…`,
+        // `src/…`, a quoted form — and every one of them resolved to nothing
+        // on disk.
+        assert_eq!(paths, vec!["requirements.txt"]);
     }
 
     /// Paths come back relative to the repository root whichever directory
@@ -417,7 +492,7 @@ mod tests {
     /// purpose, because the contract is what the next caller will rely on and
     /// the failure would be silence rather than an error.
     #[test]
-    fn working_diff_reports_root_relative_paths_from_any_directory() {
+    fn changed_paths_are_root_relative_from_any_directory() {
         let dir = init_repo();
         make_git_hostile(dir.path());
         let nested = dir.path().join("packages").join("api");
@@ -428,11 +503,12 @@ mod tests {
         )
         .expect("write");
 
-        let diff = working_diff(&nested).expect("diff succeeds");
+        let paths = changed_paths(&nested).expect("git succeeds");
 
-        assert!(
-            diff.contains("+++ b/requirements.txt\n"),
-            "a manifest outside the directory asked about went missing: {diff:?}"
+        assert_eq!(
+            paths,
+            vec!["requirements.txt"],
+            "a manifest outside the directory asked about went missing"
         );
     }
 

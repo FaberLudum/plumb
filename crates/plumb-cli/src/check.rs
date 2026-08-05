@@ -15,7 +15,6 @@ use crate::git;
 use crate::registry::{Existence, Registry};
 use anyhow::Result;
 use plumb_core::deps::{self, AddedDependency};
-use plumb_core::diff::parse_unified_diff;
 use plumb_core::finding::{Finding, Tier, exit_code};
 use plumb_core::manifest::{self, Ecosystem};
 use plumb_core::report::{render_json, render_text};
@@ -52,10 +51,9 @@ pub fn run(repo: &Path, registry: &dyn Registry, json: bool) -> Result<(String, 
 /// Separate from [`run`] so the findings can be inspected before rendering
 /// flattens them into a string.
 fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
-    let diff = git::working_diff(repo)?;
     let mut findings = Vec::new();
 
-    for file in parse_unified_diff(&diff) {
+    for path in git::changed_paths(repo)? {
         // Ask the dispatch itself whether this path is a manifest, before
         // reading a byte of it. A change touching a thousand source files
         // would otherwise be a thousand files read into memory to be thrown
@@ -67,7 +65,7 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         // would drift the first time the real one learns a new name. It is
         // sound only while the dispatch is a function of the path alone, which
         // `a_manifest_is_recognised_from_its_path_alone` pins.
-        if manifest::parse(&file.path, "").is_none() {
+        if manifest::parse(&path, "").is_none() {
             continue;
         }
 
@@ -80,8 +78,8 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         // and so no findings. Failing open is the right direction here: a file
         // this process could not open is not evidence that a package does not
         // exist.
-        let current = std::fs::read_to_string(repo.join(&file.path)).unwrap_or_default();
-        let Some(after) = manifest::parse(&file.path, &current) else {
+        let current = std::fs::read_to_string(repo.join(&path)).unwrap_or_default();
+        let Some(after) = manifest::parse(&path, &current) else {
             continue;
         };
 
@@ -97,10 +95,9 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         // understand this", which is a change to the core contract rather than
         // to this wiring. The cost of the honest reading is bounded: extra
         // lookups, and a finding only for a name the registry actually lacks.
-        let before = git::show_at_head(repo, &file.path)?
-            .and_then(|text| manifest::parse(&file.path, &text));
+        let before = git::show_at_head(repo, &path)?.and_then(|text| manifest::parse(&path, &text));
 
-        for dependency in deps::added(&file.path, before.as_ref(), &after) {
+        for dependency in deps::added(&path, before.as_ref(), &after) {
             if registry.exists(&dependency.name) == Existence::Missing {
                 findings.push(package_does_not_exist(&dependency));
             }
@@ -203,17 +200,17 @@ mod tests {
 
     /// A repository whose HEAD holds `files`.
     ///
-    /// The `.gitattributes` line is load-bearing rather than tidy. A developer
-    /// whose global attributes mark `*.txt` as `-diff` gets `Binary files …
-    /// differ` from `working_diff` instead of a hunk, and that section carries
-    /// no `+++ b/…` line at all — so the manifest never reaches the gate and
-    /// every test here passes by finding nothing. `working_diff` honours
-    /// ambient config, as production does, so this has to be pinned inside the
-    /// repository, where it outranks the global and XDG attribute files.
+    /// This used to write a `* diff` attribute, because a developer whose
+    /// global attributes marked `*.txt` as `-diff` got `Binary files … differ`
+    /// instead of a hunk, and that section carries no `+++ b/…` line — so the
+    /// manifest never reached the gate and every test here passed by finding
+    /// nothing. Forbidding it inside the fixture also meant no test could
+    /// observe the failure. `changed_paths` reads names rather than hunks, so
+    /// there is nothing left to suppress and the fixture runs against the same
+    /// git a developer has.
     fn repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temp dir");
         run_git(dir.path(), &["init", "-b", "main"]);
-        write(dir.path(), ".gitattributes", "* diff\n");
         run_git(dir.path(), &["config", "user.email", "test@example.com"]);
         run_git(dir.path(), &["config", "user.name", "Test"]);
         for (name, body) in files {

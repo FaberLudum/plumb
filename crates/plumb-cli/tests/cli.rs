@@ -36,13 +36,12 @@ fn run_git(dir: &Path, args: &[&str]) {
 
 /// A repository holding one `requirements.txt` at HEAD.
 ///
-/// `* diff` stops a developer's global attributes suppressing the hunk; see
-/// `check::tests::repo_with` for why that would make these tests pass by
-/// checking nothing.
+/// No `* diff` attribute: it used to be needed to stop a developer's global
+/// attributes suppressing the hunk, which is exactly the failure
+/// `check_survives_a_hostile_but_ordinary_git_config` now provokes on purpose.
 fn repo_with_requirements(initial: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
     run_git(dir.path(), &["init", "-b", "main"]);
-    std::fs::write(dir.path().join(".gitattributes"), "* diff\n").expect("write");
     run_git(dir.path(), &["config", "user.email", "test@example.com"]);
     run_git(dir.path(), &["config", "user.name", "Test"]);
     std::fs::write(dir.path().join("requirements.txt"), initial).expect("write");
