@@ -1020,7 +1020,20 @@ fn requirement_name(spec: &str) -> Option<String> {
     // so without this the first requirement of a BOM-prefixed file fails the
     // character check and is silently dropped.
     let spec = spec.trim_start_matches('\u{feff}');
-    let spec = spec.split('#').next().unwrap_or(spec).trim();
+    // Comments need no handling of their own. pip treats `#` as a comment only
+    // at line start or after whitespace: after whitespace the terminator search
+    // has already ended the name, and at line start the extracted text begins
+    // with `#`, which the character check rejects. The remaining case,
+    // `ruff#comment`, is malformed for pip, and dropping the whole line is the
+    // conservative reading — an earlier `split('#')` here recovered `ruff` and
+    // sent it to the registry instead, which is the wrong direction for a gate
+    // that blocks on an unresolved name.
+    //
+    // This function is also called on `pyproject.toml` array entries, where
+    // pip's comment rule does not apply at all. The conclusion survives: `#`
+    // appears there only inside direct references such as
+    // `mypkg@https://…#sha256=…`, where `@` ends the name first.
+    let spec = spec.trim();
     if spec.is_empty() || spec.starts_with('-') {
         return None;
     }
@@ -1137,7 +1150,7 @@ pub mod manifest;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core manifest`
-Expected: PASS, eleven tests.
+Expected: PASS, fifteen tests.
 
 - [ ] **Step 5: Commit**
 
