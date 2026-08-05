@@ -1,6 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
+//! Parses `git diff` output into changed files and the lines they add.
+//!
+//! # Nothing calls this, on purpose
+//!
+//! The package existence gate used to read paths out of a unified diff. It no
+//! longer does: it asks git for names directly, because the paths were the only
+//! field it wanted and every setting that reshapes, colours, re-prefixes or
+//! suppresses a hunk could cost the parser that field — three of them with no
+//! flag able to reach the result. See `plumb_cli::git::changed_paths`.
+//!
+//! This module is kept for what it does that a name listing cannot: report the
+//! lines a change **adds**. Rules that scan added content — an undeclared
+//! dependency imported but never declared (taxonomy §4.3), a secret written
+//! into a diff — need exactly that, and rebuilding it later would mean
+//! rediscovering the marker-column, combined-diff and path-terminator handling
+//! its tests already pin.
+//!
+//! So: do not delete it as dead weight, and do not wire it back into the
+//! existence gate to give it a caller. If a new rule needs added lines, it is
+//! the right tool; if it only needs paths, it is the wrong one.
+
 /// A file touched by a diff, with the lines the diff adds to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
