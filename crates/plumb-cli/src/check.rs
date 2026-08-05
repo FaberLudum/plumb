@@ -991,6 +991,17 @@ mod tests {
     /// of the filename alone, which is what this pins — the alternative, a
     /// second filename rule in this crate, is exactly the duplicated dispatch
     /// `deps::added` warns against.
+    ///
+    /// The gaps assertion is the second half of "a function of the filename
+    /// alone", and it is not decoration. The probe hands `parse` a body no user
+    /// wrote, so anything the probe's `Manifest` says about that body is an
+    /// artefact of this call site. An empty string is a legal, empty TOML
+    /// document and an empty requirements file, so it must yield no gap; an
+    /// implementation that read it as unparseable would attach a gap to every
+    /// changed manifest in every repository, and the moment a caller reports
+    /// gaps that becomes a warning on every run. `is_some()` alone passes
+    /// against that implementation, which is why the emptiness is asserted
+    /// here rather than assumed.
     #[test]
     fn a_manifest_is_recognised_from_its_path_alone() {
         for path in [
@@ -999,9 +1010,12 @@ mod tests {
             "pyproject.toml",
             "packages/api/pyproject.toml",
         ] {
+            let probed = manifest::parse(path, "")
+                .unwrap_or_else(|| panic!("{path} was not recognised from its name"));
             assert!(
-                manifest::parse(path, "").is_some(),
-                "{path} was not recognised from its name"
+                probed.gaps.is_empty(),
+                "the empty-body probe invented a gap for {path}: {:?}",
+                probed.gaps
             );
         }
         for path in ["src/app.py", "README.md", "requirements_notes.txt"] {
