@@ -11,7 +11,26 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// How long a cached `Missing` may be trusted.
+///
+/// A `Missing` blocks a build, so it is the dangerous thing to hold on to: a
+/// name cached before it was published would otherwise block forever, with no
+/// diagnostic and no cure the user has been told about. An hour is long enough
+/// to cover an edit-test loop or a run of CI retries without asking PyPI
+/// again, and short enough that publishing a package unblocks the same working
+/// day. The load this permits is negligible — at most one request per hour per
+/// name, and only for names that are already failing the gate.
+const MISSING_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// How long a cached `Exists` may be trusted.
+///
+/// Far longer, because a stale `Exists` fails open: it merely blunts the rule
+/// rather than breaking a build. Not unbounded, though — PyPI does remove
+/// projects, and removing malicious typosquats is one of the main reasons it
+/// does, so a name must eventually be asked about again.
+const EXISTS_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// How long one lookup may take before it reports [`Existence::Unknown`].
 ///
@@ -39,9 +58,52 @@ pub trait Registry {
     fn exists(&self, name: &str) -> Existence;
 }
 
+/// Seconds since the Unix epoch, or 0 if the clock is set before it.
+///
+/// Falling back to 0 makes every entry read as stale, which costs a re-query
+/// and never a wrong answer.
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
+/// One remembered answer and when it was learned.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct Entry {
+    exists: bool,
+    /// Seconds since the Unix epoch, as of the lookup that produced this.
+    checked: u64,
+}
+
+impl Entry {
+    fn existence(self) -> Existence {
+        if self.exists {
+            Existence::Exists
+        } else {
+            Existence::Missing
+        }
+    }
+
+    /// Whether this may still be used as an answer.
+    ///
+    /// A timestamp in the future — a clock that jumped backwards, or a
+    /// hand-edited file — reads as stale rather than fresh, so a bad clock
+    /// cannot make an entry immortal.
+    fn is_fresh(self, now: u64) -> bool {
+        let ttl = if self.exists { EXISTS_TTL } else { MISSING_TTL };
+        now >= self.checked && Duration::from_secs(now - self.checked) < ttl
+    }
+}
+
+/// Remembered answers, keyed by distribution name.
+///
+/// The pre-timestamp schema stored a bare bool. It does not deserialize into
+/// this, so an old file is discarded and rebuilt — see [`PyPiRegistry::new`].
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Cache {
-    known: BTreeMap<String, bool>,
+    known: BTreeMap<String, Entry>,
 }
 
 /// Resolves names against PyPI, with an on-disk cache and an offline mode.
@@ -55,6 +117,9 @@ pub struct PyPiRegistry {
     offline: bool,
     cache_path: PathBuf,
     cache: RefCell<Cache>,
+    /// Held rather than built per lookup, so a run of N names reuses one
+    /// connection pool and one TLS handshake instead of opening N.
+    agent: ureq::Agent,
 }
 
 #[allow(dead_code, reason = "wired into the gate in a later task")]
@@ -65,6 +130,14 @@ impl PyPiRegistry {
     /// rather than an error. The cache is an optimisation; losing it costs a
     /// round trip, and refusing to start over a corrupt one would turn a
     /// scratch file into a hard failure of the gate.
+    ///
+    /// A file written by the pre-timestamp schema takes that same path: it
+    /// fails to deserialize, so it is discarded and rebuilt. That is the
+    /// intended migration. Such a file records no time, so nothing in it can
+    /// be vouched for, and honouring it would resurrect the stale blocking
+    /// `Missing` the timestamp exists to prevent. The cost is one run of
+    /// re-queries; the outcome can never be a block, because a discarded entry
+    /// means asking again rather than trusting an old answer.
     pub fn new(offline: bool, cache_path: PathBuf) -> Self {
         let cache = std::fs::read_to_string(&cache_path)
             .ok()
@@ -75,6 +148,7 @@ impl PyPiRegistry {
             offline,
             cache_path,
             cache: RefCell::new(cache),
+            agent: lookup_agent(),
         }
     }
 
@@ -86,10 +160,14 @@ impl PyPiRegistry {
         if outcome == Existence::Unknown {
             return;
         }
+        let entry = Entry {
+            exists: outcome == Existence::Exists,
+            checked: now_unix(),
+        };
         self.cache
             .borrow_mut()
             .known
-            .insert(name.to_string(), outcome == Existence::Exists);
+            .insert(name.to_string(), entry);
         self.persist();
     }
 
@@ -147,12 +225,10 @@ impl Registry for PyPiRegistry {
     /// firewall, a 5xx — is [`Existence::Unknown`], and `Unknown` is never
     /// cached: it is a fact about this run's network, not about the package.
     fn exists(&self, name: &str) -> Existence {
-        if let Some(&known) = self.cache.borrow().known.get(name) {
-            return if known {
-                Existence::Exists
-            } else {
-                Existence::Missing
-            };
+        if let Some(entry) = self.cache.borrow().known.get(name).copied()
+            && entry.is_fresh(now_unix())
+        {
+            return entry.existence();
         }
 
         if self.offline {
@@ -160,7 +236,7 @@ impl Registry for PyPiRegistry {
         }
 
         let url = format!("https://pypi.org/pypi/{name}/json");
-        let outcome = classify(lookup_agent().get(&url).call().map(|_| ()));
+        let outcome = classify(self.agent.get(&url).call().map(|_| ()));
 
         self.record(name, outcome);
         outcome
