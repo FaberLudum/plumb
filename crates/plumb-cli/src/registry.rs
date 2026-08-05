@@ -27,9 +27,17 @@ const MISSING_TTL: Duration = Duration::from_secs(60 * 60);
 /// How long a cached `Exists` may be trusted.
 ///
 /// Far longer, because a stale `Exists` fails open: it merely blunts the rule
-/// rather than breaking a build. Not unbounded, though — PyPI does remove
-/// projects, and removing malicious typosquats is one of the main reasons it
-/// does, so a name must eventually be asked about again.
+/// rather than breaking a build. Bounded rather than infinite so that a name
+/// is eventually asked about again — PyPI does remove projects, and removing
+/// malicious typosquats is one of the main reasons it does.
+///
+/// **That bound applies online only.** Offline there is nothing to ask, so
+/// [`PyPiRegistry::honour_offline`] returns an `Exists` of any age, and a
+/// long-airgapped machine can report `Exists` for a package PyPI has since
+/// removed. That is the round-2 trade taken deliberately: `Exists` and
+/// `Unknown` are both non-blocking, so expiring the entry would change no
+/// blocking decision — it would only replace an answer with silence. The
+/// remedy for the staleness is to report it, not to discard it.
 const EXISTS_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// How long one lookup may take before it reports [`Existence::Unknown`].
@@ -227,6 +235,12 @@ impl PyPiRegistry {
     ///
     /// This is a read, never a refresh — see [`PyPiRegistry::exists_via`] for
     /// why the timestamp must not move.
+    ///
+    /// Age is not consulted at all, so [`EXISTS_TTL`] does not bound this
+    /// path. A machine offline for years will still report `Exists` for what
+    /// it last confirmed. Deliberate: expiring it could only turn a
+    /// non-blocking answer into a different non-blocking answer, which buys no
+    /// safety and loses the one signal an offline run still has.
     fn honour_offline(cached: Option<Entry>) -> Existence {
         match cached {
             Some(entry) if entry.exists => Existence::Exists,
@@ -458,6 +472,32 @@ mod tests {
 
         assert_eq!(registry.exists("ruff"), Existence::Exists);
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
+    }
+
+    /// `EXISTS_TTL` bounds the online path only. Offline there is nothing to
+    /// ask, so age stops mattering entirely — half a century here, and it is
+    /// still honoured.
+    ///
+    /// Pinned because it is a deliberate trade rather than an oversight, and
+    /// because the alternative is tempting: expiring it would only swap one
+    /// non-blocking answer for another, buying no safety and costing an
+    /// offline run the last signal it has. The remedy for staleness is to
+    /// report it, which belongs to whoever owns output.
+    #[test]
+    fn offline_honours_an_exists_of_any_age() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let half_a_century = 50 * 365 * 24 * 60 * 60;
+        assert!(
+            i64::try_from(EXISTS_TTL.as_secs()).expect("fits") < half_a_century,
+            "the age must be far past the lifetime for this to prove anything"
+        );
+        std::fs::write(&cache_path, cache_json(&[("ruff", true, half_a_century)]))
+            .expect("write cache");
+
+        let registry = PyPiRegistry::new(true, cache_path);
+
+        assert_eq!(registry.exists("ruff"), Existence::Exists);
     }
 
     /// Honouring is a read, not a refresh. The timestamp records when PyPI
