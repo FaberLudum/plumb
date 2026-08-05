@@ -185,6 +185,15 @@ pub enum Gap {
     /// `as_table()` are silent filters, and a file reports as fully understood
     /// because of a typo.
     Malformed(String),
+    /// Dependency declarations under `[tool]` that this module does not read,
+    /// named by their dotted TOML paths, sorted and never empty.
+    ///
+    /// One variant rather than one per tool, and the path is what makes that
+    /// work: the reader is told `tool.pdm.dev-dependencies`, not "some tool
+    /// declares dependencies". A variant per tool would be the list of tools
+    /// this rule exists to avoid, and it would put a second name in the code
+    /// for every name already in the file.
+    ToolDependencies(Vec<String>),
     Include(String),
 }
 
@@ -193,6 +202,81 @@ pub enum Gap {
 /// `dynamic` itself is ordinary — nearly every backend-built project marks
 /// `version` dynamic — so the trigger is these two names and not the key.
 const DYNAMIC_DEPENDENCY_FIELDS: [&str; 2] = ["dependencies", "optional-dependencies"];
+
+/// Whether a key under `[tool]` names a dependency declaration.
+///
+/// `dev-dependencies` needs no case of its own — it ends in `-dependencies`.
+///
+/// This is a rule about the shape of a key rather than a list of tools, and
+/// that is the whole point. A list of tools is a list that is wrong the day
+/// after it is written, and this project has already paid for closing the case
+/// it just observed instead of the class: five shapes reached the same silent
+/// exit 0, from five different tools, each spelled the same way.
+fn is_dependency_key(key: &str) -> bool {
+    key == "dependencies" || key.ends_with("-dependencies")
+}
+
+/// Whether a dotted path is a Poetry table [`parse_pyproject`] already accounts
+/// for, and so must not be reported twice.
+fn is_handled_poetry_path(segments: &[&str]) -> bool {
+    matches!(segments, ["tool", "poetry", "dependencies"])
+        || matches!(segments, ["tool", "poetry", "group", _, "dependencies"])
+}
+
+/// Finds dependency declarations anywhere under `[tool]`, by the shape of the
+/// key rather than by the name of the tool.
+///
+/// Returns dotted paths, sorted, so the message can name the table to open.
+///
+/// Three things keep this from firing on ordinary configuration, and each was
+/// chosen against a real file rather than in the abstract:
+///
+/// 1. **A matched key is never descended into.** The keys *inside* a dependency
+///    table are package names, and `[tool.pixi.pypi-dependencies]` or
+///    `[tool.poetry.dependencies]` may perfectly well hold a package called
+///    `dependencies` or `foo-dependencies`. Descending would read a package
+///    name as a second declaration and name a table that does not exist.
+/// 2. **Only an array or a table counts.** A scalar under such a key is a
+///    setting, not a set of names — a `dependencies = true` switch is
+///    configuration, and warning on it would be warning on absence.
+/// 3. **The Poetry paths this module already reports are skipped**, so the
+///    ordinary Poetry layout keeps producing one finding rather than two.
+///
+/// The traversal is iterative rather than recursive: this crate parses input
+/// nobody vouched for, and a deeply nested table must cost time, not the stack.
+fn tool_dependency_paths(document: &toml::Table) -> Vec<String> {
+    let Some(tool) = document.get("tool").and_then(|t| t.as_table()) else {
+        return Vec::new();
+    };
+
+    let mut found = Vec::new();
+    let mut pending: Vec<(Vec<&str>, &toml::Table)> = vec![(vec!["tool"], tool)];
+
+    while let Some((path, table)) = pending.pop() {
+        for (key, value) in table {
+            let mut child = path.clone();
+            child.push(key);
+
+            if is_dependency_key(key) {
+                // Matched: this is a declaration, not a container of more
+                // configuration. Report it and stop — see 1 and 2 above.
+                if !is_handled_poetry_path(&child)
+                    && (value.is_array() || value.as_table().is_some())
+                {
+                    found.push(child.join("."));
+                }
+                continue;
+            }
+
+            if let Some(nested) = value.as_table() {
+                pending.push((child, nested));
+            }
+        }
+    }
+
+    found.sort();
+    found
+}
 
 impl Gap {
     /// A sentence naming what was not read, for a human reading a finding.
@@ -220,6 +304,14 @@ impl Gap {
             Gap::Malformed(path) => format!(
                 "`{path}` is declared but is not the shape it has to be, so Plumb read \
                  nothing from it"
+            ),
+            Gap::ToolDependencies(paths) => format!(
+                "dependencies are declared in {}, which Plumb does not read",
+                paths
+                    .iter()
+                    .map(|path| format!("[{path}]"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Gap::Include(path) => {
                 format!("requirements are included from `{path}`, which Plumb does not follow")
@@ -369,29 +461,10 @@ pub fn parse_pyproject(text: &str) -> Manifest {
         }
     }
 
-    // `dynamic` is the one trigger the file states itself, in the standard's
-    // own vocabulary, rather than leaving it to be inferred from a tool table.
-    // A backend that supplies `dependencies` may keep them in `setup.py`, in a
-    // `requirements.txt` named by `[tool.setuptools.dynamic]`, or anywhere else
-    // it likes — and PEP 621 forbids `[project].dependencies` alongside, so
-    // there is nothing for the reader above to find.
-    if let Some(dynamic) = project
-        .and_then(|p| p.get("dynamic"))
-        .and_then(|d| d.as_array())
-    {
-        let listed: Vec<String> = DYNAMIC_DEPENDENCY_FIELDS
-            .iter()
-            .filter(|field| dynamic.iter().any(|entry| entry.as_str() == Some(**field)))
-            .map(|field| (*field).to_string())
-            .collect();
-        if !listed.is_empty() {
-            gaps.push(Gap::Dynamic(listed));
-        }
-    }
-
-    if document.get("dependency-groups").is_some() {
-        gaps.push(Gap::DependencyGroups);
-    }
+    // Everything below is computed before anything is pushed, because two of
+    // these triggers are about each other: the `dynamic` gap is superseded by a
+    // gap that names an actual table, and it cannot know that until the tables
+    // have been looked for.
 
     // The two Poetry tables take different conditions, and the asymmetry is
     // Poetry's rather than a lapse here.
@@ -415,6 +488,7 @@ pub fn parse_pyproject(text: &str) -> Manifest {
     // separate evidence, not an unread part of the runtime set. See [`Gap`] for
     // why a gap that fires on every run of a Poetry project is a different
     // thing from that.
+    //
     // Keyed to `as_array()`, the same test the reader takes, and not to the key
     // being present. The exemption's whole justification is that `[project]` is
     // authoritative and Plumb read it — a value the reader could not use makes
@@ -438,12 +512,54 @@ pub fn parse_pyproject(text: &str) -> Manifest {
                 .values()
                 .any(|group| group.get("dependencies").is_some())
         });
-
     // One gap however many of these hold, because the reader's action is one
     // action. `describe` names both tables.
-    if poetry_groups_declare_dependencies
-        || (poetry_declares_dependencies && !project_declares_dependencies)
+    let poetry_is_a_gap = poetry_groups_declare_dependencies
+        || (poetry_declares_dependencies && !project_declares_dependencies);
+
+    // Every other dependency declaration under `[tool]`, found by the shape of
+    // the key. See `tool_dependency_paths` for why this is not a list of tools.
+    let tool_paths = tool_dependency_paths(&document);
+
+    // `dynamic` is the one trigger the file states itself, in the standard's
+    // own vocabulary, rather than leaving it to be inferred from a tool table.
+    // A backend that supplies `dependencies` may keep them in `setup.py`, in a
+    // `requirements.txt` named by `[tool.setuptools.dynamic]`, or anywhere else
+    // it likes — and PEP 621 forbids `[project].dependencies` alongside, so
+    // there is nothing for the reader above to find.
+    //
+    // It is also the least specific of the three: it says the dependencies are
+    // declared elsewhere without saying where. So a gap that names an actual
+    // table supersedes it, and only those two do. `[dependency-groups]` must
+    // not — PEP 735 groups are a separate declaration, not the place
+    // `[project].dynamic` points to, and letting them swallow this gap would
+    // hide real evidence. Poetry 2.x is exactly this shape, and without the
+    // supersession it produces two findings for one action.
+    let dependencies_are_located_elsewhere = poetry_is_a_gap || !tool_paths.is_empty();
+    if !dependencies_are_located_elsewhere
+        && let Some(dynamic) = project
+            .and_then(|p| p.get("dynamic"))
+            .and_then(|d| d.as_array())
     {
+        let listed: Vec<String> = DYNAMIC_DEPENDENCY_FIELDS
+            .iter()
+            .filter(|field| dynamic.iter().any(|entry| entry.as_str() == Some(**field)))
+            .map(|field| (*field).to_string())
+            .collect();
+        if !listed.is_empty() {
+            gaps.push(Gap::Dynamic(listed));
+        }
+    }
+
+    if !tool_paths.is_empty() {
+        gaps.push(Gap::ToolDependencies(tool_paths));
+    }
+
+    if document.get("dependency-groups").is_some() {
+        gaps.push(Gap::DependencyGroups);
+    }
+
+    if poetry_is_a_gap {
         gaps.push(Gap::PoetryDependencies);
     }
 
@@ -993,6 +1109,347 @@ dependencies = ["ruff"]
         let manifest = parse_pyproject(text);
         assert_eq!(manifest.names, set(&["ruff"]));
         assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
+    /// The five shapes that reached exit 0 with "no findings" while declaring
+    /// a package that does not exist.
+    ///
+    /// Five tools, one spelling. They are covered by a rule about the shape of
+    /// a key — `dependencies`, or anything ending in `-dependencies`, anywhere
+    /// under `[tool]` — rather than by five cases, because five cases is a list
+    /// that is wrong the day after it is written, and this project has already
+    /// spent three fix rounds on one parser closing the case just observed.
+    ///
+    /// `[tool.poetry.dev-dependencies]` is the sharpest of them: the pre-1.2
+    /// spelling sits inside the table family this module reads and matches
+    /// neither `poetry.dependencies` nor `poetry.group.*.dependencies`.
+    #[test]
+    fn a_dependency_table_under_tool_is_a_gap_whatever_the_tool() {
+        for (label, text, expected) in [
+            (
+                "pdm",
+                "[tool.pdm.dev-dependencies]\ntest = [\"pytest\"]\n",
+                "tool.pdm.dev-dependencies",
+            ),
+            (
+                "hatch",
+                "[tool.hatch.envs.default]\ndependencies = [\"pytest\"]\n",
+                "tool.hatch.envs.default.dependencies",
+            ),
+            (
+                "uv",
+                "[tool.uv]\ndev-dependencies = [\"pytest\"]\n",
+                "tool.uv.dev-dependencies",
+            ),
+            (
+                "pixi",
+                "[tool.pixi.pypi-dependencies]\npytest = \"*\"\n",
+                "tool.pixi.pypi-dependencies",
+            ),
+            (
+                "poetry 1.x legacy",
+                "[tool.poetry.dev-dependencies]\npytest = \"^8.0\"\n",
+                "tool.poetry.dev-dependencies",
+            ),
+        ] {
+            let manifest = parse_pyproject(text);
+            assert_eq!(
+                manifest.gaps,
+                vec![Gap::ToolDependencies(vec![expected.to_string()])],
+                "{label}"
+            );
+            assert!(
+                manifest.gaps[0].describe().contains(expected),
+                "the message must name the table to open: {label}"
+            );
+        }
+    }
+
+    /// The rule this module is not allowed to break, checked against the
+    /// configuration people actually write.
+    ///
+    /// A recursive search under `[tool]` is the risk this design takes on, and
+    /// false warnings are its main failure mode — not missed gaps. So the
+    /// corpus is ordinary tool configuration, drawn from each tool's own
+    /// documented `pyproject.toml` schema, and the assertion is silence.
+    ///
+    /// Every entry here was checked for a key named `dependencies` or ending in
+    /// `-dependencies`. None has one, which is why the rule can afford to be
+    /// structural: the tools that configure *behaviour* do not spell anything
+    /// `dependencies`, and the tools that declare *packages* all spell it the
+    /// same way.
+    #[test]
+    fn ordinary_tool_configuration_raises_no_gap() {
+        let text = r#"
+[build-system]
+requires = ["setuptools>=61", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "demo"
+dependencies = ["ruff"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["build"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["demo"]
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+exclude = ["tests/"]
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+profile = "black"
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["demo"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover"]
+fail_under = 90
+
+[tool.pyright]
+include = ["src"]
+reportMissingImports = true
+
+[tool.pylint.main]
+jobs = 0
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+demo = ["py.typed"]
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/demo"]
+
+[tool.hatch.version]
+path = "src/demo/__init__.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pdm.build]
+package-dir = "src"
+
+[tool.pdm.resolution]
+excludes = ["urllib3"]
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+demo-lib = { workspace = true }
+
+[tool.commitizen]
+version = "0.1.0"
+tag_format = "v$version"
+
+[tool.towncrier]
+directory = "changes"
+package = "demo"
+
+[tool.cibuildwheel]
+build = "cp311-*"
+skip = "*-musllinux_*"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+
+[tool.scikit-build]
+cmake.version = ">=3.26"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.poe.tasks]
+test = "pytest"
+
+[tool.semantic_release]
+version_variable = "src/demo/__init__.py:__version__"
+
+[tool.tox]
+env_list = ["py311", "py312"]
+
+[tool.tox.env_run_base]
+deps = ["pytest"]
+commands = [["pytest"]]
+"#;
+        let manifest = parse_pyproject(text);
+        assert_eq!(manifest.names, set(&["ruff"]));
+        assert!(
+            manifest.gaps.is_empty(),
+            "a false warning on ordinary configuration: {:?}",
+            manifest.gaps
+        );
+    }
+
+    /// A dependency table's keys are package names, and one of them may be
+    /// called `dependencies`.
+    ///
+    /// So a matched key is reported and never descended into. Without that,
+    /// `tool.pixi.pypi-dependencies.dependencies` — a real PyPI package called
+    /// `dependencies`, pinned by an ordinary pixi project — is reported as a
+    /// second declaration, naming a table that does not exist. The same holds
+    /// under `[tool.poetry.dependencies]`, where it would manufacture a finding
+    /// on a file the module already accounts for.
+    #[test]
+    fn a_package_named_dependencies_is_not_read_as_a_second_declaration() {
+        let text = r#"
+[tool.pixi.pypi-dependencies]
+dependencies = "*"
+build-dependencies = "*"
+ruff = "*"
+"#;
+        assert_eq!(
+            parse_pyproject(text).gaps,
+            vec![Gap::ToolDependencies(vec![
+                "tool.pixi.pypi-dependencies".to_string()
+            ])]
+        );
+
+        let poetry = "[tool.poetry.dependencies]\ndependencies = \"^1.0\"\n";
+        assert_eq!(parse_pyproject(poetry).gaps, vec![Gap::PoetryDependencies]);
+    }
+
+    /// A scalar under such a key is a setting, not a set of names, and warning
+    /// on it would be warning on absence — the one thing this module may not
+    /// do. Nothing can be declared by `dependencies = true`.
+    #[test]
+    fn a_scalar_dependencies_key_under_tool_is_not_a_gap() {
+        for text in [
+            "[tool.some-tool]\ndependencies = true\n",
+            "[tool.some-tool]\ndev-dependencies = \"warn\"\n",
+            "[tool.some-tool]\ndependencies = 3\n",
+        ] {
+            let manifest = parse_pyproject(text);
+            assert!(
+                manifest.gaps.is_empty(),
+                "gaps: {:?} for {text}",
+                manifest.gaps
+            );
+        }
+    }
+
+    /// The Poetry tables this module already reports must not be reported a
+    /// second time by the structural rule, or the ordinary Poetry project gets
+    /// two findings for one action.
+    #[test]
+    fn the_poetry_tables_are_not_reported_twice() {
+        let text = r#"
+[tool.poetry.dependencies]
+requests = "^2.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+"#;
+        assert_eq!(parse_pyproject(text).gaps, vec![Gap::PoetryDependencies]);
+    }
+
+    /// Several tables in one file are one finding naming all of them, for the
+    /// reason the two Poetry tables are: one file, one reader, one action. The
+    /// paths are sorted so the message does not depend on document order.
+    #[test]
+    fn several_tool_tables_raise_one_gap_naming_each() {
+        let text = r#"
+[tool.uv]
+dev-dependencies = ["pytest"]
+
+[tool.pixi.pypi-dependencies]
+ruff = "*"
+
+[tool.pixi.feature.docs.pypi-dependencies]
+mkdocs = "*"
+"#;
+        assert_eq!(
+            parse_pyproject(text).gaps,
+            vec![Gap::ToolDependencies(vec![
+                "tool.pixi.feature.docs.pypi-dependencies".to_string(),
+                "tool.pixi.pypi-dependencies".to_string(),
+                "tool.uv.dev-dependencies".to_string(),
+            ])]
+        );
+    }
+
+    /// A gap that names a table supersedes the one that only says "elsewhere".
+    ///
+    /// Poetry 2.x is `dynamic = ["dependencies"]` plus
+    /// `[tool.poetry.dependencies]`, and both triggers describe the same fact.
+    /// The specific one survives, because it is the one a reader can act on.
+    #[test]
+    fn a_named_table_supersedes_the_dynamic_gap() {
+        let poetry = r#"
+[project]
+name = "demo"
+dynamic = ["dependencies"]
+
+[tool.poetry.dependencies]
+requests = "^2.0"
+"#;
+        assert_eq!(parse_pyproject(poetry).gaps, vec![Gap::PoetryDependencies]);
+
+        let setuptools = r#"
+[project]
+name = "demo"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+"#;
+        assert_eq!(
+            parse_pyproject(setuptools).gaps,
+            vec![Gap::ToolDependencies(vec![
+                "tool.setuptools.dynamic.dependencies".to_string()
+            ])]
+        );
+    }
+
+    /// `[dependency-groups]` must not supersede it, though.
+    ///
+    /// PEP 735 groups are a separate declaration, not the place
+    /// `[project].dynamic` points to, so letting them stand in for it would
+    /// drop the only evidence that `[project].dependencies` is unread — two
+    /// distinct blind spots reported as one.
+    #[test]
+    fn dependency_groups_do_not_supersede_the_dynamic_gap() {
+        let text = r#"
+[project]
+name = "demo"
+dynamic = ["dependencies"]
+
+[dependency-groups]
+dev = ["pytest"]
+"#;
+        assert_eq!(
+            parse_pyproject(text).gaps,
+            vec![
+                Gap::Dynamic(vec!["dependencies".to_string()]),
+                Gap::DependencyGroups,
+            ]
+        );
     }
 
     #[test]
