@@ -1435,14 +1435,18 @@ mod tests {
     use super::*;
     use crate::finding::{Finding, Tier};
 
-    fn sample() -> Vec<Finding> {
-        vec![Finding {
+    fn at_tier(tier: Tier) -> Finding {
+        Finding {
             rule: "package-exists".to_string(),
-            tier: Tier::A,
+            tier,
             message: "package `requestz` does not exist on PyPI".to_string(),
             location: "requirements.txt".to_string(),
             source: "taxonomy §4.1".to_string(),
-        }]
+        }
+    }
+
+    fn sample() -> Vec<Finding> {
+        vec![at_tier(Tier::A)]
     }
 
     #[test]
@@ -1482,7 +1486,7 @@ mod tests {
     fn json_output_spells_every_tier_as_its_variant_name() {
         let findings: Vec<Finding> = [Tier::A, Tier::B, Tier::C, Tier::Hygiene]
             .into_iter()
-            .map(finding)
+            .map(at_tier)
             .collect();
 
         let json: serde_json::Value =
