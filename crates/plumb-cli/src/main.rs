@@ -3,6 +3,8 @@
 
 use clap::Parser;
 
+mod git;
+
 #[derive(Parser)]
 #[command(
     name = "plumb",
