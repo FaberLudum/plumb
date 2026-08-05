@@ -764,6 +764,44 @@ dev = ["pytest"]
         }
     }
 
+    /// An include names a file, and the finding has to name the same file.
+    ///
+    /// pip strips a `#` comment that starts a line or follows whitespace, so
+    /// `-r base.txt  # shared pins` includes `base.txt`. Carrying the comment
+    /// into the gap produces a finding naming `base.txt  # shared pins`, which
+    /// is not a path anyone can act on — and naming the file to act on is the
+    /// whole value of the message.
+    ///
+    /// `ruff#comment` is excluded on purpose and for pip's own reason: without
+    /// preceding whitespace `#` starts no comment, so `base.txt#fragment` is a
+    /// path containing a `#` rather than a path plus a note.
+    #[test]
+    fn an_include_drops_a_trailing_comment() {
+        for (line, target) in [
+            ("-r base.txt  # shared pins", "base.txt"),
+            ("-r base.txt\t# shared pins", "base.txt"),
+            ("--requirement=base.txt # pins", "base.txt"),
+            ("-rbase.txt # pins", "base.txt"),
+            ("-r base.txt#fragment", "base.txt#fragment"),
+            ("-r base.txt", "base.txt"),
+        ] {
+            assert_eq!(
+                parse_requirements(&format!("{line}\n")).gaps,
+                vec![Gap::Include(target.to_string())],
+                "line: {line}"
+            );
+        }
+    }
+
+    /// A line whose only content after the flag is a comment names no file,
+    /// so it is no include and must not produce a gap pointing at nothing.
+    #[test]
+    fn an_include_flag_with_only_a_comment_is_not_an_include() {
+        let manifest = parse_requirements("-r  # nothing here\n");
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+        assert!(manifest.names.is_empty(), "names: {:?}", manifest.names);
+    }
+
     /// `--requirement` has to be followed by `=` or whitespace.
     ///
     /// Both halves of that guard, because each fails a different way. A long
