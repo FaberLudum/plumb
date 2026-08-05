@@ -12,8 +12,8 @@ At the **unit** level, AI-generated code is equal to or better than human code.
 Cyclomatic complexity is 2.62 against 2.47 for humans — a negligible
 difference. AI functions are *smaller* than human ones, 138.97 AST nodes
 against 201.82. Humans put more functions in a file, 11.67 against 6.62.
-Readability, maintainability and conciseness all came out slightly ahead for
-AI-assisted code in GitHub's own randomised trial.
+Readability and maintainability both came out slightly ahead for AI-assisted
+code in GitHub's own randomised trial — +3.62% and +2.47%.
 
 At the **system** level, it degrades. 22.7% of AI-introduced technical debt is
 still alive at the latest version of the projects that received it.
