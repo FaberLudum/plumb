@@ -11,7 +11,7 @@ use std::process::Command;
 /// Returns the root of the repository containing `from`.
 ///
 /// Every path the gate handles is relative to the repository root: that is
-/// what [`working_diff`] prints, and what `git show HEAD:<path>` resolves
+/// what [`changed_paths`] returns, and what `git show HEAD:<path>` resolves
 /// against. So the root is the only directory those paths may be joined onto.
 /// Joining onto the working directory instead makes a run from a subdirectory
 /// read nothing, parse nothing and report a clean run over a manifest it never
@@ -43,62 +43,78 @@ pub fn repo_root(from: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(root.trim_end_matches(['\n', '\r'])))
 }
 
-/// Returns `git diff HEAD` for the given repository.
+/// Returns the paths `git diff HEAD` reports as changed, relative to the
+/// repository root and separated by `/`.
 ///
-/// Output is decoded lossily, so it can contain U+FFFD wherever the diff
-/// carried bytes that are not valid UTF-8. See the body for why.
+/// # Why this asks for names and not for a diff
 ///
-/// # Why the invocation is this long
+/// The gate reads paths and nothing else: `check` takes the changed paths,
+/// then reads each manifest from disk and from HEAD and takes a set
+/// difference. Hunk content is never looked at.
 ///
-/// The gate reads paths out of this output. Every documented setting that
-/// changes how a path is spelled, or that puts anything in front of the
-/// header, therefore switches the gate off — not loudly, but by making it
-/// report a clean run over a manifest it never opened. All of the settings
-/// below are legal and ordinary; `color.ui = always` is someone who likes
-/// coloured diffs, and it was enough on its own.
+/// Asking for a diff anyway meant every documented setting that reshapes a
+/// hunk, colours it, re-prefixes it or replaces it wholesale could cost the
+/// parser the path — and a lost path is not an error, it is a clean run over a
+/// manifest that was never opened. Seven flags were needed to hold that line
+/// and they still did not close it. Three settings suppress the hunk entirely,
+/// replacing it with `Binary files a/… and b/… differ`, which carries no `+++`
+/// line for any flag to fix:
 ///
-/// - `--no-color` beats `color.ui` and `color.diff`. An escape sequence in
-///   front of `diff --git` means no file is recorded at all.
-/// - `--no-ext-diff` beats `diff.external` and the `GIT_EXTERNAL_DIFF`
-///   environment variable, which replace the whole diff with another tool's
-///   output, and beats a per-attribute `diff.<driver>.command`.
-/// - `--src-prefix=a/ --dst-prefix=b/` beat `diff.mnemonicPrefix`,
-///   `diff.noprefix`, `diff.srcPrefix` and `diff.dstPrefix`. `w/…` and
-///   `src/…` both survive the `b/` strip and then resolve to nothing on disk.
-/// - `--no-textconv` refuses per-attribute content converters. Their output is
-///   never read — only paths are — so converting can only cost time or, when
-///   the converter is missing, fail the run outright.
-/// - `-c core.quotePath=false` stops a non-ASCII path arriving as
-///   `"caf\303\251/requirements.txt"`, escaped and quoted, matching no
-///   manifest. Overriding it here rather than teaching the parser to unescape
-///   keeps the encoding question with the process that knows the answer.
-/// - `-c diff.relative=false` is belt and braces: it limits the diff to the
-///   working directory and prints paths relative to it. Callers pass the
-///   repository root today, which defuses it, but a caller that stopped doing
-///   so would get silence rather than an error.
+/// - `core.attributesFile` naming a file that marks paths `-diff`,
+/// - a `diff.<driver>.binary` reached through a `diff=<driver>` attribute,
+/// - `core.bigFileThreshold` set below the size of the manifest.
 ///
-/// Command-line arguments are preferred to `-c` wherever git has one, because
-/// they outrank configuration whatever a given git version calls the setting.
+/// **None of these needs the repository's cooperation.** They are ordinary
+/// dotfile settings, and `$XDG_CONFIG_HOME/git/attributes` is read with no
+/// configuration at all — so a reader must not conclude that only a hostile
+/// repository can cause this. The remaining flag that would have covered them,
+/// `--text`, is not usable: one changed 8 MB binary takes the diff from 115
+/// bytes to 16.8 MB, for content the gate does not read.
 ///
-/// Two things this deliberately does **not** do. It does not pass `--text`,
-/// which would defeat a `-diff` attribute suppressing the hunk — measured, one
-/// changed 8 MB binary turns a 115-byte diff into 16.8 MB, and the gate reads
-/// no hunk content anyway. And `core.quotePath=false` does not reach a path
-/// holding a quote, a backslash or a control character: those stay escaped and
-/// are still skipped.
-pub fn working_diff(repo: &Path) -> Result<String> {
+/// A name listing has no hunk to suppress, no prefix, no colour and no
+/// converter, so the whole class goes away rather than one more case of it.
+///
+/// What is left needs exactly two things:
+///
+/// - `-z` makes git write each path verbatim, NUL-terminated. That is what
+///   removes the escaping: without it a non-ASCII path arrives as
+///   `"caf\303\251/requirements.txt"` and a path with a space gains a trailing
+///   tab. It also covers the quote, backslash and control characters that
+///   `core.quotePath=false` could never reach, because with `-z` git does not
+///   quote at all.
+/// - `-c diff.relative=false` because that setting limits the listing to the
+///   working directory. Callers pass the repository root, which defuses it,
+///   but a caller that stopped doing so would get silence rather than an
+///   error.
+///
+///   `--no-relative` exists and would say the same thing. `-c` is used instead
+///   because the two fail differently on a git older than the flag: an
+///   unrecognised option aborts the command and takes the gate with it, while
+///   an unrecognised configuration key is ignored — and a version that does
+///   not know the key does not honour the setting either, so ignoring it is
+///   correct rather than merely quiet.
+///
+/// Verified against git 2.47.1: with `color.ui=always`, `diff.external`,
+/// `diff.mnemonicPrefix`, custom prefixes, `core.quotePath=true` and a missing
+/// per-attribute textconv all set at once, the bare `--name-only -z` form
+/// still returns the raw path and exits 0.
+///
+/// The listing reports a few things a diff does not — deletions, pure renames
+/// and mode-only changes. None of them can add a dependency, so no verdict
+/// moves; a renamed manifest is simply treated as new at its new path, which
+/// is already what a rename *with* an edit did.
+///
+/// Paths are decoded lossily. A path whose bytes are not UTF-8 comes back with
+/// U+FFFD and matches no file, which is the same outcome as before and still
+/// better than failing a whole run over one filename.
+pub fn changed_paths(repo: &Path) -> Result<Vec<String>> {
     let output = Command::new("git")
         .args([
             "-c",
-            "core.quotePath=false",
-            "-c",
             "diff.relative=false",
             "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
+            "--name-only",
+            "-z",
             "HEAD",
         ])
         .current_dir(repo)
@@ -112,13 +128,14 @@ pub fn working_diff(repo: &Path) -> Result<String> {
         );
     }
 
-    // Lossy on purpose. `git diff` writes hunk bytes verbatim for anything its
-    // NUL heuristic calls text, so one Latin-1 or Shift-JIS source file changed
-    // anywhere in the repository would otherwise fail the whole gate — for a
-    // file the gate would never have looked at, with an error the user cannot
-    // act on. Only manifest paths and added lines are read from this string,
-    // and replacement characters in an unrelated file change none of them.
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    // NUL-terminated, not NUL-separated, so the split leaves a trailing empty
+    // string. Filtering empties also makes an entirely empty listing — a clean
+    // tree — come back as no paths rather than as one nameless one.
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Returns the contents of `path` as committed at HEAD.
@@ -131,11 +148,11 @@ pub fn working_diff(repo: &Path) -> Result<String> {
 /// for a file added by the change under inspection.
 ///
 /// A failing `git show` is read as absence rather than as an error. That is
-/// safe here because callers run [`working_diff`] first, which does surface a
+/// safe here because callers run [`changed_paths`] first, which does surface a
 /// missing git, a non-repository, or an unborn HEAD as an error; by this point
 /// the only realistic cause of failure is the path genuinely not being there.
 ///
-/// Unlike [`working_diff`] this stays strict about UTF-8: a manifest really
+/// Unlike [`changed_paths`] this stays strict about UTF-8: a manifest really
 /// should be UTF-8, and here the error names a file the user can fix.
 pub fn show_at_head(repo: &Path, path: &str) -> Result<Option<String>> {
     let output = Command::new("git")
@@ -515,7 +532,7 @@ mod tests {
     /// Checked rather than assumed. `git show <rev>:<path>` writes the blob
     /// out as stored — no colour, no textconv, no line-ending conversion, and
     /// no path for `core.quotePath` to escape — so it needs none of the
-    /// hardening [`working_diff`] does. If that ever stops being true this
+    /// hardening [`changed_paths`] does. If that ever stops being true this
     /// fails, which is the point of pinning it.
     #[test]
     fn show_at_head_is_unaffected_by_the_same_configuration() {
