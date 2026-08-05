@@ -459,26 +459,140 @@ mod tests {
     /// a blocking finding on every dependency at once.
     #[test]
     fn only_a_404_reads_as_missing() {
-        assert_eq!(classify(Ok(())), Existence::Exists);
+        assert_eq!(classify(Ok(())).existence(), Existence::Exists);
         assert_eq!(
-            classify(Err(ureq::Error::StatusCode(404))),
+            classify(Err(ureq::Error::StatusCode(404))).existence(),
             Existence::Missing
         );
         assert_eq!(
-            classify(Err(ureq::Error::StatusCode(500))),
+            classify(Err(ureq::Error::StatusCode(500))).existence(),
             Existence::Unknown
         );
         assert_eq!(
-            classify(Err(ureq::Error::StatusCode(403))),
+            classify(Err(ureq::Error::StatusCode(403))).existence(),
             Existence::Unknown
         );
-        assert_eq!(classify(Err(ureq::Error::HostNotFound)), Existence::Unknown);
+        assert_eq!(
+            classify(Err(ureq::Error::HostNotFound)).existence(),
+            Existence::Unknown
+        );
         assert_eq!(
             classify(Err(ureq::Error::Io(std::io::Error::from(
                 std::io::ErrorKind::ConnectionRefused
-            )))),
+            ))))
+            .existence(),
             Existence::Unknown
         );
+    }
+
+    /// The latch keys off *why* a lookup failed, so the split has to be right.
+    /// A status code means a server answered, and its answer is about one
+    /// package — latching on a 503 would let one bad package silently disable
+    /// the gate for every name after it. Only a failure to reach anything at
+    /// all generalises to the next lookup.
+    ///
+    /// `BadUri` and `Http` are per-name too: they mean this URL could not be
+    /// built, not that the network is down.
+    #[test]
+    fn only_a_failure_to_reach_the_server_generalises() {
+        let reachable = [
+            ureq::Error::StatusCode(404),
+            ureq::Error::StatusCode(500),
+            ureq::Error::StatusCode(403),
+            ureq::Error::TooManyRedirects,
+            ureq::Error::BadUri("not a uri".into()),
+        ];
+        for error in reachable {
+            let outcome = classify(Err(error));
+            assert!(
+                matches!(outcome, Outcome::Answered(_)),
+                "{outcome:?} should not latch"
+            );
+        }
+
+        let unreachable = [
+            ureq::Error::HostNotFound,
+            ureq::Error::ConnectionFailed,
+            ureq::Error::Timeout(ureq::Timeout::Global),
+            ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)),
+        ];
+        for error in unreachable {
+            let outcome = classify(Err(error));
+            assert!(
+                matches!(outcome, Outcome::Unreachable),
+                "{outcome:?} should latch"
+            );
+        }
+    }
+
+    /// The timeout bounds one lookup; it does nothing about a run. A firewall
+    /// that blackholes packets rather than refusing them makes every name pay
+    /// the full bound, so thirty dependencies is a five-minute hang on a
+    /// blocking gate — the outcome the timeout was added to prevent, just
+    /// slower to arrive.
+    #[test]
+    fn a_transport_failure_stops_the_run_from_trying_again() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let registry = PyPiRegistry::new(false, dir.path().join("registry.json"));
+        let attempts = std::cell::Cell::new(0u32);
+        let blackhole = |_: &str| {
+            attempts.set(attempts.get() + 1);
+            Outcome::Unreachable
+        };
+
+        for name in ["ruff", "requestz", "pytest", "ruff"] {
+            assert_eq!(registry.exists_via(name, &blackhole), Existence::Unknown);
+        }
+
+        assert_eq!(
+            attempts.get(),
+            1,
+            "every name after the first paid for the same dead network"
+        );
+    }
+
+    /// The other half of the latch. A 5xx or a 403 is a reachable server
+    /// answering about one package, so it must not stop the run: latching here
+    /// would turn one flaky package into a silently disabled gate.
+    #[test]
+    fn a_server_error_does_not_stop_the_run() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let registry = PyPiRegistry::new(false, dir.path().join("registry.json"));
+        let attempts = std::cell::Cell::new(0u32);
+        let flaky = |_: &str| {
+            attempts.set(attempts.get() + 1);
+            Outcome::Answered(Existence::Unknown)
+        };
+
+        for name in ["ruff", "requestz", "pytest"] {
+            assert_eq!(registry.exists_via(name, &flaky), Existence::Unknown);
+        }
+
+        assert_eq!(attempts.get(), 3, "a reachable server must still be asked");
+    }
+
+    /// The latch sits after the cache, not before it. A warm cache and a dead
+    /// network is the ordinary offline-ish case, and it must still answer.
+    #[test]
+    fn a_warm_cache_still_answers_after_the_network_dies() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(&cache_path, cache_json(&[("ruff", true, 0)])).expect("write cache");
+        let registry = PyPiRegistry::new(false, cache_path);
+        let attempts = std::cell::Cell::new(0u32);
+        let blackhole = |_: &str| {
+            attempts.set(attempts.get() + 1);
+            Outcome::Unreachable
+        };
+
+        assert_eq!(
+            registry.exists_via("requestz", &blackhole),
+            Existence::Unknown
+        );
+        assert_eq!(attempts.get(), 1);
+
+        assert_eq!(registry.exists_via("ruff", &blackhole), Existence::Exists);
+        assert_eq!(attempts.get(), 1, "the cache was skipped once latched");
     }
 
     /// ureq 3.3 defaults every timeout to `None`, so an unanswered connection
@@ -505,7 +619,7 @@ mod tests {
             "a lookup bound of {global:?} is not a usable gate"
         );
         assert_eq!(
-            classify(Err(ureq::Error::Timeout(ureq::Timeout::Global))),
+            classify(Err(ureq::Error::Timeout(ureq::Timeout::Global))).existence(),
             Existence::Unknown
         );
     }
