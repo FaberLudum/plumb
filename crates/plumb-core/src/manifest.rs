@@ -55,12 +55,20 @@ fn requirement_name(spec: &str) -> Option<String> {
     // character check and is silently dropped. `toml` strips the BOM itself,
     // so this only matters for the requirements path.
     let spec = spec.trim_start_matches('\u{feff}');
-    // The `#` split cannot be pinned by a test: pip only treats `#` as a
-    // comment at line start or after whitespace, and whitespace already
-    // terminates the name, so no legal line changes result if it is removed.
-    // It stays as a second barrier — without it a malformed `ruff#x` would
-    // rest solely on the character check below to avoid becoming a lookup.
-    let spec = spec.split('#').next().unwrap_or(spec).trim();
+    // Comments need no handling of their own. pip treats `#` as a comment
+    // only at line start or after whitespace: after whitespace the terminator
+    // search has already ended the name, and at line start the extracted text
+    // begins with `#`, which the character check rejects. The remaining case,
+    // `ruff#comment`, is malformed for pip, and dropping the whole line is the
+    // conservative reading — an earlier `split('#')` here recovered `ruff` and
+    // sent it to the registry instead, which is the wrong direction for a gate
+    // that blocks on an unresolved name.
+    //
+    // This function is also called on `pyproject.toml` array entries, where
+    // pip's comment rule does not apply at all. The conclusion survives: `#`
+    // appears there only inside direct references such as
+    // `mypkg@https://…#sha256=…`, where `@` ends the name first.
+    let spec = spec.trim();
     if spec.is_empty() || spec.starts_with('-') {
         return None;
     }
@@ -142,14 +150,21 @@ pub fn parse(path: &str, text: &str) -> Option<BTreeSet<String>> {
     // of every line into a distribution name. Each is an unresolvable lookup,
     // so English text manufactures blocking findings.
     //
-    // `_` is not accepted, though `requirements_dev.txt` is a real
-    // convention. Accepting it would re-admit `requirements_notes.txt`, the
-    // very case this rule exists to reject, making the rule a no-op against
-    // its own motivating input. The two are indistinguishable by name, so one
-    // has to be given up, and the costs are not symmetric: missing a manifest
-    // leaves dependencies unchecked, while parsing prose blocks a build over
-    // packages that never existed. This module already prefers the first
-    // error — malformed TOML yields an empty set rather than a violation.
+    // Only `-` is accepted as that separator. This rejects two real
+    // conventions, `requirements_dev.txt` and `requirements.dev.txt`, and
+    // both are given up knowingly: admitting `_` would re-admit
+    // `requirements_notes.txt` and admitting `.` would re-admit
+    // `requirements.notes.txt`, so each would make the rule a no-op against
+    // the prose it exists to reject. Prose and manifest are indistinguishable
+    // by name, so one has to be given up, and the costs are not symmetric:
+    // missing a manifest leaves dependencies unchecked, while parsing prose
+    // blocks a build over packages that never existed. This module already
+    // prefers the first error — malformed TOML yields an empty set rather
+    // than a violation.
+    //
+    // `-` itself is no cleaner; it is kept only because `requirements-dev.txt`
+    // is too common to lose. `requirements-and-design.txt` still gets through,
+    // as the tests record.
     if let Some(rest) = file_name.strip_prefix("requirements")
         && rest.ends_with(".txt")
         && (rest == ".txt" || rest.starts_with('-'))
@@ -223,6 +238,22 @@ mod tests {
     }
 
     #[test]
+    fn requirements_do_not_look_up_an_unspaced_hash() {
+        // pip treats `#` as a comment only at line start or after whitespace,
+        // so `ruff#comment` is malformed rather than a commented requirement.
+        // Splitting on `#` would recover `ruff` from it and send that to the
+        // registry; letting the character check reject the whole line is the
+        // conservative reading, and on a blocking gate that is the one to
+        // take. Legal comments are unaffected — whitespace already ends the
+        // name — which the neighbouring tests cover.
+        assert_eq!(parse_requirements("ruff#comment\n"), set(&[]));
+        assert_eq!(
+            parse_requirements("ruff==0.4.0  # comment\n# whole line\n"),
+            set(&["ruff"])
+        );
+    }
+
+    #[test]
     fn requirements_survive_a_leading_utf8_bom() {
         // U+FEFF is not `char::is_whitespace`, so `trim()` leaves it in place
         // and the first requirement of a BOM-prefixed file would fail the
@@ -249,9 +280,12 @@ mod tests {
         assert_eq!(parse_requirements(PROSE), set(&["fast", "the"]));
 
         assert_eq!(parse("requirements_notes.txt", PROSE), None);
+        assert_eq!(parse("requirements.notes.txt", PROSE), None);
         assert_eq!(parse("requirementstxt.txt", PROSE), None);
-        // `_` is excluded deliberately: see `parse`.
+        // `_` and `.` are both excluded deliberately, giving up these two real
+        // conventions to reject the prose above: see `parse`.
         assert_eq!(parse("requirements_dev.txt", "ruff\n"), None);
+        assert_eq!(parse("requirements.dev.txt", "ruff\n"), None);
 
         assert_eq!(parse("requirements.txt", "ruff\n"), Some(set(&["ruff"])));
         assert_eq!(
