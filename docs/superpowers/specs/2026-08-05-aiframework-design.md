@@ -338,6 +338,12 @@ AiFramework/
 6. **Dogfood and calibration** — install on a real repository, baseline, and
    calibrate Tier B thresholds against actual history.
 
+Phase 5 has a hard prerequisite: **S7 and S8 must be promoted to VERIFIED
+before any Tier A gate ships.** Those two studies carry the blocking security
+gate and are still second-hand. Shipping a blocking rule on an unchecked
+citation in a project whose entire premise is evidence discipline would be
+self-refuting, and it is the first thing a reader will check.
+
 From phase 3 onward the framework is built under its own rules. It is itself
 AI-generated code and is exactly the kind of project the taxonomy describes.
 If it cannot survive its own gates, that is a finding worth having early.
@@ -362,7 +368,87 @@ conditions in the taxonomy cover this explicitly.
 framework. The two-minute bootstrap limit and the blocking/warning split are
 both there to keep total friction under the threshold where people opt out.
 
-## 14. Open questions
+## 14. Public distribution
+
+The project ships publicly on GitHub. That is a design constraint, not a
+release detail, and it changes four things.
+
+### 14.1 The evidence base is the attack surface
+
+The framework's claim to authority is that every rule cites a source. That
+makes the citations the first thing a skeptical reader checks, and a single
+misattributed paper discredits the whole taxonomy. Three consequences:
+
+- **Verification status is published, not internal.** `sources.md` ships as is,
+  including the REPORTED rows. Showing which sources are unchecked is more
+  credible than implying all of them are.
+- **Corrections are visible.** The corrections section in `sources.md` already
+  records three errors caught during verification. It stays. A project that
+  documents its own mistakes is harder to attack than one that appears
+  flawless.
+- **Contested findings are presented as contested.** Duplication is the live
+  example: GitClear and Mao reach opposite conclusions. The taxonomy says so
+  rather than picking the convenient side.
+
+### 14.2 Contribution policy
+
+The rule for contributors is the rule for us: **a pull request that adds or
+changes a rule must cite its evidence**, with metric, effect size and limits,
+and state whether the source is verified. A rule without a source is closed,
+however sensible it sounds.
+
+This is the project's identity and its main defence against becoming another
+opinionated linter. It also gives reviewers an objective criterion, which
+keeps rule debates short.
+
+Removals follow the same discipline. If evidence is refuted, the rule is
+removed and the removal is recorded — not silently dropped.
+
+### 14.3 Taxonomy versioning
+
+Rules change when evidence changes. Public consumers need that to be legible:
+
+- The taxonomy carries a version, and every rule pins the taxonomy version
+  that justifies it.
+- A changelog records evidence-driven changes separately from code changes, so
+  a user can see why a rule appeared, moved tier, or disappeared.
+- The invalidation conditions in the taxonomy are the trigger for a version
+  bump.
+
+A tool whose rules shift without explanation gets uninstalled. A tool that
+says "this rule moved from blocking to warning because the 2026 replication
+found the rate dropped fourfold" earns trust.
+
+### 14.4 Adoption and defaults
+
+Public distribution makes friction existential rather than annoying. Three
+constraints follow:
+
+- **Zero-config must do something useful.** Running `aif check` on a fresh
+  clone, with no Layer 1 artefacts and no bootstrap, must produce real value
+  from Tier A alone. Bootstrap is an upgrade, never a gate to first use.
+- **Network behaviour is documented and optional.** Registry resolution sends
+  package names to public registries. That is a privacy consideration for
+  private codebases and must be disclosed, with an offline mode that degrades
+  the check rather than failing it.
+- **No telemetry by default.** Measurement data stays local unless the user
+  opts in.
+
+### 14.5 The opt-in that matters
+
+H3 — cross-session convention drift — is unmeasured because it needs
+longitudinal repositories with session attribution, which almost nobody keeps.
+The framework records exactly that data.
+
+An opt-in, aggregated contribution channel would let adopters close a genuine
+research gap collectively. That is a real reason for the project to be public
+rather than a marketing angle, and it is the one thing this framework can do
+that a private tool cannot.
+
+Strictly opt-in, aggregated, with the collected fields documented. If it
+becomes anything users have to think about, it has failed.
+
+## 15. Open questions
 
 - Should Tier A blocking be opt-out per repository, or absolute? Leaning
   opt-out with the choice recorded, so the decision is visible rather than
@@ -374,3 +460,10 @@ both there to keep total friction under the threshold where people opt out.
   or is the correlation Zhu found an artefact of agent-generated systems
   specifically? Phase 6 answers this, and a negative answer removes a Tier B
   rule.
+- Project name. `AiFramework` is a working title and a poor public one:
+  generic, unsearchable, and it describes the category rather than the thing.
+  Needs deciding before the repository goes public, since renaming after
+  release costs links and installs.
+- License. Apache-2.0 is the recommendation over MIT: the explicit patent
+  grant matters for a tool aimed at corporate codebases, and it costs adopters
+  nothing.
