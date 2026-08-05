@@ -26,6 +26,9 @@ obj/
 .DS_Store
 Thumbs.db
 
+# Rust
+/target/
+
 # Local framework output
 .plumb/cache/
 

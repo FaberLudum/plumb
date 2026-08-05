@@ -7,5 +7,7 @@ use assert_cmd::Command;
 fn reports_its_version() {
     let mut cmd = Command::cargo_bin("plumb").expect("binary builds");
     cmd.arg("--version");
-    cmd.assert().success().stdout(predicates::str::contains("plumb 0.1.0"));
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("plumb 0.1.0"));
 }
