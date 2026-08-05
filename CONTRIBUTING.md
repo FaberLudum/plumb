@@ -63,10 +63,12 @@ Other conventions, all checked by review rather than by tooling:
 
 ## Tests must not contact the network
 
-Every test either injects a stub `Registry` or runs the binary with `--offline`
-against a seeded cache. Nothing in the suite may depend on a live PyPI, both
-because a test that fails on a train is a test people stop running, and because
-a gate whose own tests need the thing it is gating cannot be trusted about it.
+No test in `plumb-core` can reach a registry — that is what the boundary above
+is for. Every test that could, injects a stub `Registry` or runs the binary
+with `--offline` against a cache seeded by the test itself. Nothing in the
+suite may depend on a live PyPI, both because a test that fails on a train is a
+test people stop running, and because a gate whose own tests need the thing it
+is gating cannot be trusted about it.
 
 CI holds this by running the whole suite a second time in a network namespace
 with no route out, which proves the isolation in both directions before it
@@ -87,6 +89,9 @@ CI runs exactly those three, on Linux, Windows and macOS. `Cargo.lock` is
 committed, so `--locked` is not optional; `cargo fmt` is the one command that
 rejects the flag, because it never resolves a dependency.
 
-The toolchain comes from `rust-toolchain.toml` and is not written down anywhere
-else. If you need a different one, change that file — CI reads it and fails if
-the compiler in front of cargo is not the one it names.
+The toolchain comes from `rust-toolchain.toml`. No build command and no CI file
+repeats the version; CI installs whatever that file selects and then fails if
+the compiler in front of cargo is not the one it names. The workspace
+`Cargo.toml` does state `rust-version` as well, and it means a different thing
+— the oldest compiler the crates claim to support, not the one CI uses — so
+raising one is a decision about the other.
