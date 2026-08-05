@@ -15,8 +15,9 @@ use std::time::Duration;
 
 /// How long one lookup may take before it reports [`Existence::Unknown`].
 ///
-/// ureq sets no timeout at all by default, so this is the only thing bounding
-/// a lookup. It covers the whole call, resolution and connection included.
+/// ureq applies no timeout to a bodyless GET by default — global, resolve and
+/// connect are all unset — so this is the only thing bounding a lookup. It
+/// covers the whole call, resolution and connection included.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether a package could be found in its registry.
@@ -44,6 +45,11 @@ struct Cache {
 }
 
 /// Resolves names against PyPI, with an on-disk cache and an offline mode.
+///
+/// Single-threaded by construction: the [`RefCell`] makes this `!Sync`, so
+/// sharing one registry across threads is a compile error rather than a race.
+/// It is `Send`, so a whole registry can still be moved to another thread.
+/// Nothing here assumes concurrency, and lookups run one at a time.
 #[allow(dead_code, reason = "wired into the gate in a later task")]
 pub struct PyPiRegistry {
     offline: bool,
@@ -117,9 +123,12 @@ fn lookup_agent() -> ureq::Agent {
 
 /// Turns one lookup result into an outcome.
 ///
-/// Only a 200 and a 404 say anything about the package. Everything else — a
-/// 5xx, a 403 from a proxy, a dead host, a socket error, a timeout — is a
+/// Only a success and a 404 say anything about the package. Everything else —
+/// a 5xx, a 403 from a proxy, a dead host, a socket error, a timeout — is a
 /// failure to ask, and reports [`Existence::Unknown`].
+///
+/// `Ok` is any non-error status ureq settles on, redirects already followed,
+/// since it treats 4xx and 5xx as errors by default.
 ///
 /// Takes `Result<(), Error>` rather than the response so the mapping can be
 /// tested without a request; the body is never read either way.
@@ -321,6 +330,18 @@ mod tests {
         assert_eq!(reloaded.exists("requestz"), Existence::Missing);
         // Offline, so this can only be a cache miss, not a fresh lookup.
         assert_eq!(reloaded.exists("nowhere"), Existence::Unknown);
+    }
+
+    /// The `RefCell` is what keeps this single-threaded, and that is a choice,
+    /// not an oversight: nothing here needs concurrency. Pinning `Send` says
+    /// the registry can still be handed to another thread wholesale, which is
+    /// the property a caller would actually reach for. `Sync` is deliberately
+    /// absent — sharing one registry between threads must stay a compile
+    /// error, because `RefCell` would otherwise race on the cache.
+    #[test]
+    fn the_registry_can_move_between_threads_but_not_be_shared() {
+        fn assert_send<T: Send>() {}
+        assert_send::<PyPiRegistry>();
     }
 
     /// Callers hold the registry as `&dyn Registry` so they can inject a stub,
