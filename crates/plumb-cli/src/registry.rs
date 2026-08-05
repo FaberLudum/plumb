@@ -261,6 +261,24 @@ mod tests {
         );
     }
 
+    /// ureq 3.3 defaults every timeout to `None`, so an unanswered connection
+    /// would block the gate indefinitely. Hanging is worse than failing: a
+    /// gate that fails at least reports, and a build that never returns is
+    /// switched off faster than one that says the wrong thing.
+    ///
+    /// A timeout surfaces as `Existence::Unknown` like any other transport
+    /// failure, so slow networks cost a round trip, never a blocking finding.
+    #[test]
+    fn a_lookup_cannot_hang_forever() {
+        let timeouts = lookup_agent().config().timeouts();
+
+        assert_eq!(timeouts.global, Some(LOOKUP_TIMEOUT));
+        assert_eq!(
+            classify(Err(ureq::Error::Timeout(ureq::Timeout::Global))),
+            Existence::Unknown
+        );
+    }
+
     /// `Unknown` says something about this run's network, not about the
     /// package, so recording it would freeze one outage into every later run.
     #[test]
