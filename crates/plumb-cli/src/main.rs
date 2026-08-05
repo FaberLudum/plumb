@@ -39,7 +39,14 @@ struct Cli {
 enum Commands {
     /// Run gates against the working diff.
     Check {
-        /// Check the working diff. Currently the only supported scope.
+        /// Check the working tree and the index against HEAD. Currently the
+        /// only supported scope.
+        ///
+        /// A change that is already committed is outside this scope: there is
+        /// nothing left to compare, so the run checks nothing and exits 0. On
+        /// a fresh clone or a CI checkout the tree is clean and that is the
+        /// whole run. Checking a commit needs `plumb check --repo`, which is
+        /// not implemented yet.
         ///
         /// Required rather than assumed: a flag that is accepted and ignored
         /// means the day a second scope lands, every existing invocation

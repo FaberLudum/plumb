@@ -347,12 +347,22 @@ mod tests {
     /// Recorded, not endorsed.
     ///
     /// The gate reads `git diff HEAD`, which reports tracked changes only, so
-    /// a manifest that has never been added is invisible to it. That is right
-    /// where the gate is meant to run — a pre-commit hook and a CI checkout
-    /// both see staged or committed content — and wrong for a developer who
-    /// runs it by hand after creating a file. Widening it means asking git for
-    /// untracked files as well and deciding what an unstaged file even means
-    /// for a gate on a change, which is a scope decision, not wiring.
+    /// a manifest that has never been added is invisible to it. Staging it is
+    /// what makes it visible, which suits a pre-commit hook and not a
+    /// developer running the gate by hand after creating a file. Widening it
+    /// means asking git for untracked files as well and deciding what an
+    /// unstaged file even means for a gate on a change, which is a scope
+    /// decision, not wiring.
+    ///
+    /// This used to add "and a CI checkout" to the list of places that see
+    /// the content anyway. That was false, and it was the sentence that made
+    /// the larger blind spot below read as handled. A CI checkout has a
+    /// **clean tree**: `git diff HEAD` lists nothing, so the run checks
+    /// nothing and exits 0 no matter what the commit under test added. The
+    /// scope of `--diff` is the working tree and the index against HEAD, and
+    /// anything already committed is outside it — see
+    /// `a_committed_change_is_outside_the_scope_of_diff`, which pins that
+    /// directly rather than leaving it to a comment.
     ///
     /// Pinned so the limitation is visible rather than lurking: whoever
     /// changes it will delete this test on purpose.
@@ -370,6 +380,66 @@ mod tests {
 
         let (_, staged) = run(dir.path(), &registry, false).expect("check runs");
         assert_eq!(staged, 1, "staging is what makes the manifest visible");
+    }
+
+    /// The scope of `--diff` is the working tree and the index against HEAD,
+    /// so a change that is already committed has nothing left to compare and
+    /// is not checked at all.
+    ///
+    /// Recorded, not endorsed, and it is the sharpest edge this version has.
+    /// The same content blocks while it is uncommitted and passes the moment
+    /// it is committed, so a CI job that clones a branch and runs the gate is
+    /// permanently green: the checkout is clean, `git diff HEAD` lists
+    /// nothing, and the run exits 0 having looked at no manifest. That is a
+    /// silent no-op — the failure this project exists to catch — reached
+    /// through the ordinary way people wire a gate into CI.
+    ///
+    /// Not fixed here, because fixing it is a new scope rather than a
+    /// correction: the design spec reserves `plumb check --repo` for
+    /// comparing a commit range, and inventing it under `--diff` would change
+    /// what every existing invocation means. Fixed by disclosure instead —
+    /// the README says plainly what `--diff` compares and names `--repo` as
+    /// unimplemented.
+    ///
+    /// Whoever implements `--repo` should leave this test alone: it pins
+    /// `--diff`, which is still meant to mean the working diff. What must
+    /// change is the README, once the tool has an answer for a commit.
+    #[test]
+    fn a_committed_change_is_outside_the_scope_of_diff() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write(
+            dir.path(),
+            "requirements.txt",
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        );
+        let registry = StubRegistry::default();
+
+        // Uncommitted, the gate blocks on it.
+        let (_, uncommitted) = run(dir.path(), &registry, false).expect("check runs");
+        assert_eq!(
+            uncommitted, 1,
+            "the finding must exist before it can vanish"
+        );
+
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(
+            dir.path(),
+            &["commit", "-m", "add a package that does not exist"],
+        );
+        let registry = StubRegistry::default();
+
+        let (output, committed) = run(dir.path(), &registry, false).expect("check runs");
+
+        assert_eq!(
+            committed, 0,
+            "recorded, not endorsed: committing the change is what hides it"
+        );
+        assert!(output.contains("no findings"), "output was: {output}");
+        assert!(
+            registry.asked().is_empty(),
+            "nothing was looked up at all: {:?}",
+            registry.asked()
+        );
     }
 
     /// A directory with a space in its name is ordinary, and git terminates
