@@ -6,7 +6,7 @@
 
 **Architecture:** A Cargo workspace with two crates. `plumb-core` holds pure logic — diff parsing, manifest parsing, dependency set computation, findings and reporting — and is fully unit-testable without a filesystem or a network. `plumb-cli` is a thin binary that wires argument parsing, git invocation and the registry client around the core. Everything that touches the outside world (git, HTTP, cache files) lives behind a small trait so tests never hit the network.
 
-**Tech Stack:** Rust 2021, `clap` for arguments, `serde` and `serde_json` for the JSON report and cache, `toml` for `pyproject.toml`, `ureq` for blocking HTTP, `anyhow` for error handling, `assert_cmd` and `tempfile` for integration tests.
+**Tech Stack:** Rust 1.97, edition 2024, `clap` for arguments, `serde` and `serde_json` for the JSON report and cache, `toml` for `pyproject.toml`, `ureq` for blocking HTTP, `anyhow` for error handling, `assert_cmd` and `tempfile` for integration tests.
 
 ## Global Constraints
 
@@ -96,7 +96,7 @@ Create `Cargo.toml` at the repository root:
 ```toml
 [workspace]
 members = ["crates/plumb-core", "crates/plumb-cli"]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
