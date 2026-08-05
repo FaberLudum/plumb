@@ -117,13 +117,8 @@ fn check_diff(offline: bool, json: bool) -> ExitCode {
 
     match check::run(&repo, &registry, json) {
         Ok(outcome) => {
-            let check::Outcome {
-                report,
-                code,
-                unreadable,
-            } = outcome;
+            let check::Outcome { report, code } = outcome;
             write_report(&report);
-            report_unreadable_manifests(&unreadable);
             report_stale_packages(&registry);
             // `exit_code` returns 0, 1 or 2. The fallback is unreachable, and
             // is an internal error rather than a 0 so that a gate which
@@ -160,31 +155,6 @@ fn write_report(output: &str) {
         && error.kind() != std::io::ErrorKind::BrokenPipe
     {
         eprintln!("plumb: could not write the report: {error}");
-    }
-}
-
-/// Says so when a manifest the change touched could not be read.
-///
-/// Such a file contributes no dependency, so the run reports nothing about it
-/// and exits 0 — which is right, because a file this process could not decode
-/// is not evidence that a package does not exist. What was wrong was doing
-/// that in silence: one Latin-1 byte in a comment used to uncheck a whole
-/// manifest with nothing said on either stream.
-///
-/// One line per file rather than a count, unlike
-/// [`report_stale_packages`]. A stale package is a fact about a lookup and the
-/// reader can only act on the total; an unreadable manifest is a file the
-/// reader can open and fix, so naming it is the whole value of saying anything.
-///
-/// On stderr, and with no effect on the exit code, for the reasons that hold
-/// for every note this binary makes: nothing here is a rule violation, and
-/// stdout carries a report `--json` promises is parseable.
-fn report_unreadable_manifests(unreadable: &[check::Unreadable]) {
-    for manifest in unreadable {
-        eprintln!(
-            "plumb: {} was not checked: {}",
-            manifest.path, manifest.reason
-        );
     }
 }
 

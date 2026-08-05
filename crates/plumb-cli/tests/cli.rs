@@ -293,12 +293,11 @@ fn a_leftover_cache_inside_the_repository_is_reported_not_read() {
 /// comment in a `requirements.txt` is ordinary, and the package below it is
 /// not checked at all.
 ///
-/// The exit code stays 0, deliberately: a file this process could not decode
-/// is not evidence that a package does not exist, and every other failure to
-/// establish anything in this design — a firewall, an outage, an offline cold
-/// cache — is non-blocking too. What was wrong was the silence, not the
-/// verdict. So it is reported the way stale cache answers are reported, on
-/// stderr, naming the file and the reason.
+/// A file this process could not decode is not evidence that a package does
+/// not exist, so there is no Tier A violation — but it is a coverage finding,
+/// Tier B, in the report on stdout. Exit 2 rather than 0: a run that could
+/// not establish anything about a manifest must not hand back the code that
+/// means "checked and clean".
 #[test]
 fn a_manifest_that_is_not_utf8_is_reported_rather_than_skipped() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
@@ -313,8 +312,8 @@ fn a_manifest_that_is_not_utf8_is_reported_rather_than_skipped() {
     plumb_in(dir.path())
         .args(["check", "--diff", "--offline"])
         .assert()
-        .code(0)
-        .stderr(
+        .code(2)
+        .stdout(
             predicates::str::contains("requirements.txt").and(predicates::str::contains("UTF-8")),
         );
 }

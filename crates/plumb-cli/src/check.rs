@@ -13,14 +13,16 @@
 //!
 //! Failing to establish anything is not the same as having nothing to say, and
 //! the two were conflated here once already. A manifest that could not be read
-//! still moves no verdict, but the run now reports it — see [`Unreadable`].
+//! or was only partly understood still moves no verdict on any package, but it
+//! is a Tier B finding — the run warns, so exit 0 keeps meaning "checked and
+//! clean" rather than "checked, or silently skipped".
 
 use crate::git;
 use crate::registry::{Existence, Registry};
 use anyhow::Result;
 use plumb_core::deps::{self, AddedDependency};
 use plumb_core::finding::{Finding, Tier, exit_code};
-use plumb_core::manifest::{self, Ecosystem};
+use plumb_core::manifest::{self, Ecosystem, Gap};
 use plumb_core::report::{render_json, render_text};
 use std::path::Path;
 
@@ -32,32 +34,12 @@ use std::path::Path;
 /// against the taxonomy itself.
 const PACKAGE_EXISTS_SOURCE: &str = "taxonomy §4.1";
 
-/// A manifest the change touched that this run could not read.
-///
-/// Carried out of [`collect`] rather than printed where it is discovered:
-/// `check` decides what happened, the command layer decides how to say it, and
-/// a module that printed would be a module the tests could not observe.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Unreadable {
-    /// Repository-relative, as git spells it.
-    pub path: String,
-    /// Why, in a form a user can act on.
-    pub reason: String,
-}
-
 /// What one run of the gate established.
-///
-/// [`Outcome::unreadable`] is not folded into the findings on purpose. A
-/// finding asserts something about the code under inspection and carries a
-/// tier and a citation; "this process could not decode a file" asserts
-/// something about this run and cites nothing.
 pub struct Outcome {
     /// The rendered report, for stdout.
     pub report: String,
     /// `0` clean, `1` a Tier A violation, `2` warnings only.
     pub code: i32,
-    /// Manifests left unchecked because they could not be read.
-    pub unreadable: Vec<Unreadable>,
 }
 
 /// Runs the diff-scoped gates and returns the rendered report and exit code.
@@ -67,7 +49,7 @@ pub struct Outcome {
 /// registry is where the cache and the unreachable-network latch live and both
 /// are useless if they are thrown away between manifests.
 pub fn run(repo: &Path, registry: &dyn Registry, json: bool) -> Result<Outcome> {
-    let (findings, unreadable) = collect(repo, registry)?;
+    let findings = collect(repo, registry)?;
 
     let report = if json {
         render_json(&findings)
@@ -78,7 +60,6 @@ pub fn run(repo: &Path, registry: &dyn Registry, json: bool) -> Result<Outcome> 
     Ok(Outcome {
         report,
         code: exit_code(&findings),
-        unreadable,
     })
 }
 
@@ -112,14 +93,12 @@ fn read_manifest(path: &Path) -> std::result::Result<Option<String>, String> {
     })
 }
 
-/// Collects the findings for the working diff, and the manifests it could not
-/// read.
+/// Collects the findings for the working diff.
 ///
 /// Separate from [`run`] so the findings can be inspected before rendering
 /// flattens them into a string.
-fn collect(repo: &Path, registry: &dyn Registry) -> Result<(Vec<Finding>, Vec<Unreadable>)> {
+fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
-    let mut unreadable = Vec::new();
 
     for path in git::changed_paths(repo)? {
         // Ask the dispatch itself whether this path is a manifest, before
@@ -142,28 +121,28 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<(Vec<Finding>, Vec<Un
         // accepts on every platform this runs on.
         //
         // A manifest that cannot be read yields no added dependencies and so
-        // no findings. Failing open is still the right direction — a file this
-        // process could not decode is not evidence that a package does not
-        // exist — but failing open *quietly* is not. This used to be
-        // `read_to_string(...).unwrap_or_default()`, and one Latin-1 byte in a
-        // comment therefore unchecked the whole file: `# cafe pinned` blocked,
-        // `# caf\xe9 pinned` exited 0 with nothing said on either stream.
+        // no package findings. Failing open on the packages is still the right
+        // direction — a file this process could not decode is not evidence
+        // that a package does not exist — but failing open *quietly* is not.
+        // This used to be `read_to_string(...).unwrap_or_default()`, and one
+        // Latin-1 byte in a comment therefore unchecked the whole file:
+        // `# cafe pinned` blocked, `# caf\xe9 pinned` exited 0 with nothing
+        // said on either stream. An undecodable file is the same class as a
+        // gap — Plumb established nothing about it — so it reports through the
+        // same finding rather than a second channel.
         //
         // Note the asymmetry with `git::show_at_head`, which is strict about
         // UTF-8 and aborts the run with exit 70. The two sides of the same
         // comparison fail in opposite directions, and that is deliberate
         // rather than an oversight: 70 is outside the 0/1/2 contract, so the
         // before-side failure is unmistakable and can never be read as a clean
-        // run. The after-side failure could be, which is why it is reported.
+        // run. The after-side failure could be, which is why it is a finding.
         // Neither is silent; only one is fatal.
         let current = match read_manifest(&repo.join(&path)) {
             Ok(Some(text)) => text,
             Ok(None) => continue,
             Err(reason) => {
-                unreadable.push(Unreadable {
-                    path: path.clone(),
-                    reason,
-                });
+                findings.push(manifest_not_fully_read(&path, &reason));
                 continue;
             }
         };
@@ -171,24 +150,34 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<(Vec<Finding>, Vec<Un
             continue;
         };
 
+        for gap in &after.gaps {
+            findings.push(manifest_not_fully_read(&path, &gap.describe()));
+        }
+
         // `None` means the manifest is new in this change, so every name in it
         // is an addition.
         //
-        // A manifest that exists at HEAD but does not parse is a different
-        // matter and is deliberately not special-cased: it yields a `Manifest`
+        // A manifest that exists at HEAD but does not parse yields a `Manifest`
         // with no names, so every current dependency reads as added and gets
-        // looked up. The cost of that reading is bounded — extra lookups, and a
-        // finding only for a name the registry actually lacks.
-        //
-        // `manifest::parse` can now tell that case apart from a manifest that
-        // genuinely declared nothing: the first carries a `Gap`, the second
-        // does not. This wiring does not use it yet. Nothing here reads
-        // `Manifest::gaps` on either side of the comparison, so a partly
-        // understood manifest still passes as fully checked; reporting it is
-        // the next change, not this one.
-        let before = git::show_at_head(repo, &path)?
-            .and_then(|text| manifest::parse(&path, &text))
-            .map(|manifest| manifest.names);
+        // looked up. The lookups are the bounded cost of that reading; the
+        // finding is what keeps it honest, because "everything in this file is
+        // new" is an artefact of the unparsed HEAD side, not a fact about the
+        // change.
+        let before = match git::show_at_head(repo, &path)? {
+            None => None,
+            Some(text) => match manifest::parse(&path, &text) {
+                None => None,
+                Some(head) => {
+                    if head.gaps.contains(&Gap::Unparseable) {
+                        findings.push(manifest_not_fully_read(
+                            &path,
+                            "the version at HEAD does not parse, so every dependency in it reads as newly added",
+                        ));
+                    }
+                    Some(head.names)
+                }
+            },
+        };
 
         for dependency in deps::added(&path, before.as_ref(), &after.names) {
             if registry.exists(&dependency.name) == Existence::Missing {
@@ -197,7 +186,23 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<(Vec<Finding>, Vec<Un
         }
     }
 
-    Ok((findings, unreadable))
+    Ok(findings)
+}
+
+/// A manifest Plumb recognised and did not fully read.
+///
+/// Tier B, so it warns and never blocks: a gate that fails on every project in
+/// a format it has not learned yet is uninstalled before it catches anything.
+/// The message names the file and what was missed, because a warning a reader
+/// cannot act on is one they learn to skip.
+fn manifest_not_fully_read(path: &str, detail: &str) -> Finding {
+    Finding {
+        rule: "manifest-understood".to_string(),
+        tier: Tier::B,
+        message: format!("{path} was not fully read: {detail}"),
+        location: path.to_string(),
+        source: "taxonomy §10".to_string(),
+    }
 }
 
 /// The finding for a dependency no registry has.
@@ -696,14 +701,14 @@ mod tests {
     ///
     /// `read_to_string(...).unwrap_or_default()` made `after` empty, so no
     /// name was looked up and the run exited 0 with nothing on either stream.
-    /// The verdict is still 0 — a file this process cannot decode is not
-    /// evidence that a package does not exist — but the run now says which
-    /// file it gave up on.
+    /// An undecodable file is still not evidence about any package — no Tier A
+    /// violation — but it is a finding, so the exit code is 2 and the report
+    /// names the file and the byte that stopped the read.
     ///
     /// The registry log is the load-bearing assertion. A version that decoded
-    /// lossily would also exit 0 here and would look fixed, while having
-    /// quietly turned `caf<U+FFFD>` into a name; asserting that nothing was
-    /// asked pins that the file was skipped rather than mangled.
+    /// lossily would produce no coverage finding and would look fixed, while
+    /// having quietly turned `caf<U+FFFD>` into a name; asserting that nothing
+    /// was asked pins that the file was skipped rather than mangled.
     #[test]
     fn a_manifest_that_is_not_utf8_is_reported_rather_than_skipped_silently() {
         let dir = repo_with_requirements("ruff==0.4.0\n");
@@ -716,27 +721,23 @@ mod tests {
         let registry = StubRegistry::default();
 
         let outcome = run(dir.path(), &registry, false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(
-            outcome.code, 0,
-            "an undecodable file is not evidence about a package"
+            code, 2,
+            "an undecodable file warns without blocking; output was: {output}"
         );
         assert!(registry.asked().is_empty(), "asked: {:?}", registry.asked());
-        assert_eq!(outcome.unreadable.len(), 1, "{:?}", outcome.unreadable);
-        assert_eq!(outcome.unreadable[0].path, "requirements.txt");
-        assert!(
-            outcome.unreadable[0].reason.contains("UTF-8"),
-            "reason was: {}",
-            outcome.unreadable[0].reason
-        );
+        assert!(output.contains("requirements.txt"), "output was: {output}");
+        assert!(output.contains("UTF-8"), "output was: {output}");
     }
 
     /// The other half, and the one a fix for the test above could easily
     /// break. `git diff HEAD` lists a manifest the change *deleted*, which is
     /// then not there to read — an ordinary thing to do, saying nothing about
-    /// any package. Reporting it would put a line on the stderr of every run
-    /// that tidied up a requirements file, and a note that fires on ordinary
-    /// work is one every reader learns to skip.
+    /// any package. A finding for it would warn on every run that tidied up a
+    /// requirements file, and a warning that fires on ordinary work is one
+    /// every reader learns to skip.
     #[test]
     fn a_manifest_the_change_deletes_is_not_reported_as_unreadable() {
         let dir = repo_with(&[
@@ -748,15 +749,15 @@ mod tests {
 
         let outcome = run(dir.path(), &registry, false).expect("check runs");
 
-        assert_eq!(outcome.code, 0);
-        assert!(
-            outcome.unreadable.is_empty(),
-            "a deletion was reported as a failure to read: {:?}",
-            outcome.unreadable
+        assert_eq!(
+            outcome.code, 0,
+            "a deletion was reported as a failure to read; output was: {}",
+            outcome.report
         );
     }
 
-    /// A run with nothing wrong reports nothing, so the note stays meaningful.
+    /// A run with nothing wrong warns about nothing, so the finding stays
+    /// meaningful.
     #[test]
     fn a_readable_manifest_produces_no_note() {
         let dir = repo_with_requirements("ruff==0.4.0\n");
@@ -769,7 +770,11 @@ mod tests {
         let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
 
         assert_eq!(outcome.code, 1);
-        assert!(outcome.unreadable.is_empty(), "{:?}", outcome.unreadable);
+        assert!(
+            !outcome.report.contains("manifest-understood"),
+            "a fully read manifest produced a coverage finding: {}",
+            outcome.report
+        );
     }
 
     /// A directory with a space in its name is ordinary, and git terminates
@@ -945,6 +950,13 @@ mod tests {
                 "[project]\ndependencies = [\"ruff\"]\n",
                 "[project]\ndependencies = [\"ruff\", \"requestz\"]\n",
             ),
+            // The coverage finding: a Poetry-shaped manifest is recognised and
+            // not read, which is an emission site of its own.
+            (
+                "pyproject.toml",
+                "[project]\nname = \"demo\"\n",
+                "[tool.poetry.dependencies]\nrequests = \"^2.0\"\n",
+            ),
         ];
 
         let registry = StubRegistry::default();
@@ -952,7 +964,7 @@ mod tests {
         for (name, before, after) in scenarios {
             let dir = repo_with(&[(name, before)]);
             write(dir.path(), name, after);
-            findings.extend(collect(dir.path(), &registry).expect("check runs").0);
+            findings.extend(collect(dir.path(), &registry).expect("check runs"));
         }
 
         assert_eq!(
@@ -969,17 +981,23 @@ mod tests {
                 .source
                 .strip_prefix("taxonomy §")
                 .unwrap_or_else(|| panic!("source does not cite the taxonomy: {finding:#?}"));
-            // The trailing space anchors the number: without it a citation of
-            // §4.1 would be satisfied by the heading for §4.10.
-            let heading = format!("{section} ");
-            assert!(
+            // The trailing space or dot-space anchors the number: without one
+            // a citation of §4.1 would be satisfied by the heading for §4.10.
+            // Both spellings appear in the taxonomy — subsections read
+            // "### 4.1 Package hallucination", top-level sections read
+            // "## 10. Coverage reporting" — and neither anchor can be
+            // satisfied by a longer number.
+            let has_heading = |anchored: &str| {
                 taxonomy.lines().any(|line| {
                     line.starts_with('#')
                         && line
                             .trim_start_matches('#')
                             .trim_start()
-                            .starts_with(&heading)
-                }),
+                            .starts_with(anchored)
+                })
+            };
+            assert!(
+                has_heading(&format!("{section} ")) || has_heading(&format!("{section}. ")),
                 "no section {section} in the taxonomy, cited by {finding:#?}"
             );
         }
@@ -1055,7 +1073,11 @@ mod tests {
     #[test]
     fn an_ordinary_manifest_still_passes_silently() {
         let dir = repo_with(&[("requirements.txt", "ruff==0.4.0\n")]);
-        write(dir.path(), "requirements.txt", "ruff==0.4.0\nhttpx==0.27.0\n");
+        write(
+            dir.path(),
+            "requirements.txt",
+            "ruff==0.4.0\nhttpx==0.27.0\n",
+        );
 
         let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
 
