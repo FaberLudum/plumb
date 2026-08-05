@@ -26,10 +26,20 @@ pub fn working_diff(repo: &Path) -> Result<String> {
         );
     }
 
-    String::from_utf8(output.stdout).context("git produced non-UTF-8 output")
+    // Lossy on purpose. `git diff` writes hunk bytes verbatim for anything its
+    // NUL heuristic calls text, so one Latin-1 or Shift-JIS source file changed
+    // anywhere in the repository would otherwise fail the whole gate — for a
+    // file the gate would never have looked at, with an error the user cannot
+    // act on. Only manifest paths and added lines are read from this string,
+    // and replacement characters in an unrelated file change none of them.
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Returns the contents of `path` as committed at HEAD.
+///
+/// `path` must be relative to the repository root and forward-slash separated,
+/// the form `git diff` emits. A backslash-separated path resolves to nothing
+/// and so reads as absence.
 ///
 /// `Ok(None)` means the file does not exist at HEAD, which is the normal case
 /// for a file added by the change under inspection.
@@ -38,8 +48,10 @@ pub fn working_diff(repo: &Path) -> Result<String> {
 /// safe here because callers run [`working_diff`] first, which does surface a
 /// missing git, a non-repository, or an unborn HEAD as an error; by this point
 /// the only realistic cause of failure is the path genuinely not being there.
-// `allow` and not `expect`: the tests below use this, so the lint fires only
-// for the binary target and an expectation would go unfulfilled in the other.
+///
+/// Unlike [`working_diff`] this stays strict about UTF-8: a manifest really
+/// should be UTF-8, and here the error names a file the user can fix.
+// See [`working_diff`] for why this is `allow` and not `expect`.
 #[allow(dead_code, reason = "wired into the gate in a later task")]
 pub fn show_at_head(repo: &Path, path: &str) -> Result<Option<String>> {
     let output = Command::new("git")
