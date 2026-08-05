@@ -26,6 +26,10 @@ pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
         } else if line.starts_with("@@ ") {
             in_file_header = false;
         } else if in_file_header {
+            // Do not collapse this into a let-chain on the arm above. The
+            // nested form swallows every other header-block line; a let-chain
+            // would let `index …`, `new file mode …` and the `--- ` line fall
+            // through to the added-line branch below.
             if let Some(path) = line.strip_prefix("+++ ") {
                 let path = path.strip_prefix("b/").unwrap_or(path);
                 if path != "/dev/null" {
@@ -146,7 +150,7 @@ index 3333333..0000000
     }
 
     #[test]
-    fn ignores_a_post_image_header_not_preceded_by_a_pre_image_header() {
+    fn attributes_a_header_shaped_added_line_to_the_enclosing_file() {
         const DIFF: &str = "\
 diff --git a/notes.md b/notes.md
 index 1111111..2222222 100644
