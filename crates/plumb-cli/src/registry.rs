@@ -171,6 +171,123 @@ impl Registry for PyPiRegistry {
 mod tests {
     use super::*;
 
+    /// Builds a cache file body. `age` is how many seconds ago the entry was
+    /// checked; a negative age puts the timestamp in the future.
+    fn cache_json(entries: &[(&str, bool, i64)]) -> String {
+        let now = i64::try_from(now_unix()).expect("now fits an i64");
+        let body: Vec<String> = entries
+            .iter()
+            .map(|(name, exists, age)| {
+                format!(r#""{name}":{{"exists":{exists},"checked":{}}}"#, now - age)
+            })
+            .collect();
+        format!(r#"{{"known":{{{}}}}}"#, body.join(","))
+    }
+
+    /// The lifetimes are the policy, so pin the properties that justify them
+    /// rather than the numbers. A `Missing` blocks a build, so it must go
+    /// stale fast enough that publishing a package unblocks the same working
+    /// day. An `Exists` only fails open, so it can live far longer — but not
+    /// forever, or a project PyPI removes is never rechecked, and removing
+    /// malicious typosquats is precisely why PyPI removes projects.
+    #[test]
+    fn a_blocking_answer_goes_stale_faster_than_a_harmless_one() {
+        assert!(
+            MISSING_TTL <= Duration::from_secs(60 * 60),
+            "a stale Missing blocks a build; it must expire within the hour"
+        );
+        assert!(
+            MISSING_TTL >= Duration::from_secs(60),
+            "expiring this fast would re-query PyPI on every run"
+        );
+        assert!(
+            EXISTS_TTL >= MISSING_TTL * 24,
+            "a harmless answer should outlive a blocking one by a wide margin"
+        );
+        assert!(
+            EXISTS_TTL <= Duration::from_secs(90 * 24 * 60 * 60),
+            "a removed project must eventually be rechecked"
+        );
+    }
+
+    /// The whole point of the timestamp. A name cached `Missing` before it was
+    /// published would otherwise block every future build with no diagnostic
+    /// and no cure the user has been told about.
+    #[test]
+    fn an_expired_missing_is_never_returned() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(&cache_path, cache_json(&[("requestz", false, 90 * 60)]))
+            .expect("write cache");
+
+        // Offline, so an expired entry cannot be re-queried and the only
+        // honest answer is Unknown -- which never blocks.
+        let registry = PyPiRegistry::new(true, cache_path);
+
+        assert_eq!(registry.exists("requestz"), Existence::Unknown);
+    }
+
+    #[test]
+    fn an_expired_exists_is_not_returned_either() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let long_ago = 120 * 24 * 60 * 60;
+        std::fs::write(&cache_path, cache_json(&[("ruff", true, long_ago)])).expect("write cache");
+
+        let registry = PyPiRegistry::new(true, cache_path);
+
+        assert_eq!(registry.exists("ruff"), Existence::Unknown);
+    }
+
+    /// A clock that jumps backwards, or a hand-edited file, leaves entries
+    /// stamped in the future. Treating those as fresh would make them
+    /// immortal, so they must read as stale and be re-queried instead.
+    #[test]
+    fn a_timestamp_in_the_future_is_treated_as_stale() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(&cache_path, cache_json(&[("requestz", false, -86_400)]))
+            .expect("write cache");
+
+        let registry = PyPiRegistry::new(true, cache_path);
+
+        assert_eq!(registry.exists("requestz"), Existence::Unknown);
+    }
+
+    /// The pre-timestamp schema was `{"name": true}`. It carries no checked
+    /// time, so nothing in it can be vouched for. Discarding it costs one run
+    /// of re-queries and can never produce a block; honouring it would
+    /// resurrect exactly the stale `Missing` the timestamp exists to prevent.
+    #[test]
+    fn a_cache_file_from_the_old_schema_is_discarded_rather_than_trusted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(&cache_path, r#"{"known":{"ruff":true,"requestz":false}}"#)
+            .expect("write cache");
+
+        let registry = PyPiRegistry::new(true, cache_path);
+
+        assert_eq!(registry.exists("ruff"), Existence::Unknown);
+        assert_eq!(registry.exists("requestz"), Existence::Unknown);
+    }
+
+    #[test]
+    fn a_definite_answer_is_stored_with_the_time_it_was_checked() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = PyPiRegistry::new(true, cache_path.clone());
+
+        registry.record("ruff", Existence::Exists);
+
+        let written = std::fs::read_to_string(&cache_path).expect("read cache");
+        assert!(written.contains("\"checked\""), "no timestamp: {written}");
+        // Round trips as fresh, which is what makes the entry usable at all.
+        assert_eq!(
+            PyPiRegistry::new(true, cache_path).exists("ruff"),
+            Existence::Exists
+        );
+    }
+
     #[test]
     fn offline_mode_never_makes_a_request_and_reports_unknown() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -183,8 +300,11 @@ mod tests {
     fn a_cached_answer_is_returned_without_a_request() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("registry.json");
-        std::fs::write(&cache_path, r#"{"known":{"ruff":true,"requestz":false}}"#)
-            .expect("write cache");
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("ruff", true, 0), ("requestz", false, 0)]),
+        )
+        .expect("write cache");
 
         // Offline proves no request is made: the answers can only come from cache.
         let registry = PyPiRegistry::new(true, cache_path);
@@ -224,7 +344,7 @@ mod tests {
     fn an_unknown_answer_is_not_written_to_the_cache() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("registry.json");
-        std::fs::write(&cache_path, r#"{"known":{"ruff":true}}"#).expect("write cache");
+        std::fs::write(&cache_path, cache_json(&[("ruff", true, 0)])).expect("write cache");
 
         let registry = PyPiRegistry::new(true, cache_path.clone());
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
@@ -247,13 +367,8 @@ mod tests {
         let cache_path = dir.path().join("nested").join("registry.json");
 
         let first = PyPiRegistry::new(true, cache_path.clone());
-        first.cache.borrow_mut().known.insert("ruff".into(), true);
-        first
-            .cache
-            .borrow_mut()
-            .known
-            .insert("requestz".into(), false);
-        first.persist();
+        first.record("ruff", Existence::Exists);
+        first.record("requestz", Existence::Missing);
 
         let second = PyPiRegistry::new(true, cache_path);
 
@@ -299,9 +414,20 @@ mod tests {
     /// failure, so slow networks cost a round trip, never a blocking finding.
     #[test]
     fn a_lookup_cannot_hang_forever() {
-        let timeouts = lookup_agent().config().timeouts();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let registry = PyPiRegistry::new(false, dir.path().join("registry.json"));
+        let global = registry
+            .agent
+            .config()
+            .timeouts()
+            .global
+            .expect("the agent every lookup runs on must be bounded");
 
-        assert_eq!(timeouts.global, Some(LOOKUP_TIMEOUT));
+        // A bound, not `== LOOKUP_TIMEOUT`, which would hold for ten hours.
+        assert!(
+            global >= Duration::from_secs(1) && global <= Duration::from_secs(30),
+            "a lookup bound of {global:?} is not a usable gate"
+        );
         assert_eq!(
             classify(Err(ureq::Error::Timeout(ureq::Timeout::Global))),
             Existence::Unknown
@@ -314,7 +440,7 @@ mod tests {
     fn recording_stores_definite_answers_and_ignores_unknown() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("registry.json");
-        let registry = PyPiRegistry::new(false, cache_path.clone());
+        let registry = PyPiRegistry::new(true, cache_path.clone());
 
         registry.record("nowhere", Existence::Unknown);
         assert!(
@@ -352,7 +478,7 @@ mod tests {
     fn the_registry_trait_is_object_safe() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("registry.json");
-        std::fs::write(&cache_path, r#"{"known":{"ruff":true}}"#).expect("write cache");
+        std::fs::write(&cache_path, cache_json(&[("ruff", true, 0)])).expect("write cache");
 
         let registry = PyPiRegistry::new(true, cache_path);
         let erased: &dyn Registry = &registry;
