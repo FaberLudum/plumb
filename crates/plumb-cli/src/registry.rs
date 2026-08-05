@@ -37,7 +37,8 @@ const MISSING_TTL: Duration = Duration::from_secs(60 * 60);
 /// removed. That is the round-2 trade taken deliberately: `Exists` and
 /// `Unknown` are both non-blocking, so expiring the entry would change no
 /// blocking decision — it would only replace an answer with silence. The
-/// remedy for the staleness is to report it, not to discard it.
+/// remedy for the staleness is to report it, not to discard it — which is
+/// what [`PyPiRegistry::stale_answers`] is for.
 const EXISTS_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// How long one lookup may take before it reports [`Existence::Unknown`].
@@ -134,6 +135,12 @@ pub struct PyPiRegistry {
     /// In memory only. It describes this process's network for the length of
     /// this run and must not outlive it, so it is deliberately not persisted.
     unreachable: Cell<bool>,
+    /// How many answers this run took from entries past their lifetime.
+    ///
+    /// Counted rather than flagged so the report can say how much of the run
+    /// rested on old data. Like the latch, this describes this run and is
+    /// deliberately not persisted.
+    honoured_stale: Cell<usize>,
 }
 
 #[allow(dead_code, reason = "wired into the gate in a later task")]
@@ -164,7 +171,22 @@ impl PyPiRegistry {
             cache: RefCell::new(cache),
             agent: lookup_agent(),
             unreachable: Cell::new(false),
+            honoured_stale: Cell::new(0),
         }
+    }
+
+    /// How many answers this run took from cache entries past their lifetime.
+    ///
+    /// Only the offline path can produce one: online an expired entry is
+    /// re-queried, and a latched run refuses it rather than honouring it. See
+    /// [`PyPiRegistry::honour_offline`] for why offline honours it at all, and
+    /// [`EXISTS_TTL`] for why that concession needs saying out loud.
+    ///
+    /// Read once after a run rather than pushed through [`Registry`]: the
+    /// trait has to stay trivially stubbable, and a method a stub must answer
+    /// meaningfully is a method every stub gets wrong.
+    pub fn stale_answers(&self) -> usize {
+        self.honoured_stale.get()
     }
 
     /// Answers from the cache, then from `lookup`, then not at all.
@@ -202,7 +224,15 @@ impl PyPiRegistry {
         }
 
         if self.offline {
-            return Self::honour_offline(cached);
+            let answer = Self::honour_offline(cached);
+            // Reaching here means the entry was not fresh, so any answer at
+            // all is an answer taken from data past its lifetime. Counting the
+            // `Unknown`s too would report staleness for a cache miss, which is
+            // an absence rather than an old answer.
+            if answer != Existence::Unknown {
+                self.honoured_stale.set(self.honoured_stale.get() + 1);
+            }
+            return answer;
         }
 
         if self.unreachable.get() {
@@ -240,7 +270,9 @@ impl PyPiRegistry {
     /// path. A machine offline for years will still report `Exists` for what
     /// it last confirmed. Deliberate: expiring it could only turn a
     /// non-blocking answer into a different non-blocking answer, which buys no
-    /// safety and loses the one signal an offline run still has.
+    /// safety and loses the one signal an offline run still has. What makes
+    /// that defensible is that the run says so: every answer honoured here is
+    /// counted by [`PyPiRegistry::stale_answers`] and reported.
     fn honour_offline(cached: Option<Entry>) -> Existence {
         match cached {
             Some(entry) if entry.exists => Existence::Exists,
