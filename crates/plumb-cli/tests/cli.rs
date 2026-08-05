@@ -75,6 +75,36 @@ fn plumb() -> Command {
     Command::cargo_bin("plumb").expect("binary builds")
 }
 
+/// Every setting found to change the shape of `git diff` output, written as a
+/// global config the way it reaches a real developer.
+///
+/// All of these are legal, documented and the sort of thing people put in
+/// dotfiles. None is an attack; `color.ui = always` is just someone who likes
+/// coloured diffs.
+const HOSTILE_GIT_CONFIG: &str = "\
+[color]
+\tui = always
+\tdiff = always
+[diff]
+\tmnemonicPrefix = true
+\tnoprefix = true
+\tsrcPrefix = src/
+\tdstPrefix = dst/
+\trelative = true
+\texternal = /nonexistent/external-diff
+\tcolorMoved = zebra
+\twsErrorHighlight = all
+[core]
+\tquotePath = true
+";
+
+/// Writes [`HOSTILE_GIT_CONFIG`] and returns the path to give `GIT_CONFIG_GLOBAL`.
+fn hostile_git_config(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("hostile-gitconfig");
+    std::fs::write(&path, HOSTILE_GIT_CONFIG).expect("write config");
+    path
+}
+
 #[test]
 fn reports_its_version() {
     let mut cmd = plumb();
@@ -142,6 +172,64 @@ fn check_works_from_a_subdirectory_of_the_repository() {
         .assert()
         .code(1)
         .stdout(predicates::str::contains("requestz"));
+}
+
+/// The gate must survive the git config its user actually has.
+///
+/// Every setting in [`HOSTILE_GIT_CONFIG`] changes the shape of `git diff`
+/// output, and each of them alone was enough to make the gate report a clean
+/// run over a manifest it never opened: a mnemonic or custom prefix sends the
+/// path somewhere that does not exist on disk, colour puts an escape sequence
+/// in front of the header so no file is recorded at all, and an external diff
+/// replaces the output entirely.
+///
+/// A gate that switches itself off because the user likes coloured diffs is
+/// worse than no gate, because it looks like it is running. So the settings go
+/// in through `GIT_CONFIG_GLOBAL`, which is how they reach a developer, and
+/// the run still has to exit 1.
+///
+/// `GIT_EXTERNAL_DIFF` is set too: it is the environment's spelling of
+/// `diff.external`, and it would otherwise be a route around a config-only
+/// defence.
+#[test]
+fn check_survives_a_hostile_but_ordinary_git_config() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        dir.path().join("requirements.txt"),
+        "ruff==0.4.0\nrequestz==2.31.0\n",
+    )
+    .expect("write");
+    seed_cache(dir.path(), "requestz", false, 0);
+
+    plumb()
+        .args(["check", "--diff", "--offline"])
+        .current_dir(dir.path())
+        .env("GIT_CONFIG_GLOBAL", hostile_git_config(dir.path()))
+        .env("GIT_EXTERNAL_DIFF", "/nonexistent/external-diff")
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("requestz"));
+}
+
+/// The same config must not turn a clean run into a blocking one either.
+///
+/// The pair matters: a gate hardened by making everything look changed would
+/// pass the test above and be useless. Here nothing was added, so nothing may
+/// be reported however the diff is spelled.
+#[test]
+fn a_hostile_git_config_does_not_manufacture_findings() {
+    let dir = repo_with_requirements("ruff==0.4.0\nrequestz==2.31.0\n");
+    std::fs::write(dir.path().join("requirements.txt"), "ruff==0.4.1\n").expect("write");
+    seed_cache(dir.path(), "requestz", false, 0);
+
+    plumb()
+        .args(["check", "--diff", "--offline"])
+        .current_dir(dir.path())
+        .env("GIT_CONFIG_GLOBAL", hostile_git_config(dir.path()))
+        .env("GIT_EXTERNAL_DIFF", "/nonexistent/external-diff")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no findings"));
 }
 
 /// An offline run answers `Exists` from an entry of unbounded age. That is a

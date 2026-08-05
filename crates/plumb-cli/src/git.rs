@@ -298,6 +298,82 @@ mod tests {
         );
     }
 
+    /// Sets every configuration found to change the shape of `git diff`
+    /// output, in the repository's own config.
+    ///
+    /// Local rather than global because the process environment is shared with
+    /// every other test in this binary; command-line arguments outrank both, so
+    /// this exercises the same defence. `tests/cli.rs` sets the same settings
+    /// through `GIT_CONFIG_GLOBAL`, which is how they reach a developer.
+    fn make_git_hostile(dir: &Path) {
+        for (key, value) in [
+            ("color.ui", "always"),
+            ("color.diff", "always"),
+            ("diff.mnemonicPrefix", "true"),
+            ("diff.noprefix", "true"),
+            ("diff.srcPrefix", "src/"),
+            ("diff.dstPrefix", "dst/"),
+            ("diff.relative", "true"),
+            ("diff.external", "/nonexistent/external-diff"),
+            ("diff.colorMoved", "zebra"),
+            ("diff.wsErrorHighlight", "all"),
+            ("core.quotePath", "true"),
+        ] {
+            run_git(dir, &["config", key, value]);
+        }
+    }
+
+    /// The gate reads paths out of this output, so anything that changes how a
+    /// path is spelled silently unchecks the file. Every setting above does
+    /// exactly that, and all of them are legal and ordinary.
+    ///
+    /// The assertion is on the exact header rather than on the path appearing
+    /// somewhere: `src/requirements.txt` and `w/requirements.txt` both contain
+    /// the name, and both resolve to nothing on disk.
+    #[test]
+    fn working_diff_ignores_configuration_that_reshapes_its_output() {
+        let dir = init_repo();
+        make_git_hostile(dir.path());
+        fs::write(
+            dir.path().join("requirements.txt"),
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        )
+        .expect("write");
+
+        let diff = working_diff(dir.path()).expect("diff succeeds");
+
+        assert!(
+            diff.contains("+++ b/requirements.txt\n"),
+            "diff was: {diff:?}"
+        );
+        assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff:?}");
+        // Colour is the one that leaves no path at all: an escape sequence in
+        // front of `diff --git` stops the header being recognised.
+        assert!(!diff.contains('\u{1b}'), "diff carried colour: {diff:?}");
+    }
+
+    /// Checked rather than assumed. `git show <rev>:<path>` writes the blob
+    /// out as stored — no colour, no textconv, no line-ending conversion, and
+    /// no path for `core.quotePath` to escape — so it needs none of the
+    /// hardening [`working_diff`] does. If that ever stops being true this
+    /// fails, which is the point of pinning it.
+    #[test]
+    fn show_at_head_is_unaffected_by_the_same_configuration() {
+        let dir = init_repo();
+        make_git_hostile(dir.path());
+        run_git(dir.path(), &["config", "core.autocrlf", "true"]);
+        run_git(
+            dir.path(),
+            &["config", "diff.weird.textconv", "/nonexistent"],
+        );
+        fs::write(dir.path().join(".gitattributes"), "* diff=weird\n").expect("write");
+        fs::write(dir.path().join("requirements.txt"), "changed\n").expect("write");
+
+        let head = show_at_head(dir.path(), "requirements.txt").expect("show succeeds");
+
+        assert_eq!(head.as_deref(), Some("ruff==0.4.0\n"));
+    }
+
     #[test]
     fn show_at_head_returns_the_committed_contents() {
         let dir = init_repo();
