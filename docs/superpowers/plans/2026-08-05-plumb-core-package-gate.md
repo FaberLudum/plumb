@@ -1016,6 +1016,10 @@ fn normalise(name: &str) -> String {
 
 /// Extracts the distribution name from a PEP 508 requirement string.
 fn requirement_name(spec: &str) -> Option<String> {
+    // Strip a UTF-8 BOM before trimming: U+FEFF is not `char::is_whitespace`,
+    // so without this the first requirement of a BOM-prefixed file fails the
+    // character check and is silently dropped.
+    let spec = spec.trim_start_matches('\u{feff}');
     let spec = spec.split('#').next().unwrap_or(spec).trim();
     if spec.is_empty() || spec.starts_with('-') {
         return None;
@@ -1096,7 +1100,16 @@ pub fn parse(path: &str, text: &str) -> Option<BTreeSet<String>> {
     if file_name == "pyproject.toml" {
         return Some(parse_pyproject(text));
     }
-    if file_name.starts_with("requirements") && file_name.ends_with(".txt") {
+    // The character after `requirements` must be a separator. A bare prefix
+    // match pulls in any prose file whose name merely starts that way —
+    // `requirements_notes.txt`, or a plain `requirements.txt` used as a
+    // specification document in a non-Python repo — and the pip parser then
+    // turns the first word of every line into a distribution name. Each is an
+    // unresolvable lookup, so English text manufactures blocking findings.
+    if let Some(rest) = file_name.strip_prefix("requirements")
+        && file_name.ends_with(".txt")
+        && (rest == ".txt" || rest.starts_with('-') || rest.starts_with('_'))
+    {
         return Some(parse_requirements(text));
     }
 
@@ -2121,6 +2134,8 @@ git commit -m "ci: add cross-platform workflow, README and contribution policy"
 Named here so the next plan has somewhere to start, and so nobody adds them to this one.
 
 - Import-level package resolution. Mapping `import yaml` to the distribution `PyYAML` is a genuinely hard problem and is deliberately deferred; the manifest is where installation actually happens.
+- **Manifest formats beyond PEP 621 and `requirements*.txt`.** Poetry's `[tool.poetry.dependencies]`, PEP 735 `[dependency-groups]`, `[build-system].requires`, and `requirements/*.txt` layouts are all unread. Two of these are worse than merely unread, and the next plan should fix them before adding formats: a Poetry `pyproject.toml` with no `[project]` table returns `Some({})`, so the gate reports that it examined the manifest and found no dependencies. Every dependency such a project adds passes unexamined, with no signal to the user. `requirements/base.txt` at least returns `None`. Both are silent false negatives on a blocking gate, which is the exact failure this project exists to catch, and the honest fix is a third outcome meaning "manifest recognised but not understood".
+- **Direct URL references.** `mypkg @ https://example.com/mypkg.whl` yields the name `mypkg`, which by construction is not on the index, so Task 7 gets a 404 and blocks a legitimate build. This is the only known false-positive path left after the dispatch fix, and it cannot be expressed through a `BTreeSet<String>` return type. Decide before Task 7 ships as blocking.
 - TypeScript and .NET manifests. The same shape of code, one ecosystem at a time.
 - The remaining Tier A gates: SAST delegation and runtime dependency closure.
 - All of Tier B: volume and coupling tracking, boundary checks, diff-scoped debt analysis.
