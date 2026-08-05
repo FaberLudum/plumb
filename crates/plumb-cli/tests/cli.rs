@@ -36,9 +36,11 @@ fn run_git(dir: &Path, args: &[&str]) {
 
 /// A repository holding one `requirements.txt` at HEAD.
 ///
-/// No `* diff` attribute: it used to be needed to stop a developer's global
-/// attributes suppressing the hunk, which is exactly the failure
-/// `check_survives_a_hostile_but_ordinary_git_config` now provokes on purpose.
+/// No `* diff` attribute. It used to be needed to stop a developer's global
+/// attributes suppressing the hunk — which also meant no test could observe
+/// that failure, because the fixture forbade it. `HOSTILE_GIT_CONFIG` now
+/// provokes it instead, by the two global routes that beat an in-repository
+/// attribute anyway.
 fn repo_with_requirements(initial: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
     run_git(dir.path(), &["init", "-b", "main"]);
@@ -79,7 +81,17 @@ fn plumb() -> Command {
 ///
 /// All of these are legal, documented and the sort of thing people put in
 /// dotfiles. None is an attack; `color.ui = always` is just someone who likes
-/// coloured diffs.
+/// coloured diffs, and `core.attributesFile` is where a developer keeps the
+/// attributes they want in every repository.
+///
+/// Two of them do more than reshape the output: `core.bigFileThreshold` and an
+/// attributes file marking paths `-diff` make git replace the hunk with
+/// `Binary files a/… and b/… differ`, which carries no `+++` line at all.
+/// Those are the ones no flag could ever have reached, and they belong here,
+/// at the end-to-end level, in their global spelling — the whole point of the
+/// finding was that **none of this needs the repository's cooperation**.
+///
+/// `{attributes}` is substituted with a real path by [`hostile_git_config`].
 const HOSTILE_GIT_CONFIG: &str = "\
 [color]
 \tui = always
@@ -95,12 +107,22 @@ const HOSTILE_GIT_CONFIG: &str = "\
 \twsErrorHighlight = all
 [core]
 \tquotePath = true
+\tbigFileThreshold = 1
+\tattributesFile = {attributes}
 ";
 
 /// Writes [`HOSTILE_GIT_CONFIG`] and returns the path to give `GIT_CONFIG_GLOBAL`.
 fn hostile_git_config(dir: &Path) -> std::path::PathBuf {
+    let attributes = dir.join("hostile-gitattributes");
+    std::fs::write(&attributes, "* -diff\n").expect("write attributes");
+
+    // Forward slashes: a backslash is an escape character inside a git config
+    // value, so a Windows path spelled with them does not resolve — and a
+    // hostile setting that quietly fails to apply is a test proving nothing.
+    let spelled = attributes.display().to_string().replace('\\', "/");
     let path = dir.join("hostile-gitconfig");
-    std::fs::write(&path, HOSTILE_GIT_CONFIG).expect("write config");
+    std::fs::write(&path, HOSTILE_GIT_CONFIG.replace("{attributes}", &spelled))
+        .expect("write config");
     path
 }
 
