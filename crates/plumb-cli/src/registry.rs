@@ -8,7 +8,7 @@
 //! else is ever sent.
 
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -120,6 +120,11 @@ pub struct PyPiRegistry {
     /// Held rather than built per lookup, so a run of N names reuses one
     /// connection pool and one TLS handshake instead of opening N.
     agent: ureq::Agent,
+    /// Set once the network proves unreachable, and never cleared.
+    ///
+    /// In memory only. It describes this process's network for the length of
+    /// this run and must not outlive it, so it is deliberately not persisted.
+    unreachable: Cell<bool>,
 }
 
 #[allow(dead_code, reason = "wired into the gate in a later task")]
@@ -149,7 +154,57 @@ impl PyPiRegistry {
             cache_path,
             cache: RefCell::new(cache),
             agent: lookup_agent(),
+            unreachable: Cell::new(false),
         }
+    }
+
+    /// Answers from the cache, then from `lookup`, then not at all.
+    ///
+    /// The lookup is a parameter so the request itself can be replaced in
+    /// tests. [`Registry::exists`] passes the real one.
+    ///
+    /// Order matters. The cache is consulted first, so a warm cache still
+    /// answers on a dead network. Then the latch: once a lookup has failed for
+    /// a transport reason, every later name in this run reports `Unknown`
+    /// without a request, because they would all pay [`LOOKUP_TIMEOUT`] to
+    /// learn the same thing. Thirty dependencies behind a blackholing firewall
+    /// is otherwise a five-minute hang, and a gate that hangs gets switched
+    /// off exactly like one that fails.
+    fn exists_via(&self, name: &str, lookup: impl Fn(&str) -> Outcome) -> Existence {
+        if let Some(entry) = self.cache.borrow().known.get(name).copied()
+            && entry.is_fresh(now_unix())
+        {
+            return entry.existence();
+        }
+
+        if self.offline || self.unreachable.get() {
+            return Existence::Unknown;
+        }
+
+        let outcome = lookup(name);
+        if outcome == Outcome::Unreachable {
+            self.unreachable.set(true);
+        }
+
+        // `record` drops `Unknown`, which is what both an unreachable network
+        // and an unhelpful answer come to, so neither reaches the cache.
+        let existence = outcome.existence();
+        self.record(name, existence);
+        existence
+    }
+
+    /// Asks PyPI about one name.
+    fn lookup(&self, name: &str) -> Outcome {
+        // Task 4 admits only ASCII alphanumerics and `-` into a name, anchored
+        // alphanumeric at both ends, so the name cannot alter the URL's shape.
+        // Asserting it here keeps that guarantee local to the code that builds
+        // the URL, rather than resting on a crate this file never references.
+        debug_assert!(
+            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "name reached the registry unvalidated: {name:?}"
+        );
+        let url = format!("https://pypi.org/pypi/{name}/json");
+        classify(self.agent.get(&url).call().map(|_| ()))
     }
 
     /// Records a definite answer and writes the cache back.
@@ -199,22 +254,61 @@ fn lookup_agent() -> ureq::Agent {
     )
 }
 
+/// What one lookup established.
+///
+/// The distinction is whether the failure was about the package or about the
+/// network, because only the second generalises to the next name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// A server answered. `Unknown` here means it answered unhelpfully — a
+    /// 5xx, or a 403 — which says nothing about this package and nothing
+    /// about the next one either.
+    Answered(Existence),
+    /// Nothing answered: DNS, socket, TLS, proxy or timeout. This one does
+    /// generalise, so it latches for the rest of the run.
+    Unreachable,
+}
+
+impl Outcome {
+    fn existence(self) -> Existence {
+        match self {
+            Outcome::Answered(existence) => existence,
+            Outcome::Unreachable => Existence::Unknown,
+        }
+    }
+}
+
 /// Turns one lookup result into an outcome.
 ///
-/// Only a success and a 404 say anything about the package. Everything else —
-/// a 5xx, a 403 from a proxy, a dead host, a socket error, a timeout — is a
-/// failure to ask, and reports [`Existence::Unknown`].
+/// Only a success and a 404 say anything about the package. A 5xx or a 403 is
+/// a reachable server declining to say, and everything else — a dead host, a
+/// socket error, a timeout, a TLS failure — is a failure to reach it at all.
+///
+/// `BadUri`, `Http` and the redirect errors stay on the answered side on
+/// purpose: they are properties of this one request, not of the network, so
+/// one odd name must not disable lookups for the rest of the run. The
+/// catch-all latches instead, because ureq's error enum is `#[non_exhaustive]`
+/// and the variants not named here are all reachability failures.
 ///
 /// `Ok` is any non-error status ureq settles on, redirects already followed,
 /// since it treats 4xx and 5xx as errors by default.
 ///
 /// Takes `Result<(), Error>` rather than the response so the mapping can be
 /// tested without a request; the body is never read either way.
-fn classify(result: Result<(), ureq::Error>) -> Existence {
+fn classify(result: Result<(), ureq::Error>) -> Outcome {
     match result {
-        Ok(()) => Existence::Exists,
-        Err(ureq::Error::StatusCode(404)) => Existence::Missing,
-        Err(_) => Existence::Unknown,
+        Ok(()) => Outcome::Answered(Existence::Exists),
+        Err(ureq::Error::StatusCode(404)) => Outcome::Answered(Existence::Missing),
+        Err(
+            ureq::Error::StatusCode(_)
+            | ureq::Error::Http(_)
+            | ureq::Error::BadUri(_)
+            | ureq::Error::Protocol(_)
+            | ureq::Error::TooManyRedirects
+            | ureq::Error::RedirectFailed
+            | ureq::Error::BodyExceedsLimit(_),
+        ) => Outcome::Answered(Existence::Unknown),
+        Err(_) => Outcome::Unreachable,
     }
 }
 
@@ -225,21 +319,7 @@ impl Registry for PyPiRegistry {
     /// firewall, a 5xx — is [`Existence::Unknown`], and `Unknown` is never
     /// cached: it is a fact about this run's network, not about the package.
     fn exists(&self, name: &str) -> Existence {
-        if let Some(entry) = self.cache.borrow().known.get(name).copied()
-            && entry.is_fresh(now_unix())
-        {
-            return entry.existence();
-        }
-
-        if self.offline {
-            return Existence::Unknown;
-        }
-
-        let url = format!("https://pypi.org/pypi/{name}/json");
-        let outcome = classify(self.agent.get(&url).call().map(|_| ()));
-
-        self.record(name, outcome);
-        outcome
+        self.exists_via(name, |name| self.lookup(name))
     }
 }
 
@@ -541,7 +621,7 @@ mod tests {
         };
 
         for name in ["ruff", "requestz", "pytest", "ruff"] {
-            assert_eq!(registry.exists_via(name, &blackhole), Existence::Unknown);
+            assert_eq!(registry.exists_via(name, blackhole), Existence::Unknown);
         }
 
         assert_eq!(
@@ -565,7 +645,7 @@ mod tests {
         };
 
         for name in ["ruff", "requestz", "pytest"] {
-            assert_eq!(registry.exists_via(name, &flaky), Existence::Unknown);
+            assert_eq!(registry.exists_via(name, flaky), Existence::Unknown);
         }
 
         assert_eq!(attempts.get(), 3, "a reachable server must still be asked");
@@ -586,12 +666,12 @@ mod tests {
         };
 
         assert_eq!(
-            registry.exists_via("requestz", &blackhole),
+            registry.exists_via("requestz", blackhole),
             Existence::Unknown
         );
         assert_eq!(attempts.get(), 1);
 
-        assert_eq!(registry.exists_via("ruff", &blackhole), Existence::Exists);
+        assert_eq!(registry.exists_via("ruff", blackhole), Existence::Exists);
         assert_eq!(attempts.get(), 1, "the cache was skipped once latched");
     }
 
