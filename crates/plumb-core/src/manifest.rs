@@ -1354,6 +1354,106 @@ ruff = "*"
         }
     }
 
+    /// The two documented tables where the key matches and the value is not a
+    /// set of packages that can reach an environment.
+    ///
+    /// Both were found by reading tool schemas rather than by guessing, and
+    /// both warned before they were excluded. They are the price of a
+    /// structural rule, and they are paid as an exclusion list rather than by
+    /// abandoning it: an exclusion list fails towards a warning, so a tool
+    /// nobody has heard of is still caught the day it appears. An inclusion
+    /// list of known tools fails towards silence, which is the failure this
+    /// whole module exists to stop.
+    ///
+    /// `tool.ruff.analyze.include-dependencies` maps a file path to file paths
+    /// and globs, for `ruff analyze graph`. `configs/bar.json` is not a
+    /// package and never was.
+    ///
+    /// The constraint family names real packages and is documented as never
+    /// installing any of them: uv's `constraint-dependencies`,
+    /// `build-constraint-dependencies` and `override-dependencies` are
+    /// resolver inputs that "will not trigger installation of the package on
+    /// its own", and `exclude-dependencies` — with rye's
+    /// `excluded-dependencies` — is the inverse of a declaration. A package
+    /// that cannot be installed cannot be the hallucinated package this gate
+    /// exists to catch, so the file is fully read without them.
+    #[test]
+    fn a_key_that_matches_but_declares_no_installable_package_is_not_a_gap() {
+        let ruff = r#"
+[project]
+name = "demo"
+dependencies = ["ruff"]
+
+[tool.ruff.analyze.include-dependencies]
+"foo/bar.py" = ["foo/baz/*.py"]
+"#;
+        let manifest = parse_pyproject(ruff);
+        assert_eq!(manifest.names, set(&["ruff"]));
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+
+        for key in [
+            "constraint-dependencies",
+            "build-constraint-dependencies",
+            "override-dependencies",
+            "exclude-dependencies",
+            "excluded-dependencies",
+        ] {
+            let text = format!(
+                "[project]\nname = \"demo\"\ndependencies = [\"ruff\"]\n\n\
+                 [tool.uv]\n{key} = [\"urllib3<2\"]\n"
+            );
+            let manifest = parse_pyproject(&text);
+            assert!(manifest.gaps.is_empty(), "{key}: {:?}", manifest.gaps);
+        }
+    }
+
+    /// A boolean under a matching key declares nothing, and hatch really does
+    /// spell one `require-runtime-dependencies`.
+    ///
+    /// This is the narrowing that pays for itself: the key ends in
+    /// `-dependencies`, sits three tables deep under `[tool]`, and names zero
+    /// packages — it only asks the build environment to install what the
+    /// project already declares. Requiring an array or a table excludes it
+    /// without anyone having to know hatch exists.
+    #[test]
+    fn hatchs_boolean_dependency_switch_is_not_a_gap() {
+        let text = r#"
+[project]
+name = "demo"
+dependencies = ["ruff"]
+
+[tool.hatch.build.targets.wheel]
+require-runtime-dependencies = true
+
+[tool.hatch.build.hooks.custom]
+require-runtime-dependencies = false
+"#;
+        let manifest = parse_pyproject(text);
+        assert_eq!(manifest.names, set(&["ruff"]));
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
+    /// An array's elements are never descended into, so a `dependencies` key
+    /// *inside* one is not a second declaration.
+    ///
+    /// uv's `override-dependencies` is documented with exactly this shape, and
+    /// a walker that entered array elements would report one declaration
+    /// twice. It is excluded here for another reason entirely, so the case is
+    /// pinned on a key that does fire.
+    #[test]
+    fn a_dependencies_key_inside_an_array_element_is_not_a_second_gap() {
+        let text = r#"
+[tool.example]
+dev-dependencies = [{ package = "flask", dependencies = ["itsdangerous"] }]
+"#;
+        assert_eq!(
+            parse_pyproject(text).gaps,
+            vec![Gap::ToolDependencies(vec![
+                "tool.example.dev-dependencies".to_string()
+            ])]
+        );
+    }
+
     /// The Poetry tables this module already reports must not be reported a
     /// second time by the structural rule, or the ordinary Poetry project gets
     /// two findings for one action.

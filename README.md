@@ -127,24 +127,53 @@ nothing else is there:
   findings. Restricting it to `-` narrows that problem without solving it — see
   the first of the false positives below.
 - Several declaration shapes inside a recognised manifest are still unread,
-  but no longer silently: a Poetry `[tool.poetry.dependencies]` table, PEP 735
-  `[dependency-groups]`, and an `-r`/`--requirement` include each produce a
-  Tier B `manifest-understood` warning naming the file and the shape that was
-  missed, and the run exits `2`. On a Poetry manifest it prints
-  `pyproject.toml was not fully read: dependencies are declared under
-  [tool.poetry] — in [tool.poetry.dependencies] or a
-  [tool.poetry.group.<name>.dependencies] table — which Plumb does not read`.
-  The dependencies in those shapes are still not looked up — the warning
-  reports the gap, it does not close it.
-- Two formats are still silent, because they are not recognised as manifests
-  at all and recognition is by filename: `requirements/base.txt` reached
-  through an include (the include warns, the file it names is never read on
-  its own), and `requirements.in`, the hand-edited pip-compile source — which
-  is exactly where a hallucinated name is introduced, before it is ever
-  compiled into a pinned `requirements.txt`. These remain silent false
-  negatives on a blocking gate, which is the failure this project exists to
-  catch, and they are the next thing to fix. `[build-system].requires` is
-  simply unread, with no warning either.
+  but no longer silently. Each produces a Tier B `manifest-understood` warning
+  naming the file and the shape that was missed, and the run exits `2`:
+  - Poetry's tables, `[tool.poetry.dependencies]` and
+    `[tool.poetry.group.<name>.dependencies]`.
+  - PEP 735 `[dependency-groups]`.
+  - An `-r`/`--requirement` include in a requirements file.
+  - PEP 621 `dynamic` listing `dependencies` or `optional-dependencies` — the
+    standard's own way of saying the dependencies are declared somewhere else.
+  - Any key named `dependencies`, or ending in `-dependencies`, anywhere under
+    `[tool]`. This is a rule about the shape of the key, not a list of tools,
+    and it is what covers `[tool.pdm.dev-dependencies]`,
+    `[tool.hatch.envs.<name>].dependencies` and `.extra-dependencies`,
+    `[tool.uv].dev-dependencies`, `[tool.pixi.pypi-dependencies]`,
+    `[tool.setuptools.dynamic].dependencies` and the pre-1.2
+    `[tool.poetry.dev-dependencies]` — none of which is named anywhere in the
+    code.
+  - A declaration whose value is not the shape the reader takes, such as
+    `dependencies = "ruff"` instead of a list.
+
+  On a Poetry manifest it prints `pyproject.toml was not fully read:
+  dependencies are declared under [tool.poetry] — in
+  [tool.poetry.dependencies] or a [tool.poetry.group.<name>.dependencies]
+  table — which Plumb does not read`; on a PDM one, `pyproject.toml was not
+  fully read: dependencies are declared in [tool.pdm.dev-dependencies], which
+  Plumb does not read`. The dependencies in those shapes are still not looked
+  up — the warning reports the gap, it does not close it.
+- What is still silent, measured rather than assumed. Two kinds:
+
+  **Files not recognised as manifests at all**, because recognition is by
+  filename: `requirements.in` (the hand-edited pip-compile source — exactly
+  where a hallucinated name is introduced, before it is ever compiled into a
+  pinned `requirements.txt`), `requirements/base.txt` reached through an
+  include (the include warns, the file it names is never read on its own),
+  `requirements_dev.txt` and `requirements.dev.txt`, `setup.py`, `setup.cfg`
+  and `Pipfile`.
+
+  **Declarations inside a recognised `pyproject.toml` that are not spelled
+  `dependencies`.** The structural rule above keys on that word, so a tool
+  that calls its dependency list something else is not covered. Measured, each
+  exiting `0` with `plumb: no findings` over a package that does not exist:
+  `[tool.tox.env_run_base].deps`, `[tool.briefcase.app.<name>].requires`,
+  `[tool.cibuildwheel].test-requires`, and `[build-system].requires` — the
+  last deliberately, because it appears in nearly every `pyproject.toml` and a
+  warning that always fires is one nobody reads.
+
+  All of these remain silent false negatives on a blocking gate, which is the
+  failure this project exists to catch.
 - A manifest that is not valid UTF-8 is not checked, and says so the same way:
   one Latin-1 byte costs the whole file, nothing in it is looked up, and the
   run warns — `requirements.txt was not fully read: not valid UTF-8 at byte 5`
