@@ -1067,6 +1067,77 @@ mod tests {
         );
     }
 
+    /// A manifest that does not parse *at HEAD* makes the whole after-side
+    /// read as newly added, and the run says so.
+    ///
+    /// This is the emission site with the least to hold it up, because nothing
+    /// about it is visible in the verdict on an ordinary day: the after-side
+    /// parses, every name in it resolves, and the run would exit 0 with no
+    /// finding at all. What it would be hiding is that "these dependencies are
+    /// new" is an artefact of the unparsed before-side — the change added
+    /// nothing, it only repaired a broken file — and on a repository whose
+    /// packages come from a private index, that artefact is a wall of blocking
+    /// findings with no stated cause.
+    ///
+    /// The registry log is the load-bearing half. Asserting exit 2 alone
+    /// passes against an implementation that warns for any reason; asserting
+    /// that `ruff` was looked up pins that the name really was treated as
+    /// added, which is the thing the sentence claims. `ruff` resolves in the
+    /// stub, so the verdict stays 2 and the coverage finding is not hidden
+    /// behind a Tier A one.
+    #[test]
+    fn a_manifest_that_does_not_parse_at_head_says_so() {
+        let dir = repo_with(&[("pyproject.toml", "[project]\nname = \"demo\"\n{{{")]);
+        write(
+            dir.path(),
+            "pyproject.toml",
+            "[project]\nname = \"demo\"\ndependencies = [\"ruff\"]\n",
+        );
+        let registry = StubRegistry::default();
+
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert!(output.contains("pyproject.toml"), "output was: {output}");
+        assert!(
+            output.contains("HEAD"),
+            "the report must name the side that failed to parse: {output}"
+        );
+        assert_eq!(
+            registry.asked(),
+            vec!["ruff"],
+            "an unparsed HEAD is what makes an unchanged dependency read as added"
+        );
+    }
+
+    /// The other direction, and what keeps the test above from being satisfied
+    /// by warning on every `pyproject.toml`: when HEAD parses, no HEAD finding
+    /// is emitted, and a dependency that was already there is not looked up.
+    #[test]
+    fn a_manifest_that_parses_at_head_produces_no_head_finding() {
+        let dir = repo_with(&[(
+            "pyproject.toml",
+            "[project]\nname = \"demo\"\ndependencies = [\"ruff\"]\n",
+        )]);
+        write(
+            dir.path(),
+            "pyproject.toml",
+            "[project]\nname = \"demo2\"\ndependencies = [\"ruff\"]\n",
+        );
+        let registry = StubRegistry::default();
+
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+        assert!(
+            !outcome.report.contains("HEAD"),
+            "output was: {}",
+            outcome.report
+        );
+        assert!(registry.asked().is_empty(), "asked: {:?}", registry.asked());
+    }
+
     /// The other direction: a manifest read in full must not start warning.
     /// A coverage note that fires on ordinary work is one every reader learns
     /// to skip, and then the gate is uninstalled.
