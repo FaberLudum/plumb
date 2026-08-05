@@ -14,22 +14,26 @@ pub struct ChangedFile {
 /// offsets and removals are deliberately ignored.
 pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
+    let mut after_pre_image_header = false;
 
     for line in diff.lines() {
-        if let Some(path) = line.strip_prefix("+++ ") {
+        let is_pre_image_header = line.starts_with("--- ");
+
+        if after_pre_image_header && let Some(path) = line.strip_prefix("+++ ") {
             let path = path.strip_prefix("b/").unwrap_or(path);
-            if path == "/dev/null" {
-                continue;
+            if path != "/dev/null" {
+                files.push(ChangedFile {
+                    path: path.to_string(),
+                    added_lines: Vec::new(),
+                });
             }
-            files.push(ChangedFile {
-                path: path.to_string(),
-                added_lines: Vec::new(),
-            });
         } else if let Some(added) = line.strip_prefix('+')
             && let Some(current) = files.last_mut()
         {
             current.added_lines.push(added.to_string());
         }
+
+        after_pre_image_header = is_pre_image_header;
     }
 
     files
