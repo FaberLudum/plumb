@@ -223,6 +223,40 @@ fn is_handled_poetry_path(segments: &[&str]) -> bool {
         || matches!(segments, ["tool", "poetry", "group", _, "dependencies"])
 }
 
+/// Keys that name packages which cannot reach an environment.
+///
+/// uv documents `constraint-dependencies`, `build-constraint-dependencies` and
+/// `override-dependencies` as resolver inputs that "will not trigger
+/// installation of the package on its own"; `exclude-dependencies`, and rye's
+/// `excluded-dependencies`, are the inverse of a declaration. A package that
+/// cannot be installed cannot be the hallucinated package this gate exists to
+/// catch, so a project using them is fully read and must not warn.
+///
+/// Named by key rather than by tool on purpose: these are words about
+/// resolution, and the next tool to need one will reach for the same word.
+const NON_INSTALLING_KEYS: [&str; 5] = [
+    "build-constraint-dependencies",
+    "constraint-dependencies",
+    "exclude-dependencies",
+    "excluded-dependencies",
+    "override-dependencies",
+];
+
+/// Dotted paths where the key matches and the value is not packages at all.
+///
+/// `tool.ruff.analyze.include-dependencies` maps a file path to file paths and
+/// globs, for `ruff analyze graph`: `configs/bar.json` is not a package and
+/// never was. It is a table, so no shape check can reject it, and ruff is in
+/// enough repositories that a false warning here would be seen everywhere.
+///
+/// An exclusion list rather than an inclusion list of known tools, and the
+/// direction is the whole argument. This one fails towards a warning, so a
+/// tool nobody here has heard of is still caught the day it appears; an
+/// inclusion list fails towards silence, which is the failure this module
+/// exists to stop. It stays short only if it is only ever extended against a
+/// documented schema.
+const NOT_A_DEPENDENCY_TABLE: [&str; 1] = ["tool.ruff.analyze.include-dependencies"];
+
 /// Finds dependency declarations anywhere under `[tool]`, by the shape of the
 /// key rather than by the name of the tool.
 ///
@@ -260,10 +294,13 @@ fn tool_dependency_paths(document: &toml::Table) -> Vec<String> {
             if is_dependency_key(key) {
                 // Matched: this is a declaration, not a container of more
                 // configuration. Report it and stop — see 1 and 2 above.
+                let path = child.join(".");
                 if !is_handled_poetry_path(&child)
+                    && !NON_INSTALLING_KEYS.contains(&key.as_str())
+                    && !NOT_A_DEPENDENCY_TABLE.contains(&path.as_str())
                     && (value.is_array() || value.as_table().is_some())
                 {
-                    found.push(child.join("."));
+                    found.push(path);
                 }
                 continue;
             }
