@@ -177,6 +177,14 @@ pub enum Gap {
     /// [`Gap::PoetryDependencies`] gives: it is one unread layout, so it is one
     /// action.
     Dynamic(Vec<String>),
+    /// A declaration whose value is not the shape the reader takes, named by
+    /// its dotted TOML path.
+    ///
+    /// The key is positive evidence of an intended declaration; the shape is
+    /// why nothing came of it. Without this the reader's `as_array()` and
+    /// `as_table()` are silent filters, and a file reports as fully understood
+    /// because of a typo.
+    Malformed(String),
     Include(String),
 }
 
@@ -208,6 +216,10 @@ impl Gap {
                     .map(|field| format!("`{field}`"))
                     .collect::<Vec<_>>()
                     .join(" and ")
+            ),
+            Gap::Malformed(path) => format!(
+                "`{path}` is declared but is not the shape it has to be, so Plumb read \
+                 nothing from it"
             ),
             Gap::Include(path) => {
                 format!("requirements are included from `{path}`, which Plumb does not follow")
@@ -315,28 +327,44 @@ pub fn parse_pyproject(text: &str) -> Manifest {
 
     let project = document.get("project");
 
+    // Every `as_array()` and `as_table()` below is a filter, and a filter that
+    // drops a declaration in silence is the same false negative as a format
+    // this module cannot read. So each one that rejects a value that *is*
+    // there leaves a `Malformed` gap: the key is the evidence, the shape is the
+    // reason nothing came of it.
     if let Some(project) = project {
-        if let Some(list) = project.get("dependencies").and_then(|d| d.as_array()) {
-            for entry in list {
-                if let Some(name) = entry.as_str().and_then(requirement_name) {
-                    names.insert(name);
+        if let Some(declared) = project.get("dependencies") {
+            match declared.as_array() {
+                Some(list) => {
+                    for entry in list {
+                        if let Some(name) = entry.as_str().and_then(requirement_name) {
+                            names.insert(name);
+                        }
+                    }
                 }
+                None => gaps.push(Gap::Malformed("project.dependencies".to_string())),
             }
         }
 
-        if let Some(groups) = project
-            .get("optional-dependencies")
-            .and_then(|d| d.as_table())
-        {
-            for group in groups.values() {
-                let Some(list) = group.as_array() else {
-                    continue;
-                };
-                for entry in list {
-                    if let Some(name) = entry.as_str().and_then(requirement_name) {
-                        names.insert(name);
+        if let Some(declared) = project.get("optional-dependencies") {
+            match declared.as_table() {
+                Some(groups) => {
+                    for (name, group) in groups {
+                        match group.as_array() {
+                            Some(list) => {
+                                for entry in list {
+                                    if let Some(name) = entry.as_str().and_then(requirement_name) {
+                                        names.insert(name);
+                                    }
+                                }
+                            }
+                            None => gaps.push(Gap::Malformed(format!(
+                                "project.optional-dependencies.{name}"
+                            ))),
+                        }
                     }
                 }
+                None => gaps.push(Gap::Malformed("project.optional-dependencies".to_string())),
             }
         }
     }
@@ -387,7 +415,16 @@ pub fn parse_pyproject(text: &str) -> Manifest {
     // separate evidence, not an unread part of the runtime set. See [`Gap`] for
     // why a gap that fires on every run of a Poetry project is a different
     // thing from that.
-    let project_declares_dependencies = project.and_then(|p| p.get("dependencies")).is_some();
+    // Keyed to `as_array()`, the same test the reader takes, and not to the key
+    // being present. The exemption's whole justification is that `[project]` is
+    // authoritative and Plumb read it — a value the reader could not use makes
+    // that false, so a non-array `dependencies` used to suppress the Poetry gap
+    // while contributing no name, and the file passed as understood with
+    // nothing in it.
+    let project_declares_dependencies = project
+        .and_then(|p| p.get("dependencies"))
+        .and_then(|d| d.as_array())
+        .is_some();
     let poetry = document.get("tool").and_then(|t| t.get("poetry"));
     let poetry_declares_dependencies = poetry.and_then(|p| p.get("dependencies")).is_some();
     // Keyed to a group's `dependencies` child, not to the group itself: a
