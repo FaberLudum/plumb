@@ -41,6 +41,15 @@ pub fn added(
         .difference(before)
         .map(|name| AddedDependency {
             name: name.clone(),
+            // Correct while `manifest::parse` recognises only Python
+            // manifests, and silently wrong the moment it does not: nothing
+            // here fails to compile when a second ecosystem appears, and a
+            // name looked up in the wrong registry either blocks a build or
+            // passes a hallucinated package. The fix then is for
+            // `manifest::parse` to return the ecosystem alongside the names
+            // and for this function to take it as an argument — not a second
+            // filename switch here, which would duplicate a dispatch rule
+            // that is already subtle.
             ecosystem: Ecosystem::PyPi,
             manifest: manifest_path.to_string(),
         })
