@@ -17,6 +17,13 @@ use std::process::ExitCode;
 /// sysexits(3).
 const EXIT_INTERNAL_ERROR: u8 = 70;
 
+/// Exit code for a command line that could not be understood.
+///
+/// Outside the contract for the same reason, and it has to be stated rather
+/// than left to clap: clap's own default for a usage error is 2, which is the
+/// code for "the gate ran and warned". 64 is `EX_USAGE` from sysexits(3).
+const EXIT_USAGE: u8 = 64;
+
 #[derive(Parser)]
 #[command(
     name = "plumb",
@@ -49,7 +56,10 @@ enum Commands {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => return reported(error),
+    };
 
     match cli.command {
         Commands::Check {
@@ -119,4 +129,26 @@ fn report_stale_answers(registry: &registry::PyPiRegistry) {
 fn failed(error: &anyhow::Error) -> ExitCode {
     eprintln!("plumb: {error:#}");
     ExitCode::from(EXIT_INTERNAL_ERROR)
+}
+
+/// Prints whatever clap wants to say and picks the exit code itself.
+///
+/// [`clap::Parser::parse`] would do both, but its code for a usage error is 2
+/// — the code this project has already promised means "the gate ran and
+/// warned". Anything that stops the run before it starts has to land outside
+/// the contract instead.
+///
+/// `--help` and `--version` arrive here as errors too. They are requests that
+/// were satisfied, so they print to stdout and exit 0; `use_stderr` is what
+/// tells the two apart.
+fn reported(error: clap::Error) -> ExitCode {
+    // Failing to print leaves nothing worth reporting: the exit code below is
+    // the diagnostic at that point.
+    let _ = error.print();
+
+    if error.use_stderr() {
+        ExitCode::from(EXIT_USAGE)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
