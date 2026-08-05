@@ -646,6 +646,12 @@ git commit -m "feat: parse unified diffs into changed files and added lines"
 
 `show_at_head` returning `None` rather than an error is load-bearing: a manifest added in this change has no HEAD version, and that is the normal case, not a failure.
 
+That same `Ok(None)` also swallows a genuinely broken git, since exit 128 does not distinguish "no such path at HEAD" from "not a repository". It is sound here for two reasons, and both are conditions rather than guarantees: `working_diff` runs first in Task 8's flow and surfaces a broken git as an error, and the residual failure is fail-safe for this gate — an unreadable HEAD manifest makes every dependency look newly added, so the gate over-checks rather than skips. If `show_at_head` ever gains a caller not preceded by `working_diff`, switch to discriminating with `git ls-tree`.
+
+Both functions carry `#[allow(dead_code, reason = "wired into the gate in a later task")]` until Task 8 calls them, because `dead_code` is a hard error under `-D warnings` and nothing calls them yet. `#[expect]` would be self-cleaning but does not work here: the tests exercise both functions, so the expectation goes unfulfilled in the test target. **Task 8 must delete both attributes**, and its own clippy run is what catches the omission.
+
+The `HEAD` argument to `git diff` needs its own test. Editing an unstaged file produces an identical diff with or without it, so the obvious tests pass against an implementation that omits `HEAD` — verified by mutation, not assumed. The case that discriminates is staged work, which is what a pre-commit hook sees: without `HEAD` the diff comes back empty and the gate passes in silence.
+
 - [ ] **Step 1: Write the failing test**
 
 Add to the bottom of `crates/plumb-cli/src/git.rs`:
@@ -680,6 +686,28 @@ mod tests {
         let dir = init_repo();
         fs::write(dir.path().join("requirements.txt"), "ruff==0.4.0\nrequestz==2.31.0\n")
             .expect("write");
+
+        let diff = working_diff(dir.path()).expect("diff succeeds");
+
+        assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff}");
+    }
+
+    /// Pins the `HEAD` argument. Without it `git diff` reports only unstaged
+    /// work, so a pre-commit hook would see an empty diff and pass silently.
+    /// The other tests all pass against that mutant; this one does not.
+    #[test]
+    fn working_diff_reports_staged_changes() {
+        let dir = init_repo();
+        fs::write(
+            dir.path().join("requirements.txt"),
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        )
+        .expect("write");
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git runs");
 
         let diff = working_diff(dir.path()).expect("diff succeeds");
 
@@ -774,7 +802,7 @@ mod git;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-cli git`
-Expected: PASS, three tests.
+Expected: PASS, four tests.
 
 - [ ] **Step 5: Commit**
 
