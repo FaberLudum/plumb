@@ -1,0 +1,12 @@
+# Every outbound request must go through the timeout-bounded agent held by
+# PyPiRegistry. The bare helpers build a fresh agent with ureq's defaults,
+# which set no timeout at all, so one of them would silently reintroduce an
+# unbounded lookup that no test can catch.
+disallowed-methods = [
+    { path = "ureq::get", reason = "use the agent held by PyPiRegistry, which is timeout-bounded" },
+    { path = "ureq::head", reason = "the binary makes exactly one class of request" },
+    { path = "ureq::post", reason = "the binary makes exactly one class of request" },
+    { path = "ureq::put", reason = "the binary makes exactly one class of request" },
+    { path = "ureq::delete", reason = "the binary makes exactly one class of request" },
+    { path = "ureq::patch", reason = "the binary makes exactly one class of request" },
+]
