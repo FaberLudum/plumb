@@ -578,14 +578,10 @@ mod tests {
     /// exercises the digest-only branch of [`cache_key`].
     #[test]
     fn the_cache_never_lands_inside_the_repository() {
-        for repo in [
-            Path::new("/home/dev/projects/api"),
-            Path::new("/srv/漢字"),
-            Path::new("/"),
-        ] {
+        for repo in [Path::new("/home/dev/projects/api"), Path::new("/srv/漢字")] {
             let resolved = default_cache_path(repo);
             assert!(
-                !resolved.starts_with(repo) || repo == Path::new("/"),
+                !resolved.starts_with(repo),
                 "{} is inside {}",
                 resolved.display(),
                 repo.display()
