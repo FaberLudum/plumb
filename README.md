@@ -78,6 +78,11 @@ next.
 
 Rust 1.97, edition 2024.
 
+Those are two different things and the numbers invite confusion. `1.97` is the
+compiler, released July 2026 — current stable. `2024` is the language edition,
+of which exactly four exist: 2015, 2018, 2021 and 2024. There is no newer one
+to adopt. Dependencies track current releases, none is pinned by hand.
+
 ```bash
 cargo test --workspace --locked
 ```
