@@ -72,12 +72,12 @@ index 2222222..3333333 100644
     }
 
     #[test]
-    fn ignores_the_triple_plus_header() {
+    fn does_not_emit_the_post_image_header_as_an_added_line() {
         let files = parse_unified_diff(SAMPLE);
         for file in &files {
             for line in &file.added_lines {
                 assert!(
-                    !line.starts_with("++"),
+                    !line.starts_with("++ b/"),
                     "header leaked into added lines: {line}"
                 );
             }
@@ -101,6 +101,7 @@ index 1111111..2222222 100644
 ++i;
 ";
         let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
         assert_eq!(files[0].added_lines, vec!["+i;"]);
     }
 
@@ -116,6 +117,7 @@ index 4444444..5555555 100644
 +++i;
 ";
         let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
         assert_eq!(files[0].added_lines, vec!["++i;"]);
     }
 
@@ -131,5 +133,50 @@ index 3333333..0000000
 -print('gone')
 ";
         assert!(parse_unified_diff(DIFF).is_empty());
+    }
+
+    #[test]
+    fn ignores_a_post_image_header_not_preceded_by_a_pre_image_header() {
+        const DIFF: &str = "\
+diff --git a/notes.md b/notes.md
+index 1111111..2222222 100644
+--- a/notes.md
++++ b/notes.md
+@@ -1 +1,3 @@
+ changelog
++++ b/phantom.txt
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "notes.md");
+        assert_eq!(
+            files[0].added_lines,
+            vec!["++ b/phantom.txt", "requestz==2.31.0"]
+        );
+    }
+
+    #[test]
+    fn attributes_added_lines_correctly_after_a_deletion() {
+        const DIFF: &str = "\
+diff --git a/old.py b/old.py
+deleted file mode 100644
+index 3333333..0000000
+--- a/old.py
++++ /dev/null
+@@ -1 +0,0 @@
+-print('gone')
+diff --git a/requirements.txt b/requirements.txt
+index 4444444..5555555 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1 +1,2 @@
+ ruff==0.4.0
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "requirements.txt");
+        assert_eq!(files[0].added_lines, vec!["requestz==2.31.0"]);
     }
 }
