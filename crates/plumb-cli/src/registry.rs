@@ -477,6 +477,41 @@ mod tests {
         assert_eq!(after, seeded, "reading a stale answer rewrote the cache");
     }
 
+    /// The concession is scoped to offline, and a dead network is not offline.
+    /// Offline is a standing choice to work from what is on disk; an
+    /// unreachable network is a fault that may clear within the minute, and
+    /// quietly swapping in old answers for it would change what the gate
+    /// reports without anyone having asked for that.
+    ///
+    /// A *fresh* entry still answers once latched — that is
+    /// `a_warm_cache_still_answers_after_the_network_dies`. Only the expired
+    /// ones are refused.
+    #[test]
+    fn a_latched_run_does_not_start_honouring_stale_answers() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let age = well_past_every_lifetime();
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("ruff", true, age), ("black", true, age)]),
+        )
+        .expect("write cache");
+        let registry = PyPiRegistry::new(false, cache_path);
+        let attempts = std::cell::Cell::new(0u32);
+        let blackhole = |_: &str| {
+            attempts.set(attempts.get() + 1);
+            Outcome::Unreachable
+        };
+
+        // Expired, so it is looked up; the lookup kills the network.
+        assert_eq!(registry.exists_via("ruff", blackhole), Existence::Unknown);
+        assert_eq!(attempts.get(), 1);
+
+        // Also expired, and now latched. Offline would have honoured this.
+        assert_eq!(registry.exists_via("black", blackhole), Existence::Unknown);
+        assert_eq!(attempts.get(), 1);
+    }
+
     /// Online the concession does not apply: fresh data is one request away,
     /// so there is no case for answering from an expired entry.
     #[test]
