@@ -1,12 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
-//! Parses dependency manifests into sets of distribution names.
+//! Parses dependency manifests into distribution names, and into the parts of
+//! the file those names did not come from.
 //!
 //! Names are normalised per PEP 503 — lowercased, with runs of `-`, `_` and
 //! `.` collapsed to a single `-` — so that `Flask-SQLAlchemy` and
 //! `flask_sqlalchemy` are one package rather than two, and the gate does not
 //! report a phantom addition when a manifest is merely respelled.
+//!
+//! A name this module does not extract is not a name that is absent, and a
+//! [`Manifest`] says which of the two it is. Poetry's `[tool.poetry]`, PEP 735
+//! dependency groups and requirements includes are all unread here, and each is
+//! reported as a [`Gap`] instead of passing for a file with nothing in it. The
+//! rule that keeps a gap worth reading is that it is raised on evidence of an
+//! unread declaration and never on the absence of one: a `pyproject.toml`
+//! holding only a build system and some tool settings declares no runtime
+//! dependencies and produces no gap.
 
 use std::collections::BTreeSet;
 
@@ -87,58 +97,187 @@ fn requirement_name(spec: &str) -> Option<String> {
     Some(name)
 }
 
-/// Parses a `requirements.txt`-style file into a set of distribution names.
-pub fn parse_requirements(text: &str) -> BTreeSet<String> {
-    text.lines().filter_map(requirement_name).collect()
+/// A manifest Plumb recognised: what it read, and what it did not.
+///
+/// An empty `gaps` is the only state that entitles a caller to say the file was
+/// checked. Names and gaps coexist because a manifest can be partly understood
+/// — a requirements file holding both direct requirements and an `-r` include
+/// yields the direct names *and* a gap. An enum of mutually exclusive outcomes
+/// would have to discard names that were read correctly, trading a silent false
+/// negative for a loud loss of coverage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Manifest {
+    pub names: BTreeSet<String>,
+    pub gaps: Vec<Gap>,
+}
+
+/// A dependency declaration this module did not read.
+///
+/// Each variant names what was missed rather than carrying a flag, because the
+/// warning has to tell a reader what to act on. "This file may declare more
+/// dependencies" is true, useless, and the kind of message people learn to skip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gap {
+    Unparseable,
+    PoetryDependencies,
+    DependencyGroups,
+    Include(String),
+}
+
+impl Gap {
+    /// A sentence naming what was not read, for a human reading a finding.
+    pub fn describe(&self) -> String {
+        match self {
+            Gap::Unparseable => "the file does not parse as TOML".to_string(),
+            Gap::PoetryDependencies => {
+                "dependencies are declared in [tool.poetry.dependencies], which Plumb does not read"
+                    .to_string()
+            }
+            Gap::DependencyGroups => {
+                "dependencies are declared in [dependency-groups], which Plumb does not read"
+                    .to_string()
+            }
+            Gap::Include(path) => {
+                format!("requirements are included from `{path}`, which Plumb does not follow")
+            }
+        }
+    }
+}
+
+/// Returns the path a `-r` or `--requirement` line includes.
+///
+/// pip accepts four spellings and all of them appear in the wild: `-r path`,
+/// `-rpath`, `--requirement path` and `--requirement=path`.
+///
+/// The long form has to be followed by `=` or whitespace before its argument.
+/// Requiring that is what keeps the match narrow: a bare `strip_prefix` would
+/// read any future `--requirement`-prefixed option as an include. The short
+/// form needs no such guard because pip glues its argument straight on.
+fn include_target(line: &str) -> Option<String> {
+    let line = line.trim_start_matches('\u{feff}').trim();
+
+    let rest = if let Some(rest) = line.strip_prefix("--requirement") {
+        match rest.strip_prefix('=') {
+            Some(rest) => rest,
+            None if rest.starts_with(char::is_whitespace) => rest,
+            None => return None,
+        }
+    } else {
+        line.strip_prefix("-r")?
+    };
+
+    let target = rest.trim();
+    if target.is_empty() {
+        None
+    } else {
+        Some(target.to_string())
+    }
+}
+
+/// Parses a `requirements.txt`-style file.
+///
+/// An `-r`/`--requirement` include is left unfollowed — following it would mean
+/// reading another file, which this crate does not do — and recorded as a gap so
+/// the omission is not silent.
+pub fn parse_requirements(text: &str) -> Manifest {
+    let mut names = BTreeSet::new();
+    let mut gaps = Vec::new();
+
+    for line in text.lines() {
+        if let Some(target) = include_target(line) {
+            gaps.push(Gap::Include(target));
+            continue;
+        }
+        if let Some(name) = requirement_name(line) {
+            names.insert(name);
+        }
+    }
+
+    Manifest { names, gaps }
 }
 
 /// Parses `[project].dependencies` and `[project.optional-dependencies]` from
-/// a `pyproject.toml`. Malformed input yields an empty set rather than an
-/// error: a manifest we cannot read is not a violation.
-pub fn parse_pyproject(text: &str) -> BTreeSet<String> {
+/// a `pyproject.toml`. Malformed input yields no names and a gap rather than an
+/// error: a manifest we cannot read is not a violation, but it is not a clean
+/// bill of health either.
+pub fn parse_pyproject(text: &str) -> Manifest {
     let mut names = BTreeSet::new();
+    let mut gaps = Vec::new();
 
     // `toml::Table`, not `toml::Value`: in toml 1.x `FromStr for Value` parses
     // a single value expression, so a whole document fails with "unexpected
     // content, expected nothing" and every pyproject.toml would look
     // malformed. `Table` is the document-level type.
     let Ok(document) = text.parse::<toml::Table>() else {
-        return names;
-    };
-    let Some(project) = document.get("project") else {
-        return names;
+        return Manifest {
+            names,
+            gaps: vec![Gap::Unparseable],
+        };
     };
 
-    if let Some(list) = project.get("dependencies").and_then(|d| d.as_array()) {
-        for entry in list {
-            if let Some(name) = entry.as_str().and_then(requirement_name) {
-                names.insert(name);
-            }
-        }
-    }
+    let project = document.get("project");
 
-    if let Some(groups) = project
-        .get("optional-dependencies")
-        .and_then(|d| d.as_table())
-    {
-        for group in groups.values() {
-            let Some(list) = group.as_array() else {
-                continue;
-            };
+    if let Some(project) = project {
+        if let Some(list) = project.get("dependencies").and_then(|d| d.as_array()) {
             for entry in list {
                 if let Some(name) = entry.as_str().and_then(requirement_name) {
                     names.insert(name);
                 }
             }
         }
+
+        if let Some(groups) = project
+            .get("optional-dependencies")
+            .and_then(|d| d.as_table())
+        {
+            for group in groups.values() {
+                let Some(list) = group.as_array() else {
+                    continue;
+                };
+                for entry in list {
+                    if let Some(name) = entry.as_str().and_then(requirement_name) {
+                        names.insert(name);
+                    }
+                }
+            }
+        }
     }
 
-    names
+    if document.get("dependency-groups").is_some() {
+        gaps.push(Gap::DependencyGroups);
+    }
+
+    // Only a gap when nothing authoritative was read. A Poetry table beside a
+    // PEP 621 `[project].dependencies` mirrors it, and warning there would fire
+    // on projects Plumb reads correctly.
+    //
+    // `[build-system].requires` is deliberately absent from this list. It
+    // appears in nearly every pyproject.toml, so treating it as a gap would
+    // fire the warning universally — and a warning that always fires is a
+    // warning nobody reads. Build-time dependencies are a separate rule with
+    // separate evidence, not an unread part of the runtime set.
+    let project_declares_dependencies = project.and_then(|p| p.get("dependencies")).is_some();
+    let poetry_declares_dependencies = document
+        .get("tool")
+        .and_then(|t| t.get("poetry"))
+        .and_then(|p| p.get("dependencies"))
+        .is_some();
+
+    if poetry_declares_dependencies && !project_declares_dependencies {
+        gaps.push(Gap::PoetryDependencies);
+    }
+
+    Manifest { names, gaps }
 }
 
 /// Dispatches on filename. Returns `None` when the path is not a manifest
 /// this version understands.
-pub fn parse(path: &str, text: &str) -> Option<BTreeSet<String>> {
+///
+/// Note the two kinds of "not understood" this function keeps apart. `None`
+/// means the path is not a manifest at all, and the caller should move on.
+/// `Some(manifest)` with a non-empty [`Manifest::gaps`] means the file *is* a
+/// manifest and part of it was not read, which the caller has to say out loud.
+pub fn parse(path: &str, text: &str) -> Option<Manifest> {
     let file_name = path.rsplit('/').next().unwrap_or(path);
 
     if file_name == "pyproject.toml" {
@@ -159,8 +298,8 @@ pub fn parse(path: &str, text: &str) -> Option<BTreeSet<String>> {
     // by name, so one has to be given up, and the costs are not symmetric:
     // missing a manifest leaves dependencies unchecked, while parsing prose
     // blocks a build over packages that never existed. This module already
-    // prefers the first error — malformed TOML yields an empty set rather
-    // than a violation.
+    // prefers the first error — malformed TOML yields no names, and so no
+    // violation, only a gap.
     //
     // `-` itself is no cleaner; it is kept only because `requirements-dev.txt`
     // is too common to lose. `requirements-and-design.txt` still gets through,

@@ -175,17 +175,22 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<(Vec<Finding>, Vec<Un
         // is an addition.
         //
         // A manifest that exists at HEAD but does not parse is a different
-        // matter and is deliberately not special-cased: it yields `Some(empty
-        // set)`, so every current dependency reads as added and gets looked
-        // up. Nothing here can tell that apart from a manifest that genuinely
-        // declared nothing — a case where those names really are additions —
-        // without `manifest::parse` growing a way to say "I did not
-        // understand this", which is a change to the core contract rather than
-        // to this wiring. The cost of the honest reading is bounded: extra
-        // lookups, and a finding only for a name the registry actually lacks.
-        let before = git::show_at_head(repo, &path)?.and_then(|text| manifest::parse(&path, &text));
+        // matter and is deliberately not special-cased: it yields a `Manifest`
+        // with no names, so every current dependency reads as added and gets
+        // looked up. The cost of that reading is bounded — extra lookups, and a
+        // finding only for a name the registry actually lacks.
+        //
+        // `manifest::parse` can now tell that case apart from a manifest that
+        // genuinely declared nothing: the first carries a `Gap`, the second
+        // does not. This wiring does not use it yet. Nothing here reads
+        // `Manifest::gaps` on either side of the comparison, so a partly
+        // understood manifest still passes as fully checked; reporting it is
+        // the next change, not this one.
+        let before = git::show_at_head(repo, &path)?
+            .and_then(|text| manifest::parse(&path, &text))
+            .map(|manifest| manifest.names);
 
-        for dependency in deps::added(&path, before.as_ref(), &after) {
+        for dependency in deps::added(&path, before.as_ref(), &after.names) {
             if registry.exists(&dependency.name) == Existence::Missing {
                 findings.push(package_does_not_exist(&dependency));
             }
