@@ -47,9 +47,19 @@ pub fn repo_root(from: &Path) -> Result<PathBuf> {
 ///
 /// Output is decoded lossily, so it can contain U+FFFD wherever the diff
 /// carried bytes that are not valid UTF-8. See the body for why.
+///
+/// `core.quotePath=false` is set for the same reason the decoding is lossy:
+/// what comes back has to be usable. By default git escapes every non-ASCII
+/// byte of a path into C-style octal and wraps the result in quotes, so
+/// `café/requirements.txt` arrives as `"caf\303\251/requirements.txt"` and
+/// matches no manifest — a file silently never checked rather than one
+/// reported as unreadable. Overriding it here, rather than teaching the parser
+/// to unescape, keeps the encoding question with the process that knows the
+/// answer. It does not cover a path holding a quote, a backslash or a control
+/// character: those stay escaped whatever this is set to.
 pub fn working_diff(repo: &Path) -> Result<String> {
     let output = Command::new("git")
-        .args(["diff", "HEAD"])
+        .args(["-c", "core.quotePath=false", "diff", "HEAD"])
         .current_dir(repo)
         .output()
         .context("failed to run git; is it installed and on PATH?")?;
