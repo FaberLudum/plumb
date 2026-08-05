@@ -373,6 +373,36 @@ index 0000000..6666666
     }
 
     #[test]
+    fn records_a_combined_diff_section_from_a_merge() {
+        const DIFF: &str = "\
+diff --git a/requirements.txt b/requirements.txt
+index 1111111..2222222 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1 +1,2 @@
+ ruff==0.4.0
++httpx==0.27.0
+diff --cc setup.py
+index 3333333,4444444..5555555
+--- a/setup.py
++++ b/setup.py
+@@@ -1,1 -1,1 +1,3 @@@
+  import setuptools
+++import requestz
+ +from_one_parent
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "requirements.txt");
+        assert_eq!(files[0].added_lines, vec!["httpx==0.27.0"]);
+        assert_eq!(files[1].path, "setup.py");
+        assert_eq!(
+            files[1].added_lines,
+            vec!["import requestz", "from_one_parent"]
+        );
+    }
+
+    #[test]
     fn returns_empty_for_an_empty_diff() {
         assert!(parse_unified_diff("").is_empty());
     }
@@ -470,6 +500,19 @@ arrive as `--- /dev/null` followed by `+++ b/…`, and a rule that tightened the
 pre-image match would make every newly added manifest vanish from the gate with
 every other test still green.
 
+The fourth correction came from a re-reviewer who compiled the function and ran
+real git captures against it. Matching `diff --git ` and `@@ ` exactly dropped
+**combined diffs** entirely: plain `git diff` on a conflicted tree emits
+`diff --cc` sections with `@@@` hunk headers, and Task 8 runs `git diff HEAD`,
+so the case is reachable. Those files vanished, and their added lines were
+misattributed to whichever file preceded them.
+
+Widening the two prefixes alone would record the files but leave an extra
+marker column in the content — `++requestz==2.31.0` parses as a package named
+`+requestz`, turning a false negative into a false positive on a blocking gate.
+So the marker width is read from the hunk header's `@` count instead, which
+handles any arity from one rule rather than from another special case.
+
 `pub mod diff;` belongs in the **test** commit, not the implementation commit.
 Left to step 3, `diff.rs` is not part of the crate during the RED run, so
 `cargo test -p plumb-core diff` reports success over zero tests — a vacuous
@@ -495,20 +538,51 @@ pub struct ChangedFile {
 /// Parses `git diff` output into one entry per changed file.
 ///
 /// Headers are only recognised inside a file section's header block — between
-/// a `diff --git ` line and the section's first `@@ `. Inside a hunk body every
-/// line carries a prefix, so an unprefixed line at column zero is always
-/// structural and content can never be mistaken for a header. Only the
-/// post-image path and added lines are extracted; hunk offsets, removals and
-/// renames are deliberately ignored.
+/// a `diff --` line and the section's first `@@`. Inside a hunk body every line
+/// carries a marker column, so an unprefixed line at column zero is always
+/// structural and content can never be mistaken for a header.
+///
+/// Combined diffs from a merge — `diff --cc`, emitted by plain `git diff` on a
+/// conflicted tree and by `git log -p --cc` — carry one marker column per
+/// parent and open their hunks with `@@@`. The marker width is read from the
+/// hunk header so their content is sliced correctly.
+///
+/// Only the post-image path and added lines are extracted; hunk offsets,
+/// removals and renames are deliberately ignored. Input is assumed to be git
+/// output: a bare `diff -u` patch, which has no `diff --` opener, yields
+/// nothing.
+/// Returns the content of `line` when it is an added line, given a marker
+/// column `marker_width` wide.
+///
+/// A combined diff from a merge carries one marker column per parent, so a
+/// line added relative to both parents reads `++foo` and one added relative to
+/// a single parent reads ` +foo`.
+fn added_content(line: &str, marker_width: usize) -> Option<&str> {
+    if !line.is_char_boundary(marker_width) {
+        return None;
+    }
+    let (markers, content) = line.split_at(marker_width);
+    if !markers.contains('+') {
+        return None;
+    }
+    if !markers.chars().all(|c| matches!(c, '+' | '-' | ' ')) {
+        return None;
+    }
+    Some(content)
+}
+
 pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
     let mut in_file_header = false;
+    let mut marker_width = 1usize;
 
     for line in diff.lines() {
-        if line.starts_with("diff --git ") {
+        if line.starts_with("diff --") {
             in_file_header = true;
-        } else if line.starts_with("@@ ") {
+            marker_width = 1;
+        } else if let Some(rest) = line.strip_prefix("@@") {
             in_file_header = false;
+            marker_width = 1 + rest.chars().take_while(|c| *c == '@').count();
         } else if in_file_header {
             // Do not collapse this into a let-chain on the arm above. The
             // nested form swallows every other header-block line; a let-chain
@@ -523,7 +597,7 @@ pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
                     });
                 }
             }
-        } else if let Some(added) = line.strip_prefix('+')
+        } else if let Some(added) = added_content(line, marker_width)
             && let Some(current) = files.last_mut()
         {
             current.added_lines.push(added.to_string());
@@ -543,7 +617,7 @@ pub mod diff;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core diff`
-Expected: PASS, eleven tests.
+Expected: PASS, twelve tests.
 
 - [ ] **Step 5: Commit**
 
