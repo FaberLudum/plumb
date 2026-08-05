@@ -1,6 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
+/// A file touched by a diff, with the lines the diff adds to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    pub path: String,
+    pub added_lines: Vec<String>,
+}
+
+/// Parses `git diff` output into one entry per changed file.
+///
+/// Only the post-image path (`+++ b/...`) and added lines are extracted; hunk
+/// offsets and removals are deliberately ignored.
+pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
+    let mut files: Vec<ChangedFile> = Vec::new();
+
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("+++ ") {
+            let path = path.strip_prefix("b/").unwrap_or(path);
+            if path == "/dev/null" {
+                continue;
+            }
+            files.push(ChangedFile {
+                path: path.to_string(),
+                added_lines: Vec::new(),
+            });
+        } else if let Some(added) = line.strip_prefix('+') {
+            if line.starts_with("+++") {
+                continue;
+            }
+            if let Some(current) = files.last_mut() {
+                current.added_lines.push(added.to_string());
+            }
+        }
+    }
+
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,7 +79,10 @@ index 2222222..3333333 100644
         let files = parse_unified_diff(SAMPLE);
         for file in &files {
             for line in &file.added_lines {
-                assert!(!line.starts_with("++"), "header leaked into added lines: {line}");
+                assert!(
+                    !line.starts_with("++"),
+                    "header leaked into added lines: {line}"
+                );
             }
         }
     }
