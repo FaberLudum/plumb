@@ -55,7 +55,7 @@ Proposing a Tier A rule on a preprint is a rejection. Propose it as Tier B.
 change adds must actually exist on its registry. `plumb check --diff` asks git
 for the paths a change touched, reads each Python manifest among them as it
 stands and as it stands at HEAD, looks up only the names the change adds, and
-blocks on a name PyPI does not have. 124 tests, no network access from any of
+blocks on a name PyPI does not have. 139 tests, no network access from any of
 them.
 
 ```console
@@ -73,9 +73,38 @@ warnings only. A run that could not happen — not a repository, no git — exit
 outside that contract instead, so a broken gate can never be read as a clean
 one.
 
-What it does not do yet — the blind spots known today, listed because a gate
-that stays quiet about them is worse than one that has none. The list is what
-has been found, not a proof that nothing else is there:
+### What `--diff` compares, and what that rules out
+
+**`--diff` compares the working tree and the index against HEAD.** Anything
+already committed is outside that comparison: there is nothing left to compare,
+so the run checks nothing and exits `0`. The same manifest blocks while it is
+uncommitted and passes the moment it is committed.
+
+The consequence is worth stating plainly, because it is the opposite of what a
+gate is usually assumed to do. **On a fresh clone or a CI checkout the tree is
+clean, so `plumb check --diff` examines nothing and exits `0` whatever the
+commit under test added.** Wiring this into a CI job that clones a branch gives
+a permanently green check that is not checking anything. Checking a commit or a
+commit range needs `plumb check --repo`, which the design spec reserves and
+**which is not implemented yet**. Until it is, the useful place for `--diff` is
+a developer's working copy.
+
+The pre-commit story is not honest yet either. `git diff HEAD` lists a path when
+*either* the index or the worktree differs from HEAD, and the after-side is then
+read from the **worktree**. For a partially staged manifest those are different
+files, and the gate reads the one that is not being committed: staging an
+addition and reverting the worktree passes, and the commit lands carrying it. So
+a pre-commit hook catches the ordinary case and not the partially staged one.
+Fixing it properly means reading the after-side as the union of the index and
+the worktree, which changes what "added" means; `git show :<path>` alone is not
+the fix, because an unstaged edit has an index copy identical to HEAD and would
+then report nothing.
+
+### Blind spots
+
+What it does not do yet, listed because a gate that stays quiet about them is
+worse than one that has none. The list is what has been found, not a proof that
+nothing else is there:
 
 - PyPI only. TypeScript and .NET manifests are the same shape of code, one
   ecosystem at a time.
@@ -87,14 +116,27 @@ has been found, not a proof that nothing else is there:
   `requirements_notes.txt`, and prose read as a manifest manufactures blocking
   findings. Restricting it to `-` narrows that problem without solving it — see
   the first of the false positives below.
-- Two of the formats it does not read are worse than unread. A Poetry
-  `pyproject.toml` with no `[project]` table is recognised as a manifest and
-  read as declaring nothing, so every dependency it gains passes unexamined and
-  unreported; a `requirements/base.txt` layout is not recognised at all,
-  equally quietly. Both are silent false negatives on a blocking gate, which is
-  the failure this project exists to catch, and they are the next thing to fix.
-  PEP 735 `[dependency-groups]` and `[build-system].requires` are simply
-  unread.
+- Some of the formats it does not read are worse than unread, because they are
+  unread while *looking* checked. A Poetry `pyproject.toml` with no `[project]`
+  table is recognised as a manifest and read as declaring nothing, so every
+  dependency it gains passes unexamined and unreported. A `requirements/`
+  directory is the same trap and is easy to underestimate: the common layout is
+  a top-level `requirements.txt` that does little more than
+  `-r requirements/base.txt`,
+  and that top-level file **is** recognised — but every `-`-prefixed line is
+  dropped, so it reads as declaring nothing, reports nothing, and exits `0`
+  while `requirements/base.txt` gains whatever it likes. Includes are not
+  followed and `requirements/base.txt` is not recognised on its own either.
+  `requirements.in`, the hand-edited pip-compile source — which is exactly
+  where a hallucinated name is introduced, before it is ever compiled into a
+  pinned `requirements.txt` — is not recognised at all. All of these are silent
+  false negatives on a blocking gate, which is the failure this project exists
+  to catch, and they are the next thing to fix. PEP 735 `[dependency-groups]`
+  and `[build-system].requires` are simply unread.
+- A manifest that is not valid UTF-8 is not checked. One Latin-1 byte in a
+  comment is enough, and it costs the whole file, not the line: nothing in it
+  is looked up. The run says so on stderr and still exits `0`, because a file
+  the tool could not decode is not evidence that a package does not exist.
 - Three known false positives, each of which blocks a build that is fine. The
   worst is prose: a file named `requirements-and-design.txt` is read as a
   manifest, and the first word of every line becomes a name to look up — four
@@ -147,8 +189,21 @@ not enough — Plumb's own Tier A rule, applied to Plumb.
 
 Plumb makes exactly one class of outbound request: resolving package names
 against public registries. Nothing else leaves your machine, and there is no
-telemetry. Registry answers are cached on disk under `.plumb/cache/`, and
-`--offline` disables lookups entirely.
+telemetry. `--offline` disables lookups entirely.
+
+Registry answers are cached on disk, **outside the repository being checked**:
+under `%LOCALAPPDATA%\plumb\registry\` on Windows, and `$XDG_CACHE_HOME/plumb/`
+or `~/.cache/plumb/` elsewhere, keyed per repository. `PLUMB_CACHE_FILE` names
+the file outright, which is what a CI job needs to keep a cache between runs.
+
+The location is a correctness property, not housekeeping. The cache is
+unauthenticated and a fresh entry answers without contacting PyPI, so a cache
+file that travels with a change can assert that a nonexistent package exists and
+the gate will believe it — silently, and for up to thirty days. Earlier versions
+kept it at `<repo>/.plumb/cache/registry.json`, where committing one file
+disabled the gate. **Never keep a Plumb cache inside a repository.** If one is
+still there from an earlier version, the run says so on stderr; it is not read,
+and it can be deleted.
 
 An unreachable network is never a rule violation. A blocking gate that fails
 when the network hiccups gets disabled within a week, and then catches nothing
