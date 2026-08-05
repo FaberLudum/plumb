@@ -204,20 +204,59 @@ fn check_requires_a_scope() {
         .stderr(predicates::str::contains("--diff"));
 }
 
-/// Not being in a repository is a usage error, not a clean run. Exiting 0 here
-/// would let a misconfigured CI job report a passing gate forever.
+/// Asserts the process exited with a code that is not part of the findings
+/// contract, and returns it.
+fn assert_did_not_run(args: &[&str], dir: &Path) -> i32 {
+    let assert = plumb().args(args).current_dir(dir).assert().failure();
+    let code = assert.get_output().status.code().expect("an exit code");
+    assert!(
+        code != 0 && code != 1 && code != 2,
+        "`plumb {}` exited {code}, which reads as a verdict on the code under \
+         inspection rather than as a run that never happened",
+        args.join(" ")
+    );
+    code
+}
+
+/// Not being in a repository is a failure to run, not a clean run. Exiting 0
+/// here would let a misconfigured CI job report a passing gate forever.
 #[test]
 fn check_fails_outside_a_repository() {
     let dir = tempfile::tempdir().expect("temp dir");
 
-    let assert = plumb()
-        .args(["check", "--diff", "--offline"])
-        .current_dir(dir.path())
-        .assert()
-        .failure();
-    let code = assert.get_output().status.code().expect("an exit code");
-    assert!(
-        code != 1 && code != 2,
-        "a failure to run must not be spelled like a finding, was {code}"
-    );
+    assert_did_not_run(&["check", "--diff", "--offline"], dir.path());
+}
+
+/// A run that never happened must not be spelled like a run that found
+/// something. The exit codes are a public contract — 0 clean, 1 blocking, 2
+/// warnings only — and clap's own default for a usage error is 2, which tells
+/// CI the gate ran and had reservations when it did not run at all.
+#[test]
+fn a_usage_error_is_never_spelled_like_a_verdict() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+
+    for args in [
+        vec!["check", "--offline"],
+        vec!["check", "--diff", "--no-such-flag"],
+        vec!["no-such-command"],
+        vec![],
+    ] {
+        assert_did_not_run(&args, dir.path());
+    }
+}
+
+/// The other side of that: asking for help is not a usage error. Handling
+/// clap's errors by hand is what makes this worth pinning — help and version
+/// arrive as errors too, and reporting them as failures would break every
+/// `plumb --version` in a setup script.
+#[test]
+fn help_and_version_are_not_errors() {
+    for args in [
+        vec!["--help"],
+        vec!["--version"],
+        vec!["check", "--help"],
+        vec!["help"],
+    ] {
+        plumb().args(&args).assert().success();
+    }
 }
