@@ -331,7 +331,10 @@ plumb/
     python/
     typescript/
     dotnet/
-  cli/                 plumb
+  crates/
+    plumb-cli/         binary entry point
+    plumb-core/        rules, protocols, gate orchestration
+    plumb-graph/       tree-sitter parsing, import and boundary graphs
 ```
 
 ## 12. Build phases
@@ -468,13 +471,12 @@ becomes anything users have to think about, it has failed.
   or is the correlation Zhu found an artefact of agent-generated systems
   specifically? Phase 6 answers this, and a negative answer removes a Tier B
   rule.
-- Implementation language for the CLI. It has to run in CI on three stacks and
-  install without dragging in a runtime users do not already have, which
-  points at a single compiled binary rather than a Python or Node package.
-  Unresolved, and it shapes the whole implementation plan.
-- Package identifier if the CLI is distributed through a registry. `plumb` on
-  PyPI is taken by an abandoned 2018 messaging library. Moot if distribution
-  is via GitHub releases and a package manager tap.
+- Package identifier if the CLI is ever distributed through a language
+  registry. `plumb` on PyPI is held by an abandoned 2018 messaging library.
+  Moot while distribution is GitHub releases plus Homebrew and Scoop.
+- Which tree-sitter grammars ship in the binary. Bundling Python, TypeScript
+  and C# covers the target stacks but grows the binary; loading grammars
+  dynamically keeps it small at the cost of a harder install.
 
 ## 16. Decisions taken
 
@@ -485,3 +487,11 @@ becomes anything users have to think about, it has failed.
 - **License:** Apache-2.0, for the explicit patent grant. Many corporate legal
   teams prefer or require it for internal tooling, and it costs adopters
   nothing over MIT.
+- **Implementation language:** Rust. The CLI ships as a single static binary
+  with no runtime for users to install, which is the only way one tool serves
+  Python, TypeScript and .NET repositories equally. Multi-language parsing is
+  the core of the boundary check, and tree-sitter is native to Rust.
+
+  The cost is honest: slower iteration than Go or Python in the early phases,
+  when the design is still moving. Accepted because the parsing surface is
+  permanent and the language choice is the hardest decision to reverse later.
