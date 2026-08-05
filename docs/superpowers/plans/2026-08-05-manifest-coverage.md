@@ -61,7 +61,7 @@ export PATH="/c/Users/Andre/.cargo/bin:$PATH" && cargo test --workspace --locked
 
 **The rule that keeps this survivable:** warn on evidence of unread dependencies, never on absence. A `pyproject.toml` holding only `[build-system]` and `[tool.ruff]` declares no runtime dependencies and must produce no gap. `[build-system].requires` is deliberately never a gap — it appears in nearly every `pyproject.toml`, and a warning that always fires is a warning nobody reads.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the test module in `crates/plumb-core/src/manifest.rs`:
 
@@ -184,19 +184,19 @@ dev = ["pytest"]
 
 Every existing test in this module that calls `parse_requirements`, `parse_pyproject` or `parse` needs its assertion updated to reach through `.names`. Do that in this same step — the tests are the specification of the old contract and changing them is part of changing it.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `export PATH="/c/Users/Andre/.cargo/bin:$PATH" && cargo test -p plumb-core --locked manifest`
 Expected: FAIL to compile, `cannot find type Manifest in this scope` and `cannot find type Gap in this scope`. A compile failure is the correct RED here: the type does not exist yet.
 
-- [ ] **Step 3: Commit the failing tests**
+- [x] **Step 3: Commit the failing tests**
 
 ```bash
 git add crates/plumb-core/src/manifest.rs
 git commit -m "test: pin what a manifest did not read"
 ```
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Add above `parse_requirements` in `crates/plumb-core/src/manifest.rs`:
 
@@ -368,19 +368,19 @@ Change `parse`'s return type to `Option<Manifest>`. Its body is unchanged apart 
 
 In `crates/plumb-cli/src/check.rs`, keep the workspace compiling with the smallest possible edit: `let Some(after) = manifest::parse(&path, &current)` becomes `let Some(after) = manifest::parse(&path, &current)` followed by using `&after.names` where `&after` was passed to `deps::added`, and `before` becomes `.map(|m| m.names)`. Gaps are not consumed yet — Task 2 does that.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `export PATH="/c/Users/Andre/.cargo/bin:$PATH" && cargo test --workspace --locked`
 Expected: PASS, every test in the workspace.
 
-- [ ] **Step 6: Verify the probe still works**
+- [x] **Step 6: Verify the probe still works**
 
 `check.rs` calls `manifest::parse(&path, "")` as a path-only probe, pinned by `a_manifest_is_recognised_from_its_path_alone`. An empty string parses as an empty TOML document, so it must yield `Some(Manifest)` with no gaps rather than `Some` with `Unparseable`.
 
 Run: `export PATH="/c/Users/Andre/.cargo/bin:$PATH" && cargo test --workspace --locked a_manifest_is_recognised_from_its_path_alone`
 Expected: PASS. If it fails, the empty-document case is being treated as unparseable and the probe now manufactures a gap for every changed file.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/plumb-core/src/manifest.rs crates/plumb-cli/src/check.rs
@@ -402,7 +402,7 @@ git commit -m "feat: let a manifest say what it did not read"
 
 **The coherence this task also fixes:** `check.rs` already has an `Unreadable` path for a manifest whose bytes are not UTF-8, which reports on stderr and leaves the exit code at 0. That is the same class as a gap — Plumb could not establish anything about this file — reported two different ways. This task folds it into the finding mechanism so both exit 2, and removes the separate stderr channel for it.
 
-- [ ] **Step 1: Add the taxonomy section the findings cite**
+- [x] **Step 1: Add the taxonomy section the findings cite**
 
 `Finding::source` must name a heading that exists in `docs/research/taxonomy.md`; a test added in the previous plan reads the file and checks. Append to `docs/research/taxonomy.md`:
 
@@ -436,7 +436,7 @@ This section has no invalidation condition, because it rests on no claim that
 new evidence could refute. It goes away when the formats are read.
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Add to the test module in `crates/plumb-cli/src/check.rs`:
 
@@ -504,19 +504,19 @@ Add to the test module in `crates/plumb-cli/src/check.rs`:
 
 `repo_with` and `write` are the fixture helpers already in this module; if their names differ, use the existing ones rather than adding new ones. `StubRegistry` already answers `Missing` for `requestz` and `Exists` for `ruff` and `httpx`.
 
-- [ ] **Step 3: Run the tests to verify they fail**
+- [x] **Step 3: Run the tests to verify they fail**
 
 Run: `export PATH="/c/Users/Andre/.cargo/bin:$PATH" && cargo test -p plumb-cli --locked check`
 Expected: FAIL. The first three fail on the exit code — 0 where 2 or 1 is asserted — because gaps are computed and dropped. The fourth fails because the unreadable path still reports on stderr and exits 0.
 
-- [ ] **Step 4: Commit the failing tests**
+- [x] **Step 4: Commit the failing tests**
 
 ```bash
 git add crates/plumb-cli/src/check.rs docs/research/taxonomy.md
 git commit -m "test: pin that an unread manifest warns"
 ```
 
-- [ ] **Step 5: Write the implementation**
+- [x] **Step 5: Write the implementation**
 
 Add the finding constructor beside the existing `package_does_not_exist` in `crates/plumb-cli/src/check.rs`:
 
@@ -581,29 +581,29 @@ Then delete the `Unreadable` struct, the `unreadable` vector, `collect`'s second
 
 Import `Gap` alongside the existing `manifest` import.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `export PATH="/c/Users/Andre/.cargo/bin:$PATH" && cargo test --workspace --locked`
 Expected: PASS. Tests asserting the old stderr behaviour for an undecodable manifest will need updating in the same step; they are the specification of the behaviour being changed.
 
-- [ ] **Step 7: Prove no test reaches the network**
+- [x] **Step 7: Prove no test reaches the network**
 
 Replace the body of the request site in `crates/plumb-cli/src/registry.rs` with `panic!("a test reached the network: {url}")`, run the full suite, confirm it still passes, then restore the file and confirm `git status --porcelain` is empty.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/plumb-cli/src/check.rs crates/plumb-cli/src/main.rs
 git commit -m "feat: warn when a manifest was not fully read"
 ```
 
-- [ ] **Step 9: Update the README**
+- [x] **Step 9: Update the README**
 
 The blind-spot list currently says Poetry and `requirements/` layouts are silent false negatives and "the next thing to fix". They are no longer silent. Rewrite that bullet to say the formats are still unread but now reported, name the exit code, and move them out of the "worse than unread" framing — that framing was earned by the silence, not by the gap.
 
 Verify every sentence you write by running the binary and pasting what it printed into your report.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add README.md
