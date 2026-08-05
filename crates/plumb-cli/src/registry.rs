@@ -420,8 +420,9 @@ mod tests {
         std::fs::write(&cache_path, cache_json(&[("requestz", false, 90 * 60)]))
             .expect("write cache");
 
-        // Offline, so an expired entry cannot be re-queried and the only
-        // honest answer is Unknown -- which never blocks.
+        // Offline, so it cannot be re-queried. An expired `Exists` would be
+        // honoured here; a `Missing` is refused, because answering it would
+        // block a build on evidence this run has no way to check.
         let registry = PyPiRegistry::new(true, cache_path);
 
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
