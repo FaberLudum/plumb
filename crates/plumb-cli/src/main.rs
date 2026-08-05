@@ -46,7 +46,18 @@ enum Commands {
         /// silently changes meaning.
         #[arg(long, required = true)]
         diff: bool,
-        /// Never contact a registry; unresolved names are reported as unknown.
+        // This read "unresolved names are reported as unknown" until someone
+        // ran it: nothing is reported, on either stream. The README carried
+        // the same sentence and was corrected first, which is how the tool
+        // came to contradict its own documentation — and `--help` is the
+        // surface a user reads, so it was the one that mattered.
+        /// Never contact a registry; a name the cache cannot answer for yields
+        /// no finding at all, so a cold cache reports nothing and exits 0.
+        ///
+        /// An unreachable registry is not evidence that a package does not
+        /// exist, so it can never be a violation. The cost is that silence
+        /// answers both "every name resolved" and "nothing could be looked
+        /// up", and only knowing this flag was passed tells the two apart.
         #[arg(long)]
         offline: bool,
         /// Emit JSON instead of text.
