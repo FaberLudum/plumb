@@ -28,4 +28,7 @@ Thumbs.db
 
 # Local framework output
 .plumb/cache/
+
+# Plan execution scratch
+.superpowers/
 *.local.json
