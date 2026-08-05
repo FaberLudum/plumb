@@ -189,6 +189,33 @@ fn a_run_answering_from_fresh_data_says_nothing_about_staleness() {
         .stderr(predicates::str::contains("stale").not());
 }
 
+/// Both renderings leave stdout ending in exactly one newline. `render_text`
+/// supplies its own and `render_json` does not, so the command layer has to
+/// normalise them: without one half a shell prompt lands on the closing
+/// bracket, without the other every report gains a blank line.
+#[test]
+fn stdout_ends_with_exactly_one_newline_in_both_renderings() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+
+    for args in [
+        vec!["check", "--diff", "--offline"],
+        vec!["check", "--diff", "--offline", "--json"],
+    ] {
+        let output = plumb()
+            .args(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("the binary runs");
+        let stdout = String::from_utf8(output.stdout).expect("utf-8 on stdout");
+
+        assert!(
+            stdout.ends_with('\n') && !stdout.ends_with("\n\n"),
+            "`plumb {}` wrote {stdout:?}",
+            args.join(" ")
+        );
+    }
+}
+
 /// `--diff` is the only scope this version implements, and it is required
 /// rather than assumed. A flag that is accepted and ignored means the day a
 /// second scope lands, every existing invocation silently changes meaning.
