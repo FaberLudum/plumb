@@ -99,10 +99,28 @@ pub fn repo_root(from: &Path) -> Result<PathBuf> {
 /// per-attribute textconv all set at once, the bare `--name-only -z` form
 /// still returns the raw path and exits 0.
 ///
-/// The listing reports a few things a diff does not — deletions, pure renames
-/// and mode-only changes. None of them can add a dependency, so no verdict
-/// moves; a renamed manifest is simply treated as new at its new path, which
-/// is already what a rename *with* an edit did.
+/// The listing reports things a diff header does not: deletions, mode-only
+/// changes and pure renames. Deletions and mode changes move no verdict — the
+/// manifest reads as empty or as unchanged, and neither adds a dependency.
+///
+/// **A pure rename does move a verdict, and this is the one behaviour the
+/// change alters.** `check` treats a path with no version at HEAD as a new
+/// manifest, so `git mv requirements.txt requirements-dev.txt` with no edit at
+/// all now has every name in it looked up. A manifest declaring a package PyPI
+/// does not have — an internal distribution from a private index — blocks on a
+/// rename that changed nothing about the dependencies.
+///
+/// That trade is taken deliberately. A rename *with* an edit always behaved
+/// this way, so the alternative was not "no false positive" but "the same
+/// false positive, arriving inconsistently". And the failure it replaces is the
+/// worse one: before this, a pure rename of a manifest was invisible to the
+/// gate, so a hallucinated package could be added to a manifest and renamed
+/// into place in one commit and never be looked at. A loud rare false positive
+/// beats a silent no-op, because only one of the two gets noticed.
+///
+/// The real fix is for the gate to tell "new at this path" from "new to this
+/// project", which is a question about `deps::added` and `manifest::parse`, not
+/// about which git command is run here.
 ///
 /// Paths are decoded lossily. A path whose bytes are not UTF-8 comes back with
 /// U+FFFD and matches no file, which is the same outcome as before and still
@@ -331,10 +349,13 @@ mod tests {
     ///
     /// The old parser dropped every one of them: a deletion writes
     /// `+++ /dev/null`, and a pure rename or a mode change writes no `+++`
-    /// line at all. None of them can add a dependency, so no verdict changes
-    /// — but a pure rename of a manifest was invisible, and `check` treats a
-    /// path with no version at HEAD as a new manifest, so the renamed one is
-    /// now checked exactly as a rename *with* an edit already was.
+    /// line at all.
+    ///
+    /// Of the three, only the rename changes what the gate reports, and it is
+    /// the reason this test exists — see [`changed_paths`] for why that trade
+    /// is taken. A renamed manifest is checked at its new path, exactly as a
+    /// rename *with* an edit already was, which means a rename alone can now
+    /// block on a package PyPI does not have.
     #[test]
     fn changed_paths_reports_deletions_renames_and_mode_changes() {
         let dir = init_repo();
