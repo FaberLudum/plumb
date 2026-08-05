@@ -108,10 +108,11 @@ struct Cache {
 
 /// Resolves names against PyPI, with an on-disk cache and an offline mode.
 ///
-/// Single-threaded by construction: the [`RefCell`] makes this `!Sync`, so
-/// sharing one registry across threads is a compile error rather than a race.
-/// It is `Send`, so a whole registry can still be moved to another thread.
-/// Nothing here assumes concurrency, and lookups run one at a time.
+/// Single-threaded by construction: the [`RefCell`] and [`Cell`] make this
+/// `!Sync`, so sharing one registry across threads is a compile error rather
+/// than a race. It is `Send`, so a whole registry can still be moved to
+/// another thread. Nothing here assumes concurrency, and lookups run one at a
+/// time — which is also why the unreachable latch needs no synchronisation.
 #[allow(dead_code, reason = "wired into the gate in a later task")]
 pub struct PyPiRegistry {
     offline: bool,
@@ -315,9 +316,12 @@ fn classify(result: Result<(), ureq::Error>) -> Outcome {
 impl Registry for PyPiRegistry {
     /// Answers from the cache, then from PyPI, then not at all.
     ///
-    /// Anything that is not a definite 200 or 404 — a timeout, a proxy, a
+    /// Anything that is not a definite success or 404 — a timeout, a proxy, a
     /// firewall, a 5xx — is [`Existence::Unknown`], and `Unknown` is never
     /// cached: it is a fact about this run's network, not about the package.
+    ///
+    /// See [`PyPiRegistry::exists_via`] for the order this resolves in, and
+    /// for the latch that stops a dead network being retried once per name.
     fn exists(&self, name: &str) -> Existence {
         self.exists_via(name, |name| self.lookup(name))
     }
