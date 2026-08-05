@@ -734,6 +734,25 @@ mod tests {
     }
 
     #[test]
+    fn working_diff_tolerates_non_utf8_content() {
+        let dir = init_repo();
+        let path = dir.path().join("latin1.txt");
+        fs::write(&path, [0xE9u8, b'\n']).expect("write");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "add latin1"]);
+        fs::write(&path, [0xE9u8, 0xE9, b'\n']).expect("write");
+
+        let diff = working_diff(dir.path()).expect("diff succeeds despite non-UTF-8 content");
+
+        // Assert on the replacement character, not on the path. A diff whose
+        // hunk is suppressed — which a global `core.attributesFile` marking
+        // `*.txt binary` produces, since `working_diff` honours ambient config
+        // while the fixture does not — still contains the path, so a path
+        // assertion would pass without the lossy decoding being exercised.
+        assert!(diff.contains('\u{FFFD}'), "diff was: {diff}");
+    }
+
+    #[test]
     fn show_at_head_returns_the_committed_contents() {
         let dir = init_repo();
         fs::write(dir.path().join("requirements.txt"), "ruff==0.4.0\nrequestz==2.31.0\n")
@@ -774,6 +793,9 @@ use std::path::Path;
 use std::process::Command;
 
 /// Returns `git diff HEAD` for the given repository.
+///
+/// Output is decoded lossily, so it can contain U+FFFD wherever the diff
+/// carried bytes that are not valid UTF-8. See the body for why.
 // `allow` rather than `expect`: the tests below call both functions, so an
 // `expect(dead_code)` would go unfulfilled in the test target. Task 8 deletes
 // this attribute when it wires the functions into the gate.
@@ -840,7 +862,7 @@ mod git;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-cli git`
-Expected: PASS, four tests.
+Expected: PASS, five tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1201,7 +1223,7 @@ pub mod deps;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core deps`
-Expected: PASS, four tests.
+Expected: PASS, five tests.
 
 - [ ] **Step 5: Commit**
 
