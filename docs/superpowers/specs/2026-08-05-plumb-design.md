@@ -1,8 +1,16 @@
-# AiFramework — Design Spec
+# Plumb — Design Spec
 
 **Date:** 2026-08-05
-**Status:** awaiting review
+**Status:** approved
 **Evidence base:** [docs/research/taxonomy.md](../../research/taxonomy.md)
+**License:** Apache-2.0
+
+A plumb line checks whether a structure stands true. That is the tool's job:
+not judging whether each brick is well made, but whether the building is
+still vertical.
+
+The mascot is Plumby. The tool is `plumb` — the friendly name belongs on the
+mascot, not on the command.
 
 ---
 
@@ -66,10 +74,10 @@ Two layers, with different obligations.
 └─────────────────────────────────────────────────────────┘
              │                        │
              ▼                        ▼
-      ┌─────────────┐         ┌───────────────┐
-      │ aif CLI     │         │ Agent adapters│
-      │ (gates)     │         │ (generated)   │
-      └─────────────┘         └───────────────┘
+      ┌───────────────┐       ┌───────────────┐
+      │ plumb CLI     │       │ Agent adapters│
+      │ (gates)       │       │ (generated)   │
+      └───────────────┘       └───────────────┘
 ```
 
 Layer 0 works with zero configuration. Layer 1 adds project-specific
@@ -192,7 +200,7 @@ success criterion 3 (§10) for reasons given there.
 
 ## 6. Layer 1 — Project context
 
-Five artefacts under `.aiframework/`.
+Five artefacts under `.plumb/`.
 
 | Artefact | Content | Greenfield | Brownfield |
 |---|---|---|---|
@@ -213,7 +221,7 @@ no legacy state to reconcile.
 
 ### Bootstrap
 
-`aif init` on an empty repository asks the minimum: which modules, which
+`plumb init` on an empty repository asks the minimum: which modules, which
 boundaries, which error-handling style, which test shape. The answers are
 frozen into `conventions.md` and `architecture.md`, and the boundary check is
 live from commit one.
@@ -222,7 +230,7 @@ live from commit one.
 skipped, and a framework that gets skipped at bootstrap never applies to the
 project at all. Aggressive defaults, few questions, everything editable later.
 
-On an existing repository, `aif init` derives a first draft of
+On an existing repository, `plumb init` derives a first draft of
 `architecture.md` and `conventions.md` from the code and presents it for
 correction. Brownfield is the common case; a framework that only installs on
 new projects installs almost nowhere.
@@ -251,7 +259,7 @@ The five Layer 1 artefacts are the single source of truth. A generator emits
 per-agent instruction files from them:
 
 ```
-.aiframework/*.md  ──▶  CLAUDE.md
+.plumb/*.md  ──▶  CLAUDE.md
                    ──▶  AGENTS.md
                    ──▶  .cursorrules
                    ──▶  .github/copilot-instructions.md
@@ -261,16 +269,16 @@ One source, N harnesses. Adding support for a new agent means adding a
 template, not restating the rules. Generated files carry a header marking them
 as generated, and the gate fails if they have drifted from their source.
 
-## 9. The `aif` CLI
+## 9. The `plumb` CLI
 
 ```
-aif init            bootstrap or derive Layer 1 artefacts
-aif check --diff    run gates against the working diff
-aif check --repo    full-repository run, for baselining
-aif check --fix     apply hygiene autofixes, then re-run
-aif index           regenerate index.md
-aif adapters        regenerate agent instruction files
-aif report          longitudinal metrics: volume, coupling, deletion ratio
+plumb init            bootstrap or derive Layer 1 artefacts
+plumb check --diff    run gates against the working diff
+plumb check --repo    full-repository run, for baselining
+plumb check --fix     apply hygiene autofixes, then re-run
+plumb index           regenerate index.md
+plumb adapters        regenerate agent instruction files
+plumb report          longitudinal metrics: volume, coupling, deletion ratio
 ```
 
 `check` outputs human-readable text and JSON. Exit codes: 0 clean, 1 Tier A
@@ -309,7 +317,7 @@ the only test that keeps the framework honest.
 ## 11. Repository layout
 
 ```
-AiFramework/
+plumb/
   docs/
     research/          taxonomy.md, sources.md
     superpowers/specs/ design specs
@@ -323,7 +331,7 @@ AiFramework/
     python/
     typescript/
     dotnet/
-  cli/                 aif
+  cli/                 plumb
 ```
 
 ## 12. Build phases
@@ -424,7 +432,7 @@ found the rate dropped fourfold" earns trust.
 Public distribution makes friction existential rather than annoying. Three
 constraints follow:
 
-- **Zero-config must do something useful.** Running `aif check` on a fresh
+- **Zero-config must do something useful.** Running `plumb check` on a fresh
   clone, with no Layer 1 artefacts and no bootstrap, must produce real value
   from Tier A alone. Bootstrap is an upgrade, never a gate to first use.
 - **Network behaviour is documented and optional.** Registry resolution sends
@@ -460,10 +468,20 @@ becomes anything users have to think about, it has failed.
   or is the correlation Zhu found an artefact of agent-generated systems
   specifically? Phase 6 answers this, and a negative answer removes a Tier B
   rule.
-- Project name. `AiFramework` is a working title and a poor public one:
-  generic, unsearchable, and it describes the category rather than the thing.
-  Needs deciding before the repository goes public, since renaming after
-  release costs links and installs.
-- License. Apache-2.0 is the recommendation over MIT: the explicit patent
-  grant matters for a tool aimed at corporate codebases, and it costs adopters
-  nothing.
+- Implementation language for the CLI. It has to run in CI on three stacks and
+  install without dragging in a runtime users do not already have, which
+  points at a single compiled binary rather than a Python or Node package.
+  Unresolved, and it shapes the whole implementation plan.
+- Package identifier if the CLI is distributed through a registry. `plumb` on
+  PyPI is taken by an abandoned 2018 messaging library. Moot if distribution
+  is via GitHub releases and a package manager tap.
+
+## 16. Decisions taken
+
+- **Name:** `plumb`. A plumb line checks structural trueness, which is what the
+  boundary check does. The mascot is Plumby; the diminutive stays on the
+  mascot, where it costs nothing, rather than on a command that has to read as
+  a serious tool.
+- **License:** Apache-2.0, for the explicit patent grant. Many corporate legal
+  teams prefer or require it for internal tooling, and it costs adopters
+  nothing over MIT.

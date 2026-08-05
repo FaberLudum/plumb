@@ -26,6 +26,6 @@ obj/
 .DS_Store
 Thumbs.db
 
-# Output locali del framework
-.aiframework/cache/
+# Local framework output
+.plumb/cache/
 *.local.json
