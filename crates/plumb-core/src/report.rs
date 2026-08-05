@@ -1,6 +1,48 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
+//! Renders findings for the two things that read them: a person and a machine.
+//!
+//! Both renderings carry `source`. A finding that reaches a reader without the
+//! evidence behind its rule is indistinguishable from an opinion, and the
+//! project's one rule is that it never ships opinions.
+
+use crate::finding::{Finding, Tier};
+
+/// Renders findings for a terminal.
+pub fn render_text(findings: &[Finding]) -> String {
+    if findings.is_empty() {
+        return "plumb: no findings\n".to_string();
+    }
+
+    let mut out = String::new();
+    for finding in findings {
+        let label = match finding.tier {
+            Tier::A => "blocking",
+            Tier::B => "warning",
+            Tier::C => "note",
+            Tier::Hygiene => "hygiene",
+        };
+        out.push_str(&format!(
+            "{}: {} [{}]\n  {}\n  evidence: {}\n",
+            label, finding.message, finding.rule, finding.location, finding.source
+        ));
+    }
+    out
+}
+
+/// Renders findings as a JSON array for machine consumption.
+///
+/// `Finding` serialises strings and a fieldless enum, none of which
+/// `serde_json` can fail on, so the fallback is unreachable rather than a
+/// silent failure mode. It is written to be harmless if that ever stops being
+/// true: the gate is `finding::exit_code`, which reads the findings and not
+/// this string, so an empty array here cannot turn a blocking run into a
+/// passing one. Make this fallible before making this output the gate.
+pub fn render_json(findings: &[Finding]) -> String {
+    serde_json::to_string_pretty(findings).unwrap_or_else(|_| "[]".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
