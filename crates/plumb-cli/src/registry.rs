@@ -164,21 +164,40 @@ impl PyPiRegistry {
     /// The lookup is a parameter so the request itself can be replaced in
     /// tests. [`Registry::exists`] passes the real one.
     ///
-    /// Order matters. The cache is consulted first, so a warm cache still
-    /// answers on a dead network. Then the latch: once a lookup has failed for
-    /// a transport reason, every later name in this run reports `Unknown`
-    /// without a request, because they would all pay [`LOOKUP_TIMEOUT`] to
-    /// learn the same thing. Thirty dependencies behind a blackholing firewall
-    /// is otherwise a five-minute hang, and a gate that hangs gets switched
-    /// off exactly like one that fails.
+    /// Order matters. A fresh cache entry answers first, so a warm cache still
+    /// answers on a dead network. Offline stops there, keeping whatever an
+    /// expired entry is still worth — see [`PyPiRegistry::honour_offline`].
+    /// Then the latch: once a lookup has failed for a transport reason, every
+    /// later name in this run reports `Unknown` without a request, because
+    /// they would all pay [`LOOKUP_TIMEOUT`] to learn the same thing. Thirty
+    /// dependencies behind a blackholing firewall is otherwise a five-minute
+    /// hang, and a gate that hangs gets switched off exactly like one that
+    /// fails.
+    ///
+    /// Nothing on the offline path writes to the cache. An honoured entry
+    /// keeps the timestamp of the lookup that produced it, which is a claim
+    /// about when PyPI answered; restamping it on every read would make the
+    /// entry immortal and stop it ever being re-queried once the network came
+    /// back.
+    ///
+    /// The latch deliberately does not honour stale entries the way offline
+    /// does. Offline is a standing choice to work from what is on disk; an
+    /// unreachable network is a fault that may clear within the same minute,
+    /// and quietly substituting old answers for it would change what the gate
+    /// reports without anyone having asked.
     fn exists_via(&self, name: &str, lookup: impl Fn(&str) -> Outcome) -> Existence {
-        if let Some(entry) = self.cache.borrow().known.get(name).copied()
+        let cached = self.cache.borrow().known.get(name).copied();
+        if let Some(entry) = cached
             && entry.is_fresh(now_unix())
         {
             return entry.existence();
         }
 
-        if self.offline || self.unreachable.get() {
+        if self.offline {
+            return Self::honour_offline(cached);
+        }
+
+        if self.unreachable.get() {
             return Existence::Unknown;
         }
 
@@ -192,6 +211,27 @@ impl PyPiRegistry {
         let existence = outcome.existence();
         self.record(name, existence);
         existence
+    }
+
+    /// What an expired entry is worth when the registry will not be consulted.
+    ///
+    /// Offline there is no way to refresh, so the choice is between the old
+    /// answer and no answer, and the lifetimes' own asymmetry decides it. A
+    /// stale `Exists` only fails open: honouring it costs nothing and keeps
+    /// the run informative, so a newly hallucinated name still stands out as
+    /// `Unknown` against a backdrop of confirmed ones. A stale `Missing` would
+    /// block a build on evidence nobody can check, so it is refused.
+    ///
+    /// Expiring uniformly instead would answer `Unknown` to everything, which
+    /// is not a safer gate but no gate at all.
+    ///
+    /// This is a read, never a refresh — see [`PyPiRegistry::exists_via`] for
+    /// why the timestamp must not move.
+    fn honour_offline(cached: Option<Entry>) -> Existence {
+        match cached {
+            Some(entry) if entry.exists => Existence::Exists,
+            _ => Existence::Unknown,
+        }
     }
 
     /// Asks PyPI about one name.
