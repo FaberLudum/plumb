@@ -1025,4 +1025,78 @@ mod tests {
             );
         }
     }
+
+    /// A Poetry manifest used to yield an empty dependency set and exit 0 —
+    /// a silent false negative on a blocking gate. The gap is now a Tier B
+    /// finding: the run warns, names the file and the shape it did not read.
+    #[test]
+    fn a_manifest_in_an_unread_format_warns_rather_than_passing() {
+        let dir = repo_with(&[("pyproject.toml", "[project]\nname = \"demo\"\n")]);
+        write(
+            dir.path(),
+            "pyproject.toml",
+            "[tool.poetry.dependencies]\nrequests = \"^2.0\"\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert!(output.contains("pyproject.toml"), "output was: {output}");
+        assert!(
+            output.contains("tool.poetry.dependencies"),
+            "output was: {output}"
+        );
+    }
+
+    /// The other direction: a manifest read in full must not start warning.
+    /// A coverage note that fires on ordinary work is one every reader learns
+    /// to skip, and then the gate is uninstalled.
+    #[test]
+    fn an_ordinary_manifest_still_passes_silently() {
+        let dir = repo_with(&[("requirements.txt", "ruff==0.4.0\n")]);
+        write(dir.path(), "requirements.txt", "ruff==0.4.0\nhttpx==0.27.0\n");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
+    /// Tier A must keep winning. A file can carry both a missing package and a
+    /// gap; the verdict is 1, not 2, and both stories appear in the report.
+    #[test]
+    fn a_missing_package_still_blocks_when_the_same_file_has_a_gap() {
+        let dir = repo_with(&[("requirements.txt", "ruff==0.4.0\n")]);
+        write(
+            dir.path(),
+            "requirements.txt",
+            "ruff==0.4.0\nrequestz==2.31.0\n-r base.txt\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 1, "output was: {output}");
+        assert!(output.contains("requestz"), "output was: {output}");
+        assert!(output.contains("base.txt"), "output was: {output}");
+    }
+
+    /// An undecodable manifest is the same class as a gap — Plumb could not
+    /// establish anything about this file — and now reports the same way: a
+    /// Tier B finding and exit 2, not a stderr note and exit 0.
+    #[test]
+    fn a_manifest_that_cannot_be_decoded_warns_rather_than_reporting_on_stderr() {
+        let dir = repo_with(&[("requirements.txt", "ruff==0.4.0\n")]);
+        std::fs::write(
+            dir.path().join("requirements.txt"),
+            [b'#', b' ', 0xE9, b'\n', b'r', b'u', b'f', b'f', b'\n'],
+        )
+        .expect("write");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert!(output.contains("requirements.txt"), "output was: {output}");
+    }
 }

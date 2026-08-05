@@ -309,3 +309,31 @@ This taxonomy is dated by construction. Revisit it if:
 - In Mao et al. many differences are statistically significant yet negligible
   in magnitude, because the sample is enormous. Always read the p-value and
   Cohen's d together.
+
+## 10. Coverage reporting
+
+The findings in this section are not derived from evidence, and saying so is
+the point of the section.
+
+Everything above describes defects in AI-generated code, each traced to a
+study. A coverage finding describes Plumb instead: it reports that Plumb did
+not read something, so that a run which established nothing cannot be mistaken
+for a run which found nothing.
+
+They exist because the alternative is worse. A manifest in a format Plumb does
+not parse used to yield an empty dependency set, which the gate reported as a
+clean result — a silent false negative on a blocking gate, which is the exact
+failure this project was built to catch. Reporting the gap is the honest
+reading; filing it among the evidence rows would break the project's first rule
+in the act of honouring it.
+
+Coverage findings are Tier B. They warn and never block, because a gate that
+fails on every project in a format it has not learned yet is uninstalled before
+it catches anything.
+
+| Finding | Emitted when |
+|---|---|
+| `manifest-understood` | A recognised manifest declares dependencies in a form Plumb did not read, or could not be read at all |
+
+This section has no invalidation condition, because it rests on no claim that
+new evidence could refute. It goes away when the formats are read.
