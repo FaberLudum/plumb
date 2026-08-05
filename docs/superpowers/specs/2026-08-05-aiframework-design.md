@@ -36,9 +36,13 @@ cannot see.
 
 ## 3. Non-goals
 
-- **Code style and micro-quality.** Function length, cyclomatic complexity,
-  readability, naming. The evidence says AI already matches or beats humans
-  here. Enforcement spent here is friction with no return.
+- **Quality metrics calibrated on human failure modes.** Function length,
+  cyclomatic complexity, readability thresholds. The evidence says AI already
+  matches or beats humans on these. Enforcing them finds nothing and costs
+  friction.
+- **Micro-quality as the framework's value proposition.** Style *consistency*
+  is in scope, as signal hygiene (§5.4). Style *quality* is not, and is not
+  what the framework is for.
 - **Replacing existing linters.** Where ruff, eslint or Roslyn already do the
   job, the framework defers to them rather than reimplementing them.
 - **Detecting whether code was AI-written.** The rules apply to all code in the
@@ -77,7 +81,7 @@ that installs Layer 0 and never fills in Layer 1 still gets the Tier A gates.
 Each rule cites the taxonomy section that justifies it. A rule that loses its
 source is removed, not grandfathered.
 
-### Tier A — blocking
+### 5.1 Tier A — blocking
 
 Peer-reviewed evidence, objective detection, no judgement calls.
 
@@ -99,7 +103,7 @@ waved through by the author — Perry et al. found developers using assistants
 believe their code is more secure while it is measurably less so, so
 self-assessment is exactly the wrong control.
 
-### Tier B — warning
+### 5.2 Tier B — warning
 
 Preprint evidence, thresholds needing per-project calibration. These report
 and record; they do not block until calibrated against the project's own
@@ -136,7 +140,7 @@ repository. Liu et al. found 22.7% of AI-introduced issues still alive at HEAD,
 which means introduced debt does not get cleaned up later. Downstream checks
 arrive after the decision that mattered.
 
-### Tier C — measurement only
+### 5.3 Tier C — measurement only
 
 **Cross-session convention consistency.** H3 is unmeasured in the literature —
 not refuted, never studied, because it needs longitudinal repositories with
@@ -145,6 +149,47 @@ that would answer it: convention fingerprints per commit, tracked over time.
 No rule, no gate, no claim. If a signal emerges from real projects it becomes
 a contribution; until then it stays a hypothesis with instrumentation attached.
 
+### 5.4 Hygiene — delegated and autofixed
+
+Style consistency is in scope. Style quality is not. The distinction matters
+and collapsing it was an early mistake in this design.
+
+What the evidence refutes is "AI produces low-quality units". What it does not
+refute — and partly supports — is "AI produces units that are inconsistent
+with each other". Wang et al. catalogue 24 kinds of stylistic inconsistency
+between AI and human code, and the largest single effect in Mao et al. is
+lexical density (d = -0.555): humans compress, AI dilutes.
+
+Three reasons this belongs in the framework despite not being a defect the
+research condemns:
+
+**It is nearly free.** The argument against micro-quality enforcement was that
+it costs friction for no return. That argument holds when enforcement is a
+judgement call. It does not hold when enforcement is `ruff format` or
+`dotnet format` — tools that already exist, are deterministic, and fix their
+own findings.
+
+**It serves the system-level metrics.** Volume and coupling deltas are measured
+on diffs. Stylistic noise in diffs corrupts that signal. A stable style
+produces clean deltas, so consistency is instrumental to Tier B working at all.
+
+**It is a precondition for Tier C.** Cross-session drift is a consistency
+problem. Drift cannot be detected without a stable baseline to detect it
+against. Measuring drift while leaving style outside the framework would be
+incoherent.
+
+Three constraints on how it is enforced:
+
+- **Delegated, never reimplemented.** The framework selects and freezes the
+  formatter configuration. It does not write a formatter.
+- **Autofixed where possible.** Never an error a human has to resolve by hand.
+- **Consistency, not judgement.** No threshold on how good a unit is, only on
+  whether it resembles the rest of the project.
+
+Configuration lives in `conventions.md` (§6) and is frozen at bootstrap. These
+checks are labelled as hygiene rather than defect gates, and are excluded from
+success criterion 3 (§10) for reasons given there.
+
 ## 6. Layer 1 — Project context
 
 Five artefacts under `.aiframework/`.
@@ -152,7 +197,7 @@ Five artefacts under `.aiframework/`.
 | Artefact | Content | Greenfield | Brownfield |
 |---|---|---|---|
 | `architecture.md` | Modules, responsibilities, permitted dependencies | Declared at bootstrap, grows by delta | Derived from code, then corrected |
-| `conventions.md` | Error handling, test shape, naming | Chosen from defaults, then frozen | Extracted from existing code |
+| `conventions.md` | Error handling, test shape, naming, frozen formatter config | Chosen from defaults, then frozen | Extracted from existing code |
 | `invariants.md` | Project-specific non-negotiables | Written as they emerge | Written as they emerge |
 | `index.md` | What the repo can already do, and where | Starts empty, grows automatically | Generated by the initial scan |
 | `decisions/` | Short ADRs, one per structural choice | On demand | On demand |
@@ -222,6 +267,7 @@ as generated, and the gate fails if they have drifted from their source.
 aif init            bootstrap or derive Layer 1 artefacts
 aif check --diff    run gates against the working diff
 aif check --repo    full-repository run, for baselining
+aif check --fix     apply hygiene autofixes, then re-run
 aif index           regenerate index.md
 aif adapters        regenerate agent instruction files
 aif report          longitudinal metrics: volume, coupling, deletion ratio
@@ -229,7 +275,9 @@ aif report          longitudinal metrics: volume, coupling, deletion ratio
 
 `check` outputs human-readable text and JSON. Exit codes: 0 clean, 1 Tier A
 violation, 2 Tier B warnings only. CI blocks on 1; 2 is recorded and
-reported.
+reported. Hygiene findings are autofixed and do not affect the exit code;
+the rare unfixable one is reported as a warning and tagged as hygiene so it
+stays out of defect counts.
 
 Stack gate packs (Python, TypeScript, .NET) plug in underneath and supply the
 language-specific analysis — SAST, dependency resolution, import graphs. A
@@ -244,13 +292,19 @@ The framework is worth its friction if, on a control repository:
 1. Tier A violations per thousand lines drop measurably after adoption.
 2. Cycle time does not degrade. A 40% slower loop for 10% fewer defects is a
    failure and will be reported as one.
-3. The gates fire on AI-authored and human-authored code at comparable rates.
-   If they fire far more on human code, they are miscalibrated and are
-   detecting style, not the documented defects.
+3. The **defect gates** fire on AI-authored and human-authored code at
+   comparable rates. If they fire far more on human code, they are
+   miscalibrated and are detecting style, not the documented defects.
 
 Criterion 3 is the honest one. It is how we find out whether the framework
 targets the failure modes the research identified or has quietly drifted back
 into being a linter.
+
+Hygiene checks (§5.4) are excluded from this measurement by construction, and
+the exclusion is not a convenience. Human code has a heavy-tailed
+distribution, so style checks legitimately fire more often on it. Counting
+them here would guarantee a failing result for the wrong reason and destroy
+the only test that keeps the framework honest.
 
 ## 11. Repository layout
 

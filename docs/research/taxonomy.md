@@ -207,6 +207,26 @@ ordinary ones. AI code is uniformly moderate. Traditional tools hunt for peaks;
 on AI code they find none, while the system decays diffusely and invisibly
 below those thresholds.
 
+### 5.1 Quality is not consistency
+
+This table rules out micro-quality *judgements*. It does not rule out style
+*consistency*, and the two must not be collapsed.
+
+What the evidence refutes is "AI produces low-quality units". What it leaves
+open — and partly supports — is "AI produces units that are inconsistent with
+each other". Wang et al. (S15) catalogue 24 kinds of stylistic inconsistency
+between AI and human code, and the largest single effect in Mao et al. is
+lexical density at d = -0.555: humans compress, AI dilutes. That is a
+consistency signal, not a quality verdict.
+
+Consistency also carries instrumental weight the quality metrics do not.
+Volume and coupling deltas are measured on diffs, so stylistic noise corrupts
+them. And cross-session drift (H3) is by definition a consistency problem:
+it cannot be detected without a stable baseline to detect it against.
+
+The framework therefore treats style as **hygiene** — delegated to existing
+formatters, autofixed, never a judgement — and keeps it out of defect counts.
+
 ## 6. Verdict on the five initial hypotheses
 
 | ID | Hypothesis | Verdict | Consequence |
@@ -244,6 +264,7 @@ until then H3 stays labelled as a hypothesis.
 | B | Architectural boundaries declared and checked against imports | 4.5, H5 | Warning, promotable |
 | B | Debt analysis on the diff, at the moment of introduction | 4.4 | Warning |
 | C | Convention consistency across sessions | H3 | Measurement only |
+| H | Style consistency against the project baseline | §5.1, §4.6 | Delegated, autofixed, excluded from defect counts |
 
 Tier A gates block because they rest on peer-reviewed sources and detect
 objective conditions: a package either exists or it does not, a dependency is
@@ -253,6 +274,12 @@ substance.
 Tier B rests on preprints without independent replication and on thresholds
 that need per-project calibration. These stay warnings until we have data of
 our own.
+
+Tier H is not a defect tier. It exists because clean style makes the Tier B
+and Tier C signals readable, and because the enforcement is free — an
+existing formatter fixing its own findings. It never counts as a defect,
+which keeps it from polluting the comparison between AI-authored and
+human-authored code.
 
 ## 8. Invalidation conditions
 
