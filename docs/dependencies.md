@@ -5,7 +5,7 @@ the standard library is not enough.
 
 | Crate | Why not std |
 |---|---|
-| `anyhow` | Error context chains across module boundaries. std has no equivalent for propagating human-readable context. |
+| `anyhow` | `plumb-cli` only. Error context chains across module boundaries. std has no equivalent for propagating human-readable context. `plumb-core` is pure and fallible in no way that needs context, so it does not declare this. |
 | `clap` | Argument parsing with subcommands, help text and version. Hand-rolling this is a known source of bugs and no faster to write. |
 | `serde` / `serde_json` | JSON report output and cache persistence. No serialisation in std. |
 | `toml` | `pyproject.toml` parsing. No TOML parser in std. |
