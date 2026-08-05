@@ -11,12 +11,23 @@
 //!
 //! A name this module does not extract is not a name that is absent, and a
 //! [`Manifest`] says which of the two it is. Poetry's dependency tables — the
-//! main one and the per-group ones — PEP 735 `[dependency-groups]`, and
-//! requirements includes are all unread here, and each is reported as a [`Gap`]
-//! instead of passing for a file with nothing in it. The rule that keeps a gap
-//! worth reading is that it is raised on evidence of an unread declaration and
-//! never on the absence of one: a `pyproject.toml` holding only a build system
-//! and some tool settings declares no runtime dependencies and produces no gap.
+//! main one and the per-group ones — PEP 735 `[dependency-groups]`, PEP 621
+//! `dynamic` dependencies, any dependency table under `[tool]`, a declaration
+//! written in the wrong shape, and requirements includes are all unread here,
+//! and each is reported as a [`Gap`] instead of passing for a file with nothing
+//! in it. The rule that keeps a gap worth reading is that it is raised on
+//! evidence of an unread declaration and never on the absence of one: a
+//! `pyproject.toml` holding only a build system and some tool settings declares
+//! no runtime dependencies and produces no gap.
+//!
+//! The `[tool]` rule is structural — a key named `dependencies` or ending in
+//! `-dependencies`, at any depth — rather than a list of tools, and
+//! [`tool_dependency_paths`] carries the argument for why. What it does not
+//! cover is a tool that spells its dependency list some other way:
+//! `[tool.tox.env_run_base].deps`, `[tool.briefcase.app.<name>].requires` and
+//! `[tool.cibuildwheel].test-requires` are read as ordinary configuration and
+//! produce no gap. That is a real remaining silence, not a case this module has
+//! an answer for.
 //!
 //! One exemption is worth knowing about, because it rests on someone else's
 //! documented behaviour rather than on anything checkable here.

@@ -83,6 +83,21 @@ legitimate file that declares no runtime dependencies. It must produce no gap.
 A gap requires positive evidence that a dependency declaration exists and was
 not read:
 
+> **Superseded by the shipped implementation.** This table is kept as written
+> because it records what was designed; it is no longer what the code does.
+> Three rows changed and three were added. See `plumb_core::manifest::Gap` and
+> the README for the current set.
+>
+> - `PoetryDependencies` also fires, unconditionally, on
+>   `[tool.poetry.group.<name>.dependencies]`. PEP 621 gives `[project]` no
+>   notion of dependency groups, so nothing in `[project]` can mirror one, and
+>   the row below is only half true as a result.
+> - The `[project].dependencies` exemption is keyed on the value being an
+>   array — the same test the reader takes — not on the key being present.
+> - `Dynamic`, `ToolDependencies` and `Malformed` were added. The second is a
+>   structural rule over `[tool]` rather than a trigger per tool, and it is
+>   what closed five shapes that reached exit 0 in the shipped version.
+
 | Gap | Trigger |
 |---|---|
 | `Unparseable` | The TOML does not parse |

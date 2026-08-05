@@ -335,5 +335,25 @@ it catches anything.
 |---|---|
 | `manifest-understood` | A recognised manifest declares dependencies in a form Plumb did not read, or could not be read at all |
 
+A coverage finding reports a gap; it does not close it, and it does not claim
+the gap list is complete. Two silences remain and neither is expressible as a
+`manifest-understood` finding, because in both cases nothing was read to have a
+finding attached to it:
+
+- A file not recognised as a manifest at all. Recognition is by filename, so
+  `requirements.in`, `setup.py`, `setup.cfg`, `Pipfile` and an included
+  `requirements/base.txt` are never opened.
+- A dependency declaration inside a recognised `pyproject.toml` that is not
+  spelled `dependencies`. The rule for tool tables keys on that word, so
+  `[tool.tox.env_run_base].deps`, `[tool.briefcase.app.<name>].requires`,
+  `[tool.cibuildwheel].test-requires`, `[tool.flit.metadata].dev-requires` and
+  PEP 725 `[external]` produce no finding. `[build-system].requires` is
+  excluded deliberately — it is in nearly every `pyproject.toml`, and a warning
+  that always fires is one nobody reads.
+
+Both are silent false negatives on a blocking gate. They are recorded here
+rather than in the README alone because the README describes a version and this
+describes the rule.
+
 This section has no invalidation condition, because it rests on no claim that
 new evidence could refute. It goes away when the formats are read.

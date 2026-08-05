@@ -136,13 +136,25 @@ nothing else is there:
   - PEP 621 `dynamic` listing `dependencies` or `optional-dependencies` — the
     standard's own way of saying the dependencies are declared somewhere else.
   - Any key named `dependencies`, or ending in `-dependencies`, anywhere under
-    `[tool]`. This is a rule about the shape of the key, not a list of tools,
-    and it is what covers `[tool.pdm.dev-dependencies]`,
-    `[tool.hatch.envs.<name>].dependencies` and `.extra-dependencies`,
-    `[tool.uv].dev-dependencies`, `[tool.pixi.pypi-dependencies]`,
-    `[tool.setuptools.dynamic].dependencies` and the pre-1.2
+    `[tool]`, whose value is an array or a table. This is a rule about the
+    shape of the key, not a list of tools, and it is what covers
+    `[tool.pdm.dev-dependencies]`, `[tool.hatch.envs.<name>].dependencies` and
+    `.extra-dependencies`, `[tool.uv].dev-dependencies` and
+    `.extra-build-dependencies`, `[tool.pixi.pypi-dependencies]` and its conda
+    tables, `[tool.setuptools.dynamic].dependencies` and the pre-1.2
     `[tool.poetry.dev-dependencies]` — none of which is named anywhere in the
     code.
+
+    Three things keep it off ordinary configuration. A matched key is not
+    descended into, so a package called `dependencies` inside a pixi or Poetry
+    table is not read as a second declaration. Only an array or a table
+    counts, which is what excludes hatch's boolean
+    `require-runtime-dependencies`. And two exclusions are carried explicitly,
+    both against a published schema: `[tool.ruff.analyze.include-dependencies]`
+    maps file paths to file globs rather than to packages, and uv's
+    `constraint-`, `build-constraint-`, `override-`, `exclude-` and rye's
+    `excluded-dependencies` are documented as never installing anything, so a
+    project using them is read in full and does not warn.
   - A declaration whose value is not the shape the reader takes, such as
     `dependencies = "ruff"` instead of a list.
 
@@ -168,12 +180,16 @@ nothing else is there:
   that calls its dependency list something else is not covered. Measured, each
   exiting `0` with `plumb: no findings` over a package that does not exist:
   `[tool.tox.env_run_base].deps`, `[tool.briefcase.app.<name>].requires`,
-  `[tool.cibuildwheel].test-requires`, and `[build-system].requires` — the
-  last deliberately, because it appears in nearly every `pyproject.toml` and a
-  warning that always fires is one nobody reads.
+  `[tool.cibuildwheel].test-requires`, `[tool.flit.metadata].dev-requires`,
+  PEP 725 `[external].dependencies` — which is a top-level table, not under
+  `[tool]` — and `[build-system].requires`. The last is deliberate: it appears
+  in nearly every `pyproject.toml`, and a warning that always fires is one
+  nobody reads.
 
-  All of these remain silent false negatives on a blocking gate, which is the
-  failure this project exists to catch.
+  These are silent false negatives on a blocking gate, which is the failure
+  this project exists to catch. The list is what was measured, not what was
+  assumed, and it is not a proof that nothing else is missing: any tool that
+  spells its dependency list some third way is silent until someone finds it.
 - A manifest that is not valid UTF-8 is not checked, and says so the same way:
   one Latin-1 byte costs the whole file, nothing in it is looked up, and the
   run warns — `requirements.txt was not fully read: not valid UTF-8 at byte 5`
