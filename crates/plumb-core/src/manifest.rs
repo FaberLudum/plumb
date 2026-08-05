@@ -755,6 +755,73 @@ dev = ["pytest"]
         assert_eq!(manifest.gaps, vec![Gap::DependencyGroups]);
     }
 
+    /// PEP 621's own way of saying "my dependencies are declared, but not
+    /// here".
+    ///
+    /// This is the strongest evidence a gap can rest on, because the file
+    /// states it in the standard's vocabulary rather than leaving it to be
+    /// inferred from a tool table. Listing `dependencies` in `dynamic` means
+    /// the build backend supplies them, and PEP 621 forbids also writing
+    /// `[project].dependencies` — so the literal-key reader finds nothing and,
+    /// without this, reports a fully understood file.
+    #[test]
+    fn dynamic_dependencies_are_a_gap() {
+        let text = r#"
+[project]
+name = "demo"
+dynamic = ["version", "dependencies"]
+"#;
+        let manifest = parse_pyproject(text);
+        assert!(manifest.names.is_empty());
+        assert_eq!(
+            manifest.gaps,
+            vec![Gap::Dynamic(vec!["dependencies".to_string()])]
+        );
+    }
+
+    #[test]
+    fn dynamic_optional_dependencies_are_a_gap() {
+        let text = "[project]\nname = \"demo\"\ndynamic = [\"optional-dependencies\"]\n";
+        assert_eq!(
+            parse_pyproject(text).gaps,
+            vec![Gap::Dynamic(vec!["optional-dependencies".to_string()])]
+        );
+    }
+
+    /// Both fields listed is one unread layout, so it is one gap naming both —
+    /// the rule the two Poetry tables already follow.
+    #[test]
+    fn both_dynamic_dependency_fields_raise_a_single_gap() {
+        let text =
+            "[project]\nname = \"demo\"\ndynamic = [\"dependencies\", \"optional-dependencies\"]\n";
+        let gaps = parse_pyproject(text).gaps;
+        assert_eq!(
+            gaps,
+            vec![Gap::Dynamic(vec![
+                "dependencies".to_string(),
+                "optional-dependencies".to_string()
+            ])]
+        );
+        assert!(gaps[0].describe().contains("dependencies"));
+    }
+
+    /// `dynamic` is ordinary and mostly harmless: nearly every backend-built
+    /// project marks `version` dynamic. Only the two dependency fields are
+    /// evidence of an unread declaration, and warning on the rest would be
+    /// warning on absence — the thing this module is not allowed to do.
+    #[test]
+    fn dynamic_fields_that_are_not_dependencies_are_not_a_gap() {
+        let text = r#"
+[project]
+name = "demo"
+dynamic = ["version", "readme", "classifiers"]
+dependencies = ["ruff"]
+"#;
+        let manifest = parse_pyproject(text);
+        assert_eq!(manifest.names, set(&["ruff"]));
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
     #[test]
     fn malformed_toml_is_a_gap_rather_than_an_empty_manifest() {
         let manifest = parse_pyproject("this is not toml {{{");
