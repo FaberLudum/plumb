@@ -39,10 +39,16 @@ fn normalise(name: &str) -> String {
 /// Every name returned here becomes a registry lookup, and a name that does
 /// not resolve becomes a blocking finding, so anything that is not certainly a
 /// name is dropped. PEP 508 admits only ASCII alphanumerics, `-`, `_` and `.`
-/// in a name, so after PEP 503 normalisation a name may contain only ASCII
-/// letters, digits and hyphens. That rejects lines which are not requirements
-/// at all — notably the `<<<<<<<`, `=======` and `>>>>>>>` markers git writes
-/// into a conflicted manifest, which a diff reports as added lines.
+/// in a name, and requires the first and last character to be alphanumeric, so
+/// after PEP 503 normalisation a name is ASCII letters and digits with hyphens
+/// only in the interior. That rejects lines which are not requirements at all
+/// — notably the `<<<<<<<`, `=======` and `>>>>>>>` markers git writes into a
+/// conflicted manifest, which a diff reports as added lines.
+///
+/// Anchoring both ends is what rules out a name made only of separators: `.`
+/// is a legal requirements.txt line naming the project in the current
+/// directory, and it normalises to `-`, which a check on the character set
+/// alone would accept and send to the registry as a package.
 fn requirement_name(spec: &str) -> Option<String> {
     let spec = spec.split('#').next().unwrap_or(spec).trim();
     if spec.is_empty() || spec.starts_with('-') {
@@ -52,7 +58,12 @@ fn requirement_name(spec: &str) -> Option<String> {
         .find(|c: char| c.is_whitespace() || "[<>=!~;@(".contains(c))
         .unwrap_or(spec.len());
     let name = normalise(&spec[..end]);
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    let anchored = name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name.ends_with(|c: char| c.is_ascii_alphanumeric());
+    if !anchored {
         return None;
     }
     Some(name)
@@ -164,6 +175,27 @@ mod tests {
     }
 
     #[test]
+    fn normalisation_collapses_runs_of_separators() {
+        // PEP 503 collapses a *run* of separators to one hyphen. Mapping each
+        // separator individually would yield `foo--bar---baz` and every lookup
+        // for such a name would 404 and block the build.
+        let text = "Foo--Bar_.-baz==1.0\n";
+        assert_eq!(parse_requirements(text), set(&["foo-bar-baz"]));
+    }
+
+    #[test]
+    fn requirements_rejects_a_bare_path_requirement() {
+        // `.` is a legal requirements.txt line meaning "the project in this
+        // directory". It normalises to `-`, which is made only of characters a
+        // name may contain, so a check on characters alone would emit it and
+        // block the build on a package that cannot exist.
+        // `numpy_` pins the trailing anchor and `_leading` the leading one;
+        // with either half dropped one of these reaches the registry.
+        let text = ".\n..\nnumpy_\n_leading==1.0\nruff==0.4.0\n";
+        assert_eq!(parse_requirements(text), set(&["ruff"]));
+    }
+
+    #[test]
     fn pyproject_reads_project_dependencies() {
         let text = r#"
 [project]
@@ -194,9 +226,25 @@ docs = ["mkdocs"]
 
     #[test]
     fn parse_dispatches_on_filename_and_ignores_other_files() {
-        assert!(parse("requirements.txt", "ruff\n").is_some());
-        assert!(parse("requirements-dev.txt", "ruff\n").is_some());
-        assert!(parse("pyproject.toml", "[project]\ndependencies = []\n").is_some());
-        assert!(parse("src/app.py", "import os\n").is_none());
+        assert_eq!(parse("requirements.txt", "ruff\n"), Some(set(&["ruff"])));
+        assert_eq!(
+            parse("requirements-dev.txt", "pytest>=8.0\n"),
+            Some(set(&["pytest"]))
+        );
+        // Asserting the names, not just `is_some`, pins which parser each name
+        // reaches: run through parse_requirements this document would yield
+        // `dependencies` from the assignment's left-hand side.
+        assert_eq!(
+            parse("pyproject.toml", "[project]\ndependencies = [\"httpx\"]\n"),
+            Some(set(&["httpx"]))
+        );
+        assert_eq!(
+            parse(
+                "packages/api/pyproject.toml",
+                "[project]\ndependencies = []\n"
+            ),
+            Some(BTreeSet::new())
+        );
+        assert_eq!(parse("src/app.py", "import os\n"), None);
     }
 }
