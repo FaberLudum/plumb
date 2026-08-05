@@ -40,7 +40,9 @@ jobs:
       # would create a second place to update and a silent drift when only one
       # of them moves.
       - name: Install the toolchain rust-toolchain.toml selects
-        run: rustup toolchain install
+        # `--no-self-update` because updating the toolchain manager is not
+        # something a build should decide to do halfway through itself.
+        run: rustup toolchain install --no-self-update
 
       # And then check that it is the toolchain actually in front of cargo. An
       # override, a stale rustup or a renamed key would leave the build running
@@ -84,13 +86,15 @@ jobs:
     # is discarded — the gate is built to treat an unreachable registry as no
     # evidence, so such a test would still pass. That is a slow and flaky test
     # rather than a wrong one, and closing it would mean observing syscalls.
-    name: no network
+    name: tests with no route out
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - name: Install the toolchain rust-toolchain.toml selects
-        run: rustup toolchain install
+        # `--no-self-update` because updating the toolchain manager is not
+        # something a build should decide to do halfway through itself.
+        run: rustup toolchain install --no-self-update
 
       # The positive control. Without it, a `curl` that is missing or broken
       # would make the guard below report "no network" on a runner that has
