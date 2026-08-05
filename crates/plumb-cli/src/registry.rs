@@ -11,6 +11,13 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// How long one lookup may take before it reports [`Existence::Unknown`].
+///
+/// ureq sets no timeout at all by default, so this is the only thing bounding
+/// a lookup. It covers the whole call, resolution and connection included.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether a package could be found in its registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +102,19 @@ impl PyPiRegistry {
     }
 }
 
+/// The agent every lookup runs on.
+///
+/// Exists to bound the call. Without [`LOOKUP_TIMEOUT`] a server that accepts
+/// the connection and then says nothing would hang the gate forever, which is
+/// a worse failure than reporting `Unknown` and moving on.
+fn lookup_agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(LOOKUP_TIMEOUT))
+            .build(),
+    )
+}
+
 /// Turns one lookup result into an outcome.
 ///
 /// Only a 200 and a 404 say anything about the package. Everything else — a
@@ -131,7 +151,7 @@ impl Registry for PyPiRegistry {
         }
 
         let url = format!("https://pypi.org/pypi/{name}/json");
-        let outcome = classify(ureq::get(&url).call().map(|_| ()));
+        let outcome = classify(lookup_agent().get(&url).call().map(|_| ()));
 
         self.record(name, outcome);
         outcome
