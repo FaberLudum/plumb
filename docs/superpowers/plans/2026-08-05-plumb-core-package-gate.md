@@ -1282,6 +1282,22 @@ pub struct AddedDependency {
 ///
 /// `before` is `None` when the manifest did not exist at HEAD, in which case
 /// every name in `after` counts as added.
+///
+/// Results come out in the sorted order of the underlying `BTreeSet`, so the
+/// findings a run reports do not depend on how the manifest was written.
+///
+/// Every result is labelled `Ecosystem::PyPi`. That is correct while
+/// `Ecosystem` has one variant, and silently wrong afterwards: a name looked up
+/// in the wrong registry either blocks a build or passes a hallucinated
+/// package. The test
+/// `ecosystem_is_hard_coded_and_must_be_revisited_when_a_second_one_lands`
+/// stops compiling the moment a second variant is added. Note what that does
+/// and does not catch: it keys on the enum, not on `manifest::parse`, so
+/// teaching `parse` a new manifest format without adding a variant trips
+/// nothing. The fix when a variant lands is for `manifest::parse` to return the
+/// ecosystem alongside the names and for this function to take it as an
+/// argument — not a second filename switch here, which would duplicate a
+/// dispatch rule that is already subtle.
 pub fn added(
     manifest_path: &str,
     before: Option<&BTreeSet<String>>,
