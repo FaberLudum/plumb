@@ -277,13 +277,61 @@ index 2222222..3333333 100644
     }
 
     #[test]
-    fn ignores_the_triple_plus_header() {
+    fn does_not_emit_the_post_image_header_as_an_added_line() {
         let files = parse_unified_diff(SAMPLE);
         for file in &files {
             for line in &file.added_lines {
-                assert!(!line.starts_with("++"), "header leaked into added lines: {line}");
+                assert!(
+                    !line.starts_with("++ b/"),
+                    "header leaked into added lines: {line}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn ignores_a_post_image_header_not_preceded_by_a_pre_image_header() {
+        const DIFF: &str = "\
+diff --git a/notes.md b/notes.md
+index 1111111..2222222 100644
+--- a/notes.md
++++ b/notes.md
+@@ -1 +1,3 @@
+ changelog
++++ b/phantom.txt
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "notes.md");
+        assert_eq!(
+            files[0].added_lines,
+            vec!["++ b/phantom.txt", "requestz==2.31.0"]
+        );
+    }
+
+    #[test]
+    fn attributes_added_lines_correctly_after_a_deletion() {
+        const DIFF: &str = "\
+diff --git a/old.py b/old.py
+deleted file mode 100644
+index 3333333..0000000
+--- a/old.py
++++ /dev/null
+@@ -1 +0,0 @@
+-print('gone')
+diff --git a/requirements.txt b/requirements.txt
+index 4444444..5555555 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1 +1,2 @@
+ ruff==0.4.0
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "requirements.txt");
+        assert_eq!(files[0].added_lines, vec!["requestz==2.31.0"]);
     }
 
     #[test]
@@ -303,6 +351,7 @@ index 1111111..2222222 100644
 ++i;
 ";
         let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
         assert_eq!(files[0].added_lines, vec!["+i;"]);
     }
 
@@ -318,6 +367,7 @@ index 1111111..2222222 100644
 +++i;
 ";
         let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
         assert_eq!(files[0].added_lines, vec!["++i;"]);
     }
 
@@ -355,6 +405,20 @@ The added-line branch is a let-chain rather than a nested `if let`. Nesting
 trips clippy's `collapsible_if` under `-D warnings`; let-chains are stable in
 edition 2024 and the semantics are identical.
 
+The header branch has the mirror-image problem, so it carries the mirror-image
+defence: `+++ ` is only treated as a post-image header when the previous line
+began with `--- `. Git always emits the pair together, including `--- /dev/null`
+for a newly added file. Without the precondition, an added line whose content
+starts with `++ ` renders as `+++ foo`, invents a `ChangedFile` for a path that
+does not exist, and then swallows every subsequent added line of the real file
+— a false negative on a blocking gate, which is the worst failure this parser
+can produce. A committed `.patch` fixture is enough to trigger it.
+
+`pub mod diff;` belongs in the **test** commit, not the implementation commit.
+Left to step 3, `diff.rs` is not part of the crate during the RED run, so
+`cargo test -p plumb-core diff` reports success over zero tests — a vacuous
+failure that proves nothing.
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p plumb-core diff`
@@ -378,22 +442,28 @@ pub struct ChangedFile {
 /// offsets and removals are deliberately ignored.
 pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
+    let mut after_pre_image_header = false;
 
     for line in diff.lines() {
-        if let Some(path) = line.strip_prefix("+++ ") {
+        let is_pre_image_header = line.starts_with("--- ");
+
+        if after_pre_image_header
+            && let Some(path) = line.strip_prefix("+++ ")
+        {
             let path = path.strip_prefix("b/").unwrap_or(path);
-            if path == "/dev/null" {
-                continue;
+            if path != "/dev/null" {
+                files.push(ChangedFile {
+                    path: path.to_string(),
+                    added_lines: Vec::new(),
+                });
             }
-            files.push(ChangedFile {
-                path: path.to_string(),
-                added_lines: Vec::new(),
-            });
         } else if let Some(added) = line.strip_prefix('+')
             && let Some(current) = files.last_mut()
         {
             current.added_lines.push(added.to_string());
         }
+
+        after_pre_image_header = is_pre_image_header;
     }
 
     files
@@ -409,7 +479,7 @@ pub mod diff;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core diff`
-Expected: PASS, four tests.
+Expected: PASS, nine tests.
 
 - [ ] **Step 5: Commit**
 
