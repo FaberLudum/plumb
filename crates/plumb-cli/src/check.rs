@@ -417,6 +417,41 @@ mod tests {
         );
     }
 
+    /// A manifest moved with no edit is checked at its new path.
+    ///
+    /// This is the one verdict the switch to a name listing changed, pinned at
+    /// the level where it is visible. Git pairs the deletion and the addition
+    /// as a rename, and at 100% similarity the section carries `rename from` /
+    /// `rename to` and no `+++` line at all — so the manifest was invisible.
+    /// Now it is read at its new path, where nothing exists at HEAD, so every
+    /// name in it counts as added.
+    ///
+    /// The blocking finding here is the cost of that, not an accident:
+    /// `requestz` was in the manifest before the move and is still in it
+    /// after. See `git::changed_paths` for why the trade is taken anyway.
+    ///
+    /// Only an exact move does this. A manifest moved *and* edited is paired
+    /// as an inexact rename, which does carry a `+++` line — measured at 76%
+    /// similarity — so that shape was never invisible and is not what this
+    /// covers.
+    #[test]
+    fn a_manifest_moved_without_editing_it_is_checked_at_its_new_path() {
+        let dir = repo_with(&[("old/requirements.txt", "ruff==0.4.0\nrequestz==2.31.0\n")]);
+        fs::create_dir_all(dir.path().join("new")).expect("create dir");
+        run_git(
+            dir.path(),
+            &["mv", "old/requirements.txt", "new/requirements.txt"],
+        );
+
+        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(code, 1, "output was: {output}");
+        assert!(
+            output.contains("new/requirements.txt"),
+            "output was: {output}"
+        );
+    }
+
     #[test]
     fn a_missing_dependency_in_a_pyproject_is_flagged() {
         let dir = repo_with(&[(
