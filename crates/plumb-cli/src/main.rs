@@ -90,9 +90,7 @@ fn check_diff(offline: bool, json: bool) -> ExitCode {
 
     match check::run(&repo, &registry, json) {
         Ok((output, code)) => {
-            // Exactly one trailing newline either way: `render_text` ends with
-            // one and `render_json` does not.
-            println!("{}", output.trim_end_matches('\n'));
+            write_report(&output);
             report_stale_packages(&registry);
             // `exit_code` returns 0, 1 or 2. The fallback is unreachable, and
             // is an internal error rather than a 0 so that a gate which
@@ -100,6 +98,35 @@ fn check_diff(offline: bool, json: bool) -> ExitCode {
             ExitCode::from(u8::try_from(code).unwrap_or(EXIT_INTERNAL_ERROR))
         }
         Err(error) => failed(&error),
+    }
+}
+
+/// Writes the report to stdout, surviving a reader that has gone away.
+///
+/// `println!` panics when the write fails, and `plumb check --diff | head -1`
+/// makes it fail as a matter of course. Exit 101 is outside the contract so it
+/// could not be misread as a verdict, but a gate that dies in a pipeline is a
+/// gate people take out of their pipelines.
+///
+/// A broken pipe is a consumer's decision, not a fault, so it is not reported.
+/// Any other write failure is, because then the report is lost for a reason the
+/// user may be able to do something about. Neither changes the exit code: the
+/// verdict was reached before the write, and it stands whether or not anyone
+/// was still listening.
+///
+/// Exactly one trailing newline either way — `render_text` ends with one and
+/// `render_json` does not.
+fn write_report(output: &str) {
+    use std::io::Write;
+
+    let mut stdout = std::io::stdout().lock();
+    let written =
+        writeln!(stdout, "{}", output.trim_end_matches('\n')).and_then(|()| stdout.flush());
+
+    if let Err(error) = written
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        eprintln!("plumb: could not write the report: {error}");
     }
 }
 
