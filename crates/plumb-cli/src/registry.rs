@@ -10,8 +10,22 @@
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Environment variable naming the cache file outright.
+///
+/// Two uses, and both are real. A CI job that wants the cache to survive
+/// between runs has to be able to say where it is; and the end-to-end tests
+/// have to point the binary somewhere isolated, because they must never reach
+/// the network and must never touch the developer's own cache.
+///
+/// It is not a hole in what [`cache_path`] fixes. That finding was about a
+/// file **committed into the repository**, which arrives with the change under
+/// inspection and needs nobody's consent. An environment variable is set by
+/// whoever runs the gate, which is the same person who could pass `--offline`
+/// or not run it at all.
+pub const CACHE_FILE_ENV: &str = "PLUMB_CACHE_FILE";
 
 /// How long a cached `Missing` may be trusted.
 ///
@@ -47,6 +61,140 @@ const EXISTS_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// connect are all unset — so this is the only thing bounding a lookup. It
 /// covers the whole call, resolution and connection included.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Where the registry cache for `repo` lives.
+///
+/// **Outside the repository, always.** The cache is an unauthenticated trust
+/// store: [`PyPiRegistry::new`] reads it with no provenance check, and a fresh
+/// entry short-circuits the network before any lookup happens. Keeping it at
+/// `<repo>/.plumb/cache/registry.json` put that store in the writable,
+/// committable area of whoever proposes a change, so one committed file turned
+/// the blocking gate off for [`EXISTS_TTL`] — thirty days. The rule this tool
+/// enforces is cited to an attack paper; a trust store the attacker can write
+/// is the wrong shape for it.
+///
+/// Refusing a *tracked* cache file would have been the narrower fix, and it
+/// was rejected: it leaves the store in the repository, so it still has to be
+/// gitignored by every consumer, still travels in a tarball, and still answers
+/// for the gate when it is merely untracked-and-planted rather than committed.
+/// Moving it removes the class instead of one member of it.
+///
+/// Keyed per repository rather than shared. The data — does this name resolve
+/// on PyPI — is global truth today, so a single shared file would be warmer
+/// and this is a real cost. It is paid for two reasons: concurrent runs in
+/// different repositories cannot lose each other's entries, and an `Exists` is
+/// only global while there is one index. The README's own false-positive list
+/// already names packages from a private index, so a per-repository registry
+/// is a change this project expects to make, and a cache keyed today does not
+/// have to be invalidated when it does.
+pub fn cache_path(repo: &Path) -> PathBuf {
+    match std::env::var_os(CACHE_FILE_ENV) {
+        Some(explicit) if !explicit.is_empty() => PathBuf::from(explicit),
+        _ => default_cache_path(repo),
+    }
+}
+
+/// [`cache_path`] with the environment override skipped.
+///
+/// Split out so the tests can exercise the resolution without mutating process
+/// environment, which is shared with every other test in the binary and is
+/// `unsafe` in edition 2024 for exactly that reason.
+fn default_cache_path(repo: &Path) -> PathBuf {
+    cache_root()
+        .join("plumb")
+        .join("registry")
+        .join(format!("{}.json", cache_key(repo)))
+}
+
+/// The OS directory for cached data this machine may delete at will.
+///
+/// `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` then `~/.cache` elsewhere.
+/// Resolved from the environment rather than through a crate: `dirs` would
+/// need a row in `docs/dependencies.md` claiming the standard library is not
+/// enough, and for these three variables it plainly is.
+///
+/// Absolute paths only. A relative `XDG_CACHE_HOME` is undefined per the
+/// specification and would resolve against the working directory, which for
+/// this binary is somewhere inside the repository — the one place the cache
+/// must not be.
+///
+/// The last resort is the temporary directory. It is a poor cache, cleared
+/// whenever the system feels like it, but every failure of a cache costs a
+/// round trip and never a wrong answer — and it is still outside the
+/// repository, which is the property that matters.
+fn cache_root() -> PathBuf {
+    let named = if cfg!(windows) {
+        absolute_env("LOCALAPPDATA")
+    } else {
+        absolute_env("XDG_CACHE_HOME")
+            .or_else(|| absolute_env("HOME").map(|home| home.join(".cache")))
+    };
+    named.unwrap_or_else(std::env::temp_dir)
+}
+
+/// An environment variable read as an absolute path, or nothing.
+fn absolute_env(name: &str) -> Option<PathBuf> {
+    let value = PathBuf::from(std::env::var_os(name)?);
+    value.is_absolute().then_some(value)
+}
+
+/// A filename standing for one repository.
+///
+/// The directory name is kept in front so the cache directory can be read by a
+/// human deciding what to delete; the digest is what actually distinguishes
+/// two checkouts of the same project.
+///
+/// The input is the root as `git rev-parse --show-toplevel` spells it, which
+/// is stable across runs and across the subdirectory the gate is invoked from.
+/// If it ever were not — a differently spelled but equivalent path — the cost
+/// is a cold cache and one round trip, never a wrong answer, because a cache
+/// miss can only produce `Unknown` and `Unknown` never blocks.
+fn cache_key(repo: &Path) -> String {
+    let digest = fnv1a_64(repo.to_string_lossy().as_bytes());
+    let label: String = repo
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .map(|c| c.to_ascii_lowercase())
+        .take(32)
+        .collect();
+
+    if label.is_empty() {
+        format!("{digest:016x}")
+    } else {
+        format!("{label}-{digest:016x}")
+    }
+}
+
+/// FNV-1a, 64-bit.
+///
+/// Written out rather than taken from `std::hash::DefaultHasher`, whose output
+/// is explicitly not guaranteed stable across Rust releases — a compiler
+/// upgrade would silently rename every cache file. Nothing here is a security
+/// property: this only has to separate two directory names, so a short,
+/// specified, reproducible function is exactly the right amount of machinery.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Where the cache used to live, inside the repository.
+///
+/// Kept only so a run can tell the user the file is there and is no longer
+/// read. It is deliberately never opened: migrating it would import exactly
+/// the unverifiable, possibly-committed entries the move exists to refuse, and
+/// a migration that launders a poisoned cache into the trusted store is worse
+/// than no migration. Ignoring it silently was the other option, and it leaves
+/// a stale file in every existing checkout with nothing said about it.
+pub fn legacy_cache_path(repo: &Path) -> PathBuf {
+    repo.join(".plumb").join("cache").join("registry.json")
+}
 
 /// Whether a package could be found in its registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +568,81 @@ impl Registry for PyPiRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The property the whole move is for. Whatever the environment says, the
+    /// resolved path must not be inside the repository being checked — that is
+    /// the writable, committable area of whoever proposes the change.
+    ///
+    /// Two repository shapes, because the fallbacks differ: an ordinary root,
+    /// and one whose name survives no sanitisation at all, which is what
+    /// exercises the digest-only branch of [`cache_key`].
+    #[test]
+    fn the_cache_never_lands_inside_the_repository() {
+        for repo in [
+            Path::new("/home/dev/projects/api"),
+            Path::new("/srv/漢字"),
+            Path::new("/"),
+        ] {
+            let resolved = default_cache_path(repo);
+            assert!(
+                !resolved.starts_with(repo) || repo == Path::new("/"),
+                "{} is inside {}",
+                resolved.display(),
+                repo.display()
+            );
+            assert!(
+                resolved.to_string_lossy().contains("plumb"),
+                "{} does not name the tool that owns it",
+                resolved.display()
+            );
+        }
+    }
+
+    /// Two checkouts must not write over each other. The failure would be
+    /// silent — a lost entry costs a round trip, never a wrong answer — but a
+    /// per-repository key is also what stops an `Exists` learned against one
+    /// index being reused against another, which this project already expects
+    /// to need.
+    #[test]
+    fn two_repositories_do_not_share_a_cache_file() {
+        let one = default_cache_path(Path::new("/home/dev/one"));
+        let two = default_cache_path(Path::new("/home/dev/two"));
+
+        assert_ne!(one, two);
+        assert_eq!(
+            one.parent(),
+            two.parent(),
+            "both belong in the same cache directory"
+        );
+    }
+
+    /// A key that moved between runs would mean a permanently cold cache, and
+    /// a cold cache is a gate that pays a round trip per name every time.
+    #[test]
+    fn the_same_repository_resolves_to_the_same_cache_file() {
+        let repo = Path::new("/home/dev/projects/api");
+
+        assert_eq!(default_cache_path(repo), default_cache_path(repo));
+    }
+
+    /// The old location, which is now only ever reported and never read.
+    #[test]
+    fn the_legacy_path_is_the_one_that_used_to_be_read() {
+        assert_eq!(
+            legacy_cache_path(Path::new("/home/dev/api")),
+            Path::new("/home/dev/api/.plumb/cache/registry.json")
+        );
+    }
+
+    /// FNV-1a is written out because `DefaultHasher` is not stable across Rust
+    /// releases, so this pins it against the published test vectors rather
+    /// than against itself.
+    #[test]
+    fn the_digest_matches_the_published_fnv_vectors() {
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);
+    }
 
     /// Builds a cache file body. `age` is how many seconds ago the entry was
     /// checked; a negative age puts the timestamp in the future.

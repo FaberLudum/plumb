@@ -98,13 +98,16 @@ fn check_diff(offline: bool, json: bool) -> ExitCode {
         Err(error) => return failed(&error),
     };
 
+    report_cache_inside_the_repository(&repo);
+
     // One registry for the whole run. It holds the cache and the latch that
     // stops a dead network being retried once per dependency, and both exist
     // to keep the gate fast enough that nobody turns it off.
-    let registry = registry::PyPiRegistry::new(
-        offline,
-        repo.join(".plumb").join("cache").join("registry.json"),
-    );
+    //
+    // The cache path comes from `registry::cache_path`, which puts it outside
+    // the repository. It used to be `<repo>/.plumb/cache/registry.json`, where
+    // committing one file disabled the gate for thirty days.
+    let registry = registry::PyPiRegistry::new(offline, registry::cache_path(&repo));
 
     match check::run(&repo, &registry, json) {
         Ok((output, code)) => {
@@ -167,6 +170,30 @@ fn report_stale_packages(registry: &registry::PyPiRegistry) {
     eprintln!(
         "plumb: {stale} {package} answered from stale cache data; \
          run without --offline to confirm against the registry"
+    );
+}
+
+/// Says so when the old in-repository cache file is still there.
+///
+/// It is not read — see [`registry::legacy_cache_path`] for why migrating it
+/// would launder exactly the entries the move exists to refuse. But leaving it
+/// unmentioned means every existing checkout keeps a file that looks like it
+/// is doing something and is not, so the run says it out loud and says what to
+/// do about it.
+///
+/// On stderr and with no effect on the exit code, like every other note this
+/// binary makes: nothing here is a rule violation, and stdout carries a report
+/// `--json` promises is parseable.
+fn report_cache_inside_the_repository(repo: &Path) {
+    let legacy = registry::legacy_cache_path(repo);
+    if !legacy.exists() {
+        return;
+    }
+    eprintln!(
+        "plumb: {} is no longer read and can be deleted; the registry cache \
+         now lives outside the repository, because a cache file inside one can \
+         be committed and a committed cache answers for the gate",
+        legacy.display()
     );
 }
 

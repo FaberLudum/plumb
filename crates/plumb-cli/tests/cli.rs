@@ -34,7 +34,13 @@ fn run_git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// A repository holding one `requirements.txt` at HEAD.
+/// A tempdir holding a repository at `repo/` and this test's cache beside it.
+///
+/// The repository is a subdirectory rather than the tempdir root so that
+/// [`cache_file`] can sit next to it instead of inside it. A cache inside a
+/// repository is precisely what
+/// `a_cache_file_inside_the_repository_is_never_consulted` forbids, and a
+/// fixture modelling the forbidden shape is one somebody copies.
 ///
 /// No `* diff` attribute. It used to be needed to stop a developer's global
 /// attributes suppressing the hunk — which also meant no test could observe
@@ -43,13 +49,25 @@ fn run_git(dir: &Path, args: &[&str]) {
 /// attribute anyway.
 fn repo_with_requirements(initial: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
-    run_git(dir.path(), &["init", "-b", "main"]);
-    run_git(dir.path(), &["config", "user.email", "test@example.com"]);
-    run_git(dir.path(), &["config", "user.name", "Test"]);
-    std::fs::write(dir.path().join("requirements.txt"), initial).expect("write");
-    run_git(dir.path(), &["add", "-A"]);
-    run_git(dir.path(), &["commit", "-m", "initial"]);
+    let repo = repo(dir.path());
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    run_git(&repo, &["init", "-b", "main"]);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test"]);
+    std::fs::write(repo.join("requirements.txt"), initial).expect("write");
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-m", "initial"]);
     dir
+}
+
+/// The repository inside a fixture tempdir.
+fn repo(dir: &Path) -> std::path::PathBuf {
+    dir.join("repo")
+}
+
+/// A path inside the repository of a fixture tempdir.
+fn in_repo(dir: &Path, name: &str) -> std::path::PathBuf {
+    repo(dir).join(name)
 }
 
 fn now_unix() -> u64 {
@@ -59,22 +77,56 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Seeds the cache the binary reads, so a run can reach a definite answer
-/// without a request. `age` is how many seconds ago the entry was checked.
-fn seed_cache(dir: &Path, name: &str, exists: bool, age: u64) {
-    let cache = dir.join(".plumb").join("cache");
-    std::fs::create_dir_all(&cache).expect("create cache dir");
-    let checked = now_unix().saturating_sub(age);
-    std::fs::write(
-        cache.join("registry.json"),
-        format!(r#"{{"known":{{"{name}":{{"exists":{exists},"checked":{checked}}}}}}}"#),
-    )
-    .expect("write cache");
+/// The cache file a test points the binary at.
+///
+/// Outside the repository, and outside the developer's own cache directory.
+/// Both halves matter. The binary now resolves its cache under
+/// `%LOCALAPPDATA%` or `~/.cache`, so a test that said nothing would read and
+/// write the cache of whoever is running the suite — seeding one machine's
+/// answers into another test's run, and leaving entries behind afterwards.
+/// Naming the file explicitly makes each test's cache exactly what that test
+/// wrote and nothing else, which is also what keeps every run off the network.
+fn cache_file(dir: &Path) -> std::path::PathBuf {
+    dir.join("plumb-cache.json")
 }
 
+/// Seeds the cache the binary reads, so a run can reach a definite answer
+/// without a request. `age` is how many seconds ago the entry was checked.
+///
+/// `dir` is the fixture tempdir, so the file lands beside the checkout rather
+/// than inside it — see [`repo_with_requirements`].
+fn seed_cache(dir: &Path, name: &str, exists: bool, age: u64) {
+    let checked = now_unix().saturating_sub(age);
+    write_cache(
+        dir,
+        &format!(r#""{name}":{{"exists":{exists},"checked":{checked}}}"#),
+    );
+}
+
+/// Writes a whole cache body from pre-rendered entries.
+fn write_cache(dir: &Path, entries: &str) {
+    std::fs::write(cache_file(dir), format!(r#"{{"known":{{{entries}}}}}"#)).expect("write cache");
+}
+
+/// The binary, run inside a fixture's repository and pointed at that
+/// fixture's cache.
+fn plumb_in(dir: &Path) -> Command {
+    let mut command = Command::cargo_bin("plumb").expect("binary builds");
+    command
+        .current_dir(repo(dir))
+        .env(CACHE_FILE_ENV, cache_file(dir));
+    command
+}
+
+/// The binary with no repository and no cache of its own — for `--help` and
+/// `--version`, which read neither.
 fn plumb() -> Command {
     Command::cargo_bin("plumb").expect("binary builds")
 }
+
+/// Kept in step with `registry::CACHE_FILE_ENV` by
+/// `the_environment_variable_the_tests_use_is_the_one_the_binary_reads`.
+const CACHE_FILE_ENV: &str = "PLUMB_CACHE_FILE";
 
 /// Every setting found to change the shape of `git diff` output, written as a
 /// global config the way it reaches a real developer.
@@ -126,6 +178,33 @@ fn hostile_git_config(dir: &Path) -> std::path::PathBuf {
     path
 }
 
+/// Every test here isolates its cache by setting [`CACHE_FILE_ENV`], so if the
+/// binary ever read a different variable the isolation would vanish silently:
+/// runs would fall back to the developer's own cache directory, answer from
+/// whatever happened to be in it, and — with no entry — reach the network,
+/// which no test in this file may do. Nothing would fail; results would just
+/// start depending on the machine.
+///
+/// An integration test cannot import from a binary crate, so this reads the
+/// declaration out of the source, the way
+/// `every_finding_names_a_section_of_the_taxonomy` reads the taxonomy.
+#[test]
+fn the_environment_variable_the_tests_use_is_the_one_the_binary_reads() {
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("registry.rs"),
+    )
+    .expect("the registry source is readable");
+
+    assert!(
+        source.contains(&format!(
+            r#"pub const CACHE_FILE_ENV: &str = "{CACHE_FILE_ENV}";"#
+        )),
+        "the binary no longer reads {CACHE_FILE_ENV}, so these tests isolate nothing"
+    );
+}
+
 /// A cache file sitting inside the repository must never answer for the gate.
 ///
 /// The rule this tool enforces is cited to an attack paper, and the cache is
@@ -148,50 +227,74 @@ fn hostile_git_config(dir: &Path) -> std::path::PathBuf {
 #[test]
 fn a_cache_file_inside_the_repository_is_never_consulted() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
-    std::fs::write(
-        dir.path().join("requirements.txt"),
-        "ruff==0.4.0\nrequestz==2.31.0\n",
-    )
-    .expect("write");
 
-    // The poison: committed with the change, and claiming the package is fine.
-    let in_repo = dir.path().join(".plumb").join("cache");
-    std::fs::create_dir_all(&in_repo).expect("create cache dir");
+    // The poison, committed on its own so that HEAD still carries the
+    // manifest without `requestz` — otherwise the change under inspection
+    // adds nothing and the run would report nothing for an unrelated reason.
+    let planted = in_repo(dir.path(), ".plumb").join("cache");
+    std::fs::create_dir_all(&planted).expect("create cache dir");
     std::fs::write(
-        in_repo.join("registry.json"),
+        planted.join("registry.json"),
         format!(
             r#"{{"known":{{"requestz":{{"exists":true,"checked":{}}}}}}}"#,
             now_unix()
         ),
     )
     .expect("write cache");
-    run_git(dir.path(), &["add", "-A", "-f"]);
-    run_git(dir.path(), &["commit", "-m", "commit a cache file"]);
+    run_git(&repo(dir.path()), &["add", "-A", "-f"]);
+    run_git(&repo(dir.path()), &["commit", "-m", "commit a cache file"]);
     std::fs::write(
-        dir.path().join("requirements.txt"),
+        in_repo(dir.path(), "requirements.txt"),
         "ruff==0.4.0\nrequestz==2.31.0\n",
     )
     .expect("write");
 
     // The real cache, outside the repository, which knows better.
-    let elsewhere = tempfile::tempdir().expect("temp dir");
-    let real = elsewhere.path().join("registry.json");
-    std::fs::write(
-        &real,
-        format!(
-            r#"{{"known":{{"requestz":{{"exists":false,"checked":{}}}}}}}"#,
-            now_unix()
-        ),
-    )
-    .expect("write cache");
+    seed_cache(dir.path(), "requestz", false, 0);
 
-    plumb()
+    plumb_in(dir.path())
         .args(["check", "--diff", "--offline"])
-        .current_dir(dir.path())
-        .env("PLUMB_CACHE_FILE", &real)
         .assert()
         .code(1)
         .stdout(predicates::str::contains("requestz"));
+}
+
+/// The leftover file is not read, but it is not passed over in silence
+/// either: every existing checkout has one, and a file that looks like it is
+/// doing something and is not is the shape of defect this project is about.
+///
+/// Migrating it was the other option and was rejected — it would import
+/// exactly the unverifiable entries the move exists to refuse. So the run says
+/// the file is dead and says to delete it.
+///
+/// On stderr, and the verdict is unchanged: nothing here is a rule violation.
+#[test]
+fn a_leftover_cache_inside_the_repository_is_reported_not_read() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    let planted = in_repo(dir.path(), ".plumb").join("cache");
+    std::fs::create_dir_all(&planted).expect("create cache dir");
+    std::fs::write(planted.join("registry.json"), r#"{"known":{}}"#).expect("write cache");
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .success()
+        .stderr(
+            predicates::str::contains("no longer read").and(predicates::str::contains(".plumb")),
+        );
+}
+
+/// The mirror: no leftover file, no note. A warning every run prints is one
+/// every reader learns to skip.
+#[test]
+fn a_repository_without_the_old_cache_says_nothing_about_it() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("no longer read").not());
 }
 
 #[test]
@@ -210,9 +313,8 @@ fn reports_its_version() {
 fn check_runs_offline_and_reports_no_findings_on_a_clean_repo() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
 
-    plumb()
+    plumb_in(dir.path())
         .args(["check", "--diff", "--offline"])
-        .current_dir(dir.path())
         .assert()
         .success()
         .stdout(predicates::str::contains("no findings"));
@@ -225,15 +327,14 @@ fn check_runs_offline_and_reports_no_findings_on_a_clean_repo() {
 fn check_exits_one_when_an_added_dependency_does_not_exist() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
     std::fs::write(
-        dir.path().join("requirements.txt"),
+        in_repo(dir.path(), "requirements.txt"),
         "ruff==0.4.0\nrequestz==2.31.0\n",
     )
     .expect("write");
     seed_cache(dir.path(), "requestz", false, 0);
 
-    plumb()
+    plumb_in(dir.path())
         .args(["check", "--diff", "--offline"])
-        .current_dir(dir.path())
         .assert()
         .code(1)
         .stdout(predicates::str::contains("requestz"));
@@ -247,15 +348,15 @@ fn check_exits_one_when_an_added_dependency_does_not_exist() {
 fn check_works_from_a_subdirectory_of_the_repository() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
     std::fs::write(
-        dir.path().join("requirements.txt"),
+        in_repo(dir.path(), "requirements.txt"),
         "ruff==0.4.0\nrequestz==2.31.0\n",
     )
     .expect("write");
     seed_cache(dir.path(), "requestz", false, 0);
-    let nested = dir.path().join("packages").join("api");
+    let nested = in_repo(dir.path(), "packages").join("api");
     std::fs::create_dir_all(&nested).expect("create dirs");
 
-    plumb()
+    plumb_in(dir.path())
         .args(["check", "--diff", "--offline"])
         .current_dir(&nested)
         .assert()
@@ -284,15 +385,14 @@ fn check_works_from_a_subdirectory_of_the_repository() {
 fn check_survives_a_hostile_but_ordinary_git_config() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
     std::fs::write(
-        dir.path().join("requirements.txt"),
+        in_repo(dir.path(), "requirements.txt"),
         "ruff==0.4.0\nrequestz==2.31.0\n",
     )
     .expect("write");
     seed_cache(dir.path(), "requestz", false, 0);
 
-    plumb()
+    plumb_in(dir.path())
         .args(["check", "--diff", "--offline"])
-        .current_dir(dir.path())
         .env("GIT_CONFIG_GLOBAL", hostile_git_config(dir.path()))
         .env("GIT_EXTERNAL_DIFF", "/nonexistent/external-diff")
         .assert()
@@ -311,9 +411,8 @@ fn a_hostile_git_config_does_not_manufacture_findings() {
     std::fs::write(dir.path().join("requirements.txt"), "ruff==0.4.1\n").expect("write");
     seed_cache(dir.path(), "requestz", false, 0);
 
-    plumb()
+    plumb_in(dir.path())
         .args(["check", "--diff", "--offline"])
-        .current_dir(dir.path())
         .env("GIT_CONFIG_GLOBAL", hostile_git_config(dir.path()))
         .env("GIT_EXTERNAL_DIFF", "/nonexistent/external-diff")
         .assert()
@@ -330,16 +429,15 @@ fn a_hostile_git_config_does_not_manufacture_findings() {
 fn an_offline_run_says_when_it_answered_from_stale_cache_data() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
     std::fs::write(
-        dir.path().join("requirements.txt"),
+        in_repo(dir.path(), "requirements.txt"),
         "ruff==0.4.0\nhttpx==0.27.0\n",
     )
     .expect("write");
     // Far past every lifetime in the registry, so it can only be honoured.
     seed_cache(dir.path(), "httpx", true, 400 * 24 * 60 * 60);
 
-    plumb()
+    plumb_in(dir.path())
         .args(["check", "--diff", "--offline", "--json"])
-        .current_dir(dir.path())
         .assert()
         .success()
         .stdout(predicates::str::contains("[]"))
@@ -352,15 +450,14 @@ fn an_offline_run_says_when_it_answered_from_stale_cache_data() {
 fn a_run_answering_from_fresh_data_says_nothing_about_staleness() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
     std::fs::write(
-        dir.path().join("requirements.txt"),
+        in_repo(dir.path(), "requirements.txt"),
         "ruff==0.4.0\nhttpx==0.27.0\n",
     )
     .expect("write");
     seed_cache(dir.path(), "httpx", true, 0);
 
-    plumb()
+    plumb_in(dir.path())
         .args(["check", "--diff", "--offline"])
-        .current_dir(dir.path())
         .assert()
         .success()
         .stderr(predicates::str::contains("stale").not());
@@ -378,9 +475,8 @@ fn stdout_ends_with_exactly_one_newline_in_both_renderings() {
         vec!["check", "--diff", "--offline"],
         vec!["check", "--diff", "--offline", "--json"],
     ] {
-        let output = plumb()
+        let output = plumb_in(dir.path())
             .args(&args)
-            .current_dir(dir.path())
             .output()
             .expect("the binary runs");
         let stdout = String::from_utf8(output.stdout).expect("utf-8 on stdout");
@@ -416,7 +512,7 @@ fn a_consumer_that_stops_reading_does_not_crash_the_run() {
         manifest.push_str(name);
         manifest.push('\n');
     }
-    std::fs::write(dir.path().join("requirements.txt"), &manifest).expect("write");
+    std::fs::write(in_repo(dir.path(), "requirements.txt"), &manifest).expect("write");
 
     // Every name seeded as a fresh `Missing`, so the run blocks on all of them
     // without a request.
@@ -425,19 +521,14 @@ fn a_consumer_that_stops_reading_does_not_crash_the_run() {
         .iter()
         .map(|name| format!(r#""{name}":{{"exists":false,"checked":{checked}}}"#))
         .collect();
-    let cache = dir.path().join(".plumb").join("cache");
-    std::fs::create_dir_all(&cache).expect("create cache dir");
-    std::fs::write(
-        cache.join("registry.json"),
-        format!(r#"{{"known":{{{}}}}}"#, entries.join(",")),
-    )
-    .expect("write cache");
+    write_cache(dir.path(), &entries.join(","));
 
     // The raw `Command`, not `assert_cmd`'s: this test needs the child handle
     // so it can close the pipe while the child is still writing.
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("plumb"))
         .args(["check", "--diff", "--offline"])
-        .current_dir(dir.path())
+        .current_dir(repo(dir.path()))
+        .env(CACHE_FILE_ENV, cache_file(dir.path()))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -482,9 +573,8 @@ fn a_consumer_that_stops_reading_does_not_crash_the_run() {
 fn check_requires_a_scope() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
 
-    plumb()
+    plumb_in(dir.path())
         .args(["check", "--offline"])
-        .current_dir(dir.path())
         .assert()
         .failure()
         .stderr(predicates::str::contains("--diff"));
