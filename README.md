@@ -55,7 +55,7 @@ Proposing a Tier A rule on a preprint is a rejection. Propose it as Tier B.
 change adds must actually exist on its registry. `plumb check --diff` asks git
 for the paths a change touched, reads each Python manifest among them as it
 stands and as it stands at HEAD, looks up only the names the change adds, and
-blocks on a name PyPI does not have. 139 tests, no network access from any of
+blocks on a name PyPI does not have. 142 tests, no network access from any of
 them.
 
 ```console
@@ -203,8 +203,7 @@ telemetry. `--offline` disables lookups entirely.
 
 Registry answers are cached on disk, **outside the repository being checked**:
 under `%LOCALAPPDATA%\plumb\registry\` on Windows, and `$XDG_CACHE_HOME/plumb/`
-or `~/.cache/plumb/` elsewhere, keyed per repository. `PLUMB_CACHE_FILE` names
-the file outright, which is what a CI job needs to keep a cache between runs.
+or `~/.cache/plumb/` elsewhere, keyed per repository.
 
 The location is a correctness property, not housekeeping. The cache is
 unauthenticated and a fresh entry answers without contacting PyPI, so a cache
@@ -214,6 +213,23 @@ kept it at `<repo>/.plumb/cache/registry.json`, where committing one file
 disabled the gate. **Never keep a Plumb cache inside a repository.** If one is
 still there from an earlier version, the run says so on stderr; it is not read,
 and it can be deleted.
+
+If no cache directory can be resolved at all — a container with no `HOME` — the
+run does not cache. It says so and works from the network. There is deliberately
+no fallback to the temporary directory: a predictable path in a world-writable
+directory is a trust store any other local user can pre-create, which is the
+same hole by a different route. A cold cache costs a round trip; a poisoned one
+costs the gate.
+
+`PLUMB_CACHE_FILE` names the cache file outright, overriding all of the above.
+It exists because the test suite has to point the binary somewhere isolated to
+stay off the network, and because a persistent worker or a developer with an
+unusual home directory may need to say where the file goes. **It is not
+containment-checked**: pointed inside a repository it reinstates exactly the
+hole described above, and the run will warn on stderr and carry on. Note also
+that it does not make a CI check meaningful — see
+[what `--diff` compares](#what---diff-compares-and-what-that-rules-out); on a
+clean checkout there is nothing to look up, so there is nothing to cache.
 
 An unreachable network is never a rule violation. A blocking gate that fails
 when the network hiccups gets disabled within a week, and then catches nothing
