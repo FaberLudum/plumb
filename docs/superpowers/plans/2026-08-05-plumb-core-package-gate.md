@@ -1131,7 +1131,7 @@ pub fn parse(path: &str, text: &str) -> Option<BTreeSet<String>> {
     // test asserts that rather than hiding it — no filename rule separates it
     // from `requirements-dev.txt`.
     if let Some(rest) = file_name.strip_prefix("requirements")
-        && file_name.ends_with(".txt")
+        && rest.ends_with(".txt")
         && (rest == ".txt" || rest.starts_with('-'))
     {
         return Some(parse_requirements(text));
