@@ -304,6 +304,80 @@ fn stdout_ends_with_exactly_one_newline_in_both_renderings() {
     }
 }
 
+/// `plumb check --diff | head -1` must not abort with a Rust panic.
+///
+/// A consumer that stops reading is ordinary in a pipeline, and `println!`
+/// panics when the write fails. Exit 101 is outside the contract so it cannot
+/// be misread as a verdict, but a gate that dies on a pipe is a gate people
+/// stop putting in pipes.
+///
+/// Forced rather than hoped for: the report has to be larger than the pipe
+/// buffer, or the child finishes writing before the reader goes away and the
+/// failure never happens. Two thousand findings is a few hundred kilobytes,
+/// comfortably past it. The read of one line before closing mirrors what
+/// `head -1` does.
+#[test]
+fn a_consumer_that_stops_reading_does_not_crash_the_run() {
+    let count = 2000;
+    let names: Vec<String> = (0..count).map(|i| format!("pkg-{i:04}")).collect();
+
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    let mut manifest = String::from("ruff==0.4.0\n");
+    for name in &names {
+        manifest.push_str(name);
+        manifest.push('\n');
+    }
+    std::fs::write(dir.path().join("requirements.txt"), &manifest).expect("write");
+
+    // Every name seeded as a fresh `Missing`, so the run blocks on all of them
+    // without a request.
+    let checked = now_unix();
+    let entries: Vec<String> = names
+        .iter()
+        .map(|name| format!(r#""{name}":{{"exists":false,"checked":{checked}}}"#))
+        .collect();
+    let cache = dir.path().join(".plumb").join("cache");
+    std::fs::create_dir_all(&cache).expect("create cache dir");
+    std::fs::write(
+        cache.join("registry.json"),
+        format!(r#"{{"known":{{{}}}}}"#, entries.join(",")),
+    )
+    .expect("write cache");
+
+    // The raw `Command`, not `assert_cmd`'s: this test needs the child handle
+    // so it can close the pipe while the child is still writing.
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("plumb"))
+        .args(["check", "--diff", "--offline"])
+        .current_dir(dir.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the binary runs");
+
+    {
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut reader, &mut line).expect("one line");
+        assert!(line.contains("pkg-"), "first line was: {line:?}");
+        // Dropping the reader closes this end of the pipe, which is what
+        // `head` does once it has what it wants.
+    }
+
+    let status = child.wait().expect("the child exits");
+
+    assert_ne!(
+        status.code(),
+        Some(101),
+        "the run panicked when its reader went away"
+    );
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "the verdict is still the verdict; the reader leaving does not change it"
+    );
+}
+
 /// `--diff` is the only scope this version implements, and it is required
 /// rather than assumed. A flag that is accepted and ignored means the day a
 /// second scope lands, every existing invocation silently changes meaning.
