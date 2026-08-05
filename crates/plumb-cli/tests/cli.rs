@@ -319,6 +319,37 @@ fn a_manifest_that_is_not_utf8_is_reported_rather_than_skipped() {
         );
 }
 
+/// The binary must not claim a file is unread while it is reading it.
+///
+/// `PLUMB_CACHE_FILE` can be pointed at the old in-repository path, and the
+/// first version of the note printed "no longer read and can be deleted"
+/// unconditionally — so the run reassured the user about the exact file it was
+/// answering from. A gate that makes a false statement about its own trust
+/// store is this project's own defect class.
+///
+/// Both halves are asserted. The false reassurance must be gone, and the
+/// truthful warning — that the cache in use is inside the repository — must be
+/// there, because dropping the sentence and saying nothing would also pass a
+/// test that only checked for absence.
+#[test]
+fn a_cache_in_use_inside_the_repository_is_not_called_unread() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    let planted = in_repo(dir.path(), ".plumb").join("cache");
+    std::fs::create_dir_all(&planted).expect("create cache dir");
+    std::fs::write(planted.join("registry.json"), r#"{"known":{}}"#).expect("write cache");
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .env(CACHE_FILE_ENV, planted.join("registry.json"))
+        .assert()
+        .success()
+        .stderr(
+            predicates::str::contains("no longer read")
+                .not()
+                .and(predicates::str::contains("inside the repository")),
+        );
+}
+
 /// The mirror: no leftover file, no note. A warning every run prints is one
 /// every reader learns to skip.
 #[test]

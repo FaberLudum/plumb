@@ -87,9 +87,11 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// already names packages from a private index, so a per-repository registry
 /// is a change this project expects to make, and a cache keyed today does not
 /// have to be invalidated when it does.
-pub fn cache_path(repo: &Path) -> PathBuf {
+///
+/// `None` means this run must not cache at all — see [`cache_root`].
+pub fn cache_path(repo: &Path) -> Option<PathBuf> {
     match std::env::var_os(CACHE_FILE_ENV) {
-        Some(explicit) if !explicit.is_empty() => PathBuf::from(explicit),
+        Some(explicit) if !explicit.is_empty() => Some(PathBuf::from(explicit)),
         _ => default_cache_path(repo),
     }
 }
@@ -99,11 +101,13 @@ pub fn cache_path(repo: &Path) -> PathBuf {
 /// Split out so the tests can exercise the resolution without mutating process
 /// environment, which is shared with every other test in the binary and is
 /// `unsafe` in edition 2024 for exactly that reason.
-fn default_cache_path(repo: &Path) -> PathBuf {
-    cache_root()
-        .join("plumb")
-        .join("registry")
-        .join(format!("{}.json", cache_key(repo)))
+fn default_cache_path(repo: &Path) -> Option<PathBuf> {
+    Some(
+        cache_root()?
+            .join("plumb")
+            .join("registry")
+            .join(format!("{}.json", cache_key(repo))),
+    )
 }
 
 /// The OS directory for cached data this machine may delete at will.
@@ -118,18 +122,25 @@ fn default_cache_path(repo: &Path) -> PathBuf {
 /// this binary is somewhere inside the repository — the one place the cache
 /// must not be.
 ///
-/// The last resort is the temporary directory. It is a poor cache, cleared
-/// whenever the system feels like it, but every failure of a cache costs a
-/// round trip and never a wrong answer — and it is still outside the
-/// repository, which is the property that matters.
-fn cache_root() -> PathBuf {
-    let named = if cfg!(windows) {
+/// `None` when none of them is set, and **there is deliberately no fallback to
+/// the temporary directory**. That fallback was here and was wrong: on a
+/// container or CI runner with no `HOME` — which is real, not hypothetical —
+/// it puts an unauthenticated trust store at a fully predictable path in a
+/// world-writable directory, where any other local user can pre-create it with
+/// `exists: true` entries and disable the gate for thirty days. That is the
+/// same shape as the in-repository cache this move exists to remove, reached
+/// through a different door.
+///
+/// A cold cache costs a round trip per name. A poisoned one costs the gate. So
+/// when no trusted directory can be named, this run simply does not cache;
+/// [`CACHE_FILE_ENV`] is there for anyone who wants to name one.
+fn cache_root() -> Option<PathBuf> {
+    if cfg!(windows) {
         absolute_env("LOCALAPPDATA")
     } else {
         absolute_env("XDG_CACHE_HOME")
             .or_else(|| absolute_env("HOME").map(|home| home.join(".cache")))
-    };
-    named.unwrap_or_else(std::env::temp_dir)
+    }
 }
 
 /// An environment variable read as an absolute path, or nothing.
@@ -270,7 +281,9 @@ struct Cache {
 /// time — which is also why the unreachable latch needs no synchronisation.
 pub struct PyPiRegistry {
     offline: bool,
-    cache_path: PathBuf,
+    /// `None` when no trusted cache location could be named, in which case
+    /// this run answers from the network alone — see [`cache_root`].
+    cache_path: Option<PathBuf>,
     cache: RefCell<Cache>,
     /// Held rather than built per lookup, so a run of N names reuses one
     /// connection pool and one TLS handshake instead of opening N.
@@ -305,9 +318,13 @@ impl PyPiRegistry {
     /// `Missing` the timestamp exists to prevent. The cost is one run of
     /// re-queries; the outcome can never be a block, because a discarded entry
     /// means asking again rather than trusting an old answer.
-    pub fn new(offline: bool, cache_path: PathBuf) -> Self {
-        let cache = std::fs::read_to_string(&cache_path)
-            .ok()
+    /// `cache_path` is `None` when no trusted location could be named. Such a
+    /// run keeps its answers in memory only: every lookup still happens, and
+    /// nothing is read from or written to disk.
+    pub fn new(offline: bool, cache_path: Option<PathBuf>) -> Self {
+        let cache = cache_path
+            .as_deref()
+            .and_then(|path| std::fs::read_to_string(path).ok())
             .and_then(|text| serde_json::from_str::<Cache>(&text).ok())
             .unwrap_or_default();
 
@@ -470,13 +487,16 @@ impl PyPiRegistry {
     /// A failed write costs the next run a round trip and nothing else, so
     /// there is no outcome worth interrupting the gate for.
     fn persist(&self) {
+        let Some(cache_path) = self.cache_path.as_deref() else {
+            return;
+        };
         let Ok(text) = serde_json::to_string(&*self.cache.borrow()) else {
             return;
         };
-        if let Some(parent) = self.cache_path.parent() {
+        if let Some(parent) = cache_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&self.cache_path, text);
+        let _ = std::fs::write(cache_path, text);
     }
 }
 
@@ -569,17 +589,31 @@ impl Registry for PyPiRegistry {
 mod tests {
     use super::*;
 
-    /// The property the whole move is for. Whatever the environment says, the
-    /// resolved path must not be inside the repository being checked — that is
-    /// the writable, committable area of whoever proposes the change.
+    /// The property the whole move is for: the *default* location must never
+    /// be inside the repository being checked — that is the writable,
+    /// committable area of whoever proposes the change.
+    ///
+    /// Scoped to the default deliberately, and the name says so. This calls
+    /// `default_cache_path`, which skips [`CACHE_FILE_ENV`], so it proves
+    /// nothing about `cache_path` — an earlier version of this comment claimed
+    /// "whatever the environment says", which it does not test and which is
+    /// not even true, since the variable can name a path anywhere. What holds
+    /// the environment path is
+    /// `a_cache_file_inside_the_repository_is_never_consulted` in
+    /// `tests/cli.rs`, end to end through the real binary.
     ///
     /// Two repository shapes, because the fallbacks differ: an ordinary root,
     /// and one whose name survives no sanitisation at all, which is what
     /// exercises the digest-only branch of [`cache_key`].
     #[test]
-    fn the_cache_never_lands_inside_the_repository() {
+    fn the_default_cache_location_is_never_inside_the_repository() {
         for repo in [Path::new("/home/dev/projects/api"), Path::new("/srv/漢字")] {
-            let resolved = default_cache_path(repo);
+            let Some(resolved) = default_cache_path(repo) else {
+                // Only when no cache directory can be named at all, in which
+                // case nothing is written anywhere and the property holds
+                // vacuously.
+                continue;
+            };
             assert!(
                 !resolved.starts_with(repo),
                 "{} is inside {}",
@@ -594,6 +628,37 @@ mod tests {
         }
     }
 
+    /// A run that can name no trusted cache directory must not fall back to
+    /// somewhere untrusted — it must not cache at all.
+    ///
+    /// The temporary directory was that fallback and was wrong: a fully
+    /// predictable path in a world-writable directory is an unauthenticated
+    /// trust store any other local user can pre-create, which is the
+    /// in-repository hole reached through a different door. A cold cache costs
+    /// a round trip; a poisoned one costs the gate.
+    ///
+    /// Driven through `PyPiRegistry` rather than the path function, because
+    /// "does not cache" is a property of the run: nothing may be read, and
+    /// nothing may be written.
+    #[test]
+    fn a_run_with_no_trusted_cache_directory_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let registry = PyPiRegistry::new(true, None);
+
+        registry.record("ruff", Existence::Exists);
+        registry.record("requestz", Existence::Missing);
+
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("read temp dir")
+                .next()
+                .is_none(),
+            "a run with no cache location wrote something anyway"
+        );
+        // Answers still work in memory for the length of the run.
+        assert_eq!(registry.exists("ruff"), Existence::Exists);
+    }
+
     /// Two checkouts must not write over each other. The failure would be
     /// silent — a lost entry costs a round trip, never a wrong answer — but a
     /// per-repository key is also what stops an `Exists` learned against one
@@ -601,8 +666,15 @@ mod tests {
     /// to need.
     #[test]
     fn two_repositories_do_not_share_a_cache_file() {
-        let one = default_cache_path(Path::new("/home/dev/one"));
-        let two = default_cache_path(Path::new("/home/dev/two"));
+        let (Some(one), Some(two)) = (
+            default_cache_path(Path::new("/home/dev/one")),
+            default_cache_path(Path::new("/home/dev/two")),
+        ) else {
+            // No cache directory on this machine, so there is nothing to
+            // collide. `a_run_with_no_trusted_cache_directory_writes_nothing`
+            // covers that case.
+            return;
+        };
 
         assert_ne!(one, two);
         assert_eq!(
@@ -692,7 +764,7 @@ mod tests {
         // Offline, so it cannot be re-queried. An expired `Exists` would be
         // honoured here; a `Missing` is refused, because answering it would
         // block a build on evidence this run has no way to check.
-        let registry = PyPiRegistry::new(true, cache_path);
+        let registry = PyPiRegistry::new(true, Some(cache_path));
 
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
     }
@@ -723,7 +795,7 @@ mod tests {
         )
         .expect("write cache");
 
-        let registry = PyPiRegistry::new(true, cache_path);
+        let registry = PyPiRegistry::new(true, Some(cache_path));
 
         assert_eq!(registry.exists("ruff"), Existence::Exists);
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
@@ -750,7 +822,7 @@ mod tests {
         std::fs::write(&cache_path, cache_json(&[("ruff", true, half_a_century)]))
             .expect("write cache");
 
-        let registry = PyPiRegistry::new(true, cache_path);
+        let registry = PyPiRegistry::new(true, Some(cache_path));
 
         assert_eq!(registry.exists("ruff"), Existence::Exists);
     }
@@ -766,7 +838,7 @@ mod tests {
         let seeded = cache_json(&[("ruff", true, well_past_every_lifetime())]);
         std::fs::write(&cache_path, &seeded).expect("write cache");
 
-        let registry = PyPiRegistry::new(true, cache_path.clone());
+        let registry = PyPiRegistry::new(true, Some(cache_path.clone()));
         assert_eq!(registry.exists("ruff"), Existence::Exists);
 
         let after = std::fs::read_to_string(&cache_path).expect("read cache");
@@ -796,7 +868,7 @@ mod tests {
         )
         .expect("write cache");
 
-        let registry = PyPiRegistry::new(true, cache_path);
+        let registry = PyPiRegistry::new(true, Some(cache_path));
         assert_eq!(registry.stale_packages(), 0, "nothing has been asked yet");
 
         assert_eq!(registry.exists("black"), Existence::Exists);
@@ -849,7 +921,7 @@ mod tests {
             cache_json(&[("ruff", true, age), ("black", true, age)]),
         )
         .expect("write cache");
-        let registry = PyPiRegistry::new(false, cache_path);
+        let registry = PyPiRegistry::new(false, Some(cache_path));
 
         // Expired and online, so it is re-queried rather than honoured.
         assert_eq!(
@@ -890,7 +962,7 @@ mod tests {
             cache_json(&[("ruff", true, age), ("black", true, age)]),
         )
         .expect("write cache");
-        let registry = PyPiRegistry::new(false, cache_path);
+        let registry = PyPiRegistry::new(false, Some(cache_path));
         let attempts = std::cell::Cell::new(0u32);
         let blackhole = |_: &str| {
             attempts.set(attempts.get() + 1);
@@ -917,7 +989,7 @@ mod tests {
             cache_json(&[("ruff", true, well_past_every_lifetime())]),
         )
         .expect("write cache");
-        let registry = PyPiRegistry::new(false, cache_path);
+        let registry = PyPiRegistry::new(false, Some(cache_path));
         let attempts = std::cell::Cell::new(0u32);
         let answers_missing = |_: &str| {
             attempts.set(attempts.get() + 1);
@@ -945,7 +1017,7 @@ mod tests {
         std::fs::write(&cache_path, cache_json(&[("requestz", false, -86_400)]))
             .expect("write cache");
 
-        let registry = PyPiRegistry::new(true, cache_path);
+        let registry = PyPiRegistry::new(true, Some(cache_path));
 
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
     }
@@ -961,7 +1033,7 @@ mod tests {
         std::fs::write(&cache_path, r#"{"known":{"ruff":true,"requestz":false}}"#)
             .expect("write cache");
 
-        let registry = PyPiRegistry::new(true, cache_path);
+        let registry = PyPiRegistry::new(true, Some(cache_path));
 
         assert_eq!(registry.exists("ruff"), Existence::Unknown);
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
@@ -971,7 +1043,7 @@ mod tests {
     fn a_definite_answer_is_stored_with_the_time_it_was_checked() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("registry.json");
-        let registry = PyPiRegistry::new(true, cache_path.clone());
+        let registry = PyPiRegistry::new(true, Some(cache_path.clone()));
 
         registry.record("ruff", Existence::Exists);
 
@@ -979,7 +1051,7 @@ mod tests {
         assert!(written.contains("\"checked\""), "no timestamp: {written}");
         // Round trips as fresh, which is what makes the entry usable at all.
         assert_eq!(
-            PyPiRegistry::new(true, cache_path).exists("ruff"),
+            PyPiRegistry::new(true, Some(cache_path)).exists("ruff"),
             Existence::Exists
         );
     }
@@ -987,7 +1059,7 @@ mod tests {
     #[test]
     fn offline_mode_never_makes_a_request_and_reports_unknown() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let registry = PyPiRegistry::new(true, dir.path().join("registry.json"));
+        let registry = PyPiRegistry::new(true, Some(dir.path().join("registry.json")));
 
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
     }
@@ -1003,7 +1075,7 @@ mod tests {
         .expect("write cache");
 
         // Offline proves no request is made: the answers can only come from cache.
-        let registry = PyPiRegistry::new(true, cache_path);
+        let registry = PyPiRegistry::new(true, Some(cache_path));
 
         assert_eq!(registry.exists("ruff"), Existence::Exists);
         assert_eq!(registry.exists("requestz"), Existence::Missing);
@@ -1012,7 +1084,7 @@ mod tests {
     #[test]
     fn a_missing_cache_file_is_not_an_error() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let registry = PyPiRegistry::new(true, dir.path().join("does-not-exist.json"));
+        let registry = PyPiRegistry::new(true, Some(dir.path().join("does-not-exist.json")));
 
         assert_eq!(registry.exists("ruff"), Existence::Unknown);
     }
@@ -1023,7 +1095,7 @@ mod tests {
         let cache_path = dir.path().join("registry.json");
         std::fs::write(&cache_path, "not json at all").expect("write cache");
 
-        let registry = PyPiRegistry::new(true, cache_path);
+        let registry = PyPiRegistry::new(true, Some(cache_path));
 
         assert_eq!(registry.exists("ruff"), Existence::Unknown);
     }
@@ -1042,7 +1114,7 @@ mod tests {
         let cache_path = dir.path().join("registry.json");
         std::fs::write(&cache_path, cache_json(&[("ruff", true, 0)])).expect("write cache");
 
-        let registry = PyPiRegistry::new(true, cache_path.clone());
+        let registry = PyPiRegistry::new(true, Some(cache_path.clone()));
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
 
         let after = std::fs::read_to_string(&cache_path).expect("read cache");
@@ -1062,11 +1134,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("nested").join("registry.json");
 
-        let first = PyPiRegistry::new(true, cache_path.clone());
+        let first = PyPiRegistry::new(true, Some(cache_path.clone()));
         first.record("ruff", Existence::Exists);
         first.record("requestz", Existence::Missing);
 
-        let second = PyPiRegistry::new(true, cache_path);
+        let second = PyPiRegistry::new(true, Some(cache_path));
 
         assert_eq!(second.exists("ruff"), Existence::Exists);
         assert_eq!(second.exists("requestz"), Existence::Missing);
@@ -1153,7 +1225,7 @@ mod tests {
     #[test]
     fn a_transport_failure_stops_the_run_from_trying_again() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let registry = PyPiRegistry::new(false, dir.path().join("registry.json"));
+        let registry = PyPiRegistry::new(false, Some(dir.path().join("registry.json")));
         let attempts = std::cell::Cell::new(0u32);
         let blackhole = |_: &str| {
             attempts.set(attempts.get() + 1);
@@ -1177,7 +1249,7 @@ mod tests {
     #[test]
     fn a_server_error_does_not_stop_the_run() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let registry = PyPiRegistry::new(false, dir.path().join("registry.json"));
+        let registry = PyPiRegistry::new(false, Some(dir.path().join("registry.json")));
         let attempts = std::cell::Cell::new(0u32);
         let flaky = |_: &str| {
             attempts.set(attempts.get() + 1);
@@ -1198,7 +1270,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("registry.json");
         std::fs::write(&cache_path, cache_json(&[("ruff", true, 0)])).expect("write cache");
-        let registry = PyPiRegistry::new(false, cache_path);
+        let registry = PyPiRegistry::new(false, Some(cache_path));
         let attempts = std::cell::Cell::new(0u32);
         let blackhole = |_: &str| {
             attempts.set(attempts.get() + 1);
@@ -1225,7 +1297,7 @@ mod tests {
     #[test]
     fn a_lookup_cannot_hang_forever() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let registry = PyPiRegistry::new(false, dir.path().join("registry.json"));
+        let registry = PyPiRegistry::new(false, Some(dir.path().join("registry.json")));
         let global = registry
             .agent
             .config()
@@ -1250,7 +1322,7 @@ mod tests {
     fn recording_stores_definite_answers_and_ignores_unknown() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("registry.json");
-        let registry = PyPiRegistry::new(true, cache_path.clone());
+        let registry = PyPiRegistry::new(true, Some(cache_path.clone()));
 
         registry.record("nowhere", Existence::Unknown);
         assert!(
@@ -1261,7 +1333,7 @@ mod tests {
         registry.record("ruff", Existence::Exists);
         registry.record("requestz", Existence::Missing);
 
-        let reloaded = PyPiRegistry::new(true, cache_path);
+        let reloaded = PyPiRegistry::new(true, Some(cache_path));
         assert_eq!(reloaded.exists("ruff"), Existence::Exists);
         assert_eq!(reloaded.exists("requestz"), Existence::Missing);
         // Offline, so this can only be a cache miss, not a fresh lookup.
@@ -1290,7 +1362,7 @@ mod tests {
         let cache_path = dir.path().join("registry.json");
         std::fs::write(&cache_path, cache_json(&[("ruff", true, 0)])).expect("write cache");
 
-        let registry = PyPiRegistry::new(true, cache_path);
+        let registry = PyPiRegistry::new(true, Some(cache_path));
         let erased: &dyn Registry = &registry;
 
         assert_eq!(erased.exists("ruff"), Existence::Exists);

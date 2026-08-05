@@ -104,16 +104,16 @@ fn check_diff(offline: bool, json: bool) -> ExitCode {
         Err(error) => return failed(&error),
     };
 
-    report_cache_inside_the_repository(&repo);
+    // The cache path comes from `registry::cache_path`, which puts it outside
+    // the repository. It used to be `<repo>/.plumb/cache/registry.json`, where
+    // committing one file disabled the gate for thirty days.
+    let cache = registry::cache_path(&repo);
+    report_on_the_cache(&repo, cache.as_deref());
 
     // One registry for the whole run. It holds the cache and the latch that
     // stops a dead network being retried once per dependency, and both exist
     // to keep the gate fast enough that nobody turns it off.
-    //
-    // The cache path comes from `registry::cache_path`, which puts it outside
-    // the repository. It used to be `<repo>/.plumb/cache/registry.json`, where
-    // committing one file disabled the gate for thirty days.
-    let registry = registry::PyPiRegistry::new(offline, registry::cache_path(&repo));
+    let registry = registry::PyPiRegistry::new(offline, cache);
 
     match check::run(&repo, &registry, json) {
         Ok(outcome) => {
@@ -210,28 +210,77 @@ fn report_stale_packages(registry: &registry::PyPiRegistry) {
     );
 }
 
-/// Says so when the old in-repository cache file is still there.
+/// Says whatever is true about where this run's cache is.
 ///
-/// It is not read — see [`registry::legacy_cache_path`] for why migrating it
-/// would launder exactly the entries the move exists to refuse. But leaving it
-/// unmentioned means every existing checkout keeps a file that looks like it
-/// is doing something and is not, so the run says it out loud and says what to
-/// do about it.
+/// Three things can be worth saying, and they are mutually exclusive on
+/// purpose, because the first version of this said the second one
+/// unconditionally: with `PLUMB_CACHE_FILE` pointed at the old in-repository
+/// path, the binary printed "no longer read and can be deleted" **while
+/// reading it and answering from it**. A gate that makes a false statement
+/// about its own trust store is the defect class this project is named for, so
+/// the containment check comes first and the reassurance is only printed when
+/// it is earned.
 ///
-/// On stderr and with no effect on the exit code, like every other note this
-/// binary makes: nothing here is a rule violation, and stdout carries a report
-/// `--json` promises is parseable.
-fn report_cache_inside_the_repository(repo: &Path) {
-    let legacy = registry::legacy_cache_path(repo);
-    if !legacy.exists() {
-        return;
+/// All on stderr and none of it touches the exit code, like every other note
+/// this binary makes: nothing here is a rule violation, and stdout carries a
+/// report `--json` promises is parseable.
+fn report_on_the_cache(repo: &Path, cache: Option<&Path>) {
+    match cache {
+        // The dangerous configuration, reachable only by setting
+        // `PLUMB_CACHE_FILE` at something inside the checkout. Not refused,
+        // because the variable is set by whoever runs the gate and refusing
+        // would break a deliberate if unwise setup — but never silent, because
+        // it reinstates exactly the hole the cache was moved out of.
+        Some(path) if inside(path, repo) => eprintln!(
+            "plumb: the registry cache in use ({}) is inside the repository; a \
+             cache file that travels with a change can assert that a package \
+             exists and turn this gate off",
+            path.display()
+        ),
+        // No trusted directory could be named, so this run does not cache.
+        // Worth one line: the next run pays for it again, and a user who wants
+        // a cache can name one.
+        None => eprintln!(
+            "plumb: no cache directory could be resolved, so this run remembers \
+             nothing; set {} to name one",
+            registry::CACHE_FILE_ENV
+        ),
+        // The ordinary case. Mention the leftover file only here, where the
+        // claim that it is unread is actually true.
+        Some(_) => {
+            let legacy = registry::legacy_cache_path(repo);
+            if legacy.exists() {
+                eprintln!(
+                    "plumb: {} is no longer read and can be deleted; the \
+                     registry cache now lives outside the repository, because a \
+                     cache file inside one can be committed and a committed \
+                     cache answers for the gate",
+                    legacy.display()
+                );
+            }
+        }
     }
-    eprintln!(
-        "plumb: {} is no longer read and can be deleted; the registry cache \
-         now lives outside the repository, because a cache file inside one can \
-         be committed and a committed cache answers for the gate",
-        legacy.display()
-    );
+}
+
+/// Whether `path` lies inside `repo`.
+///
+/// Canonicalised on both sides so that two spellings of the same directory — a
+/// symlinked temporary directory, a short path on Windows — do not read as
+/// different places and let an in-repository cache past the check. The cache
+/// file itself need not exist yet, so the deepest ancestor that does is what
+/// gets canonicalised.
+///
+/// A failure to canonicalise falls back to comparing the paths as written,
+/// which can only under-report; the fallback is a best effort on a warning, not
+/// a security boundary.
+fn inside(path: &Path, repo: &Path) -> bool {
+    let resolved = path
+        .ancestors()
+        .find_map(|ancestor| std::fs::canonicalize(ancestor).ok());
+    match (resolved, std::fs::canonicalize(repo)) {
+        (Some(path), Ok(repo)) => path.starts_with(repo),
+        _ => path.starts_with(repo),
+    }
 }
 
 /// Reports a run that could not happen.
