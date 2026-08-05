@@ -1372,6 +1372,31 @@ mod tests {
         }
     }
 
+    /// Fails to compile when a `Tier` variant is added without deciding what
+    /// it costs.
+    ///
+    /// `exit_code` decides with `any`, so a new variant falls through to 0
+    /// silently — a rule that neither blocks nor warns, which is the one
+    /// outcome nobody would choose deliberately. The exhaustive match turns
+    /// that into a compile error.
+    #[test]
+    fn every_tier_must_state_what_it_costs() {
+        for tier in [Tier::A, Tier::B, Tier::C, Tier::Hygiene] {
+            let expected = match tier {
+                Tier::A => 1,
+                Tier::B => 2,
+                Tier::C | Tier::Hygiene => 0,
+            };
+            assert_eq!(exit_code(&[finding(tier)]), expected, "tier {tier:?}");
+        }
+    }
+
+    #[test]
+    fn measurement_only_findings_never_affect_the_exit_code() {
+        assert_eq!(exit_code(&[finding(Tier::C)]), 0);
+        assert_eq!(exit_code(&[finding(Tier::C), finding(Tier::Hygiene)]), 0);
+    }
+
     #[test]
     fn no_findings_exits_zero() {
         assert_eq!(exit_code(&[]), 0);
@@ -1445,6 +1470,28 @@ mod tests {
     #[test]
     fn json_output_is_an_empty_array_when_clean() {
         assert_eq!(render_json(&[]).trim(), "[]");
+    }
+
+    /// Pins the wire spelling of every tier, not just the one the sample uses.
+    ///
+    /// The JSON payload is a public contract: CI and Task 8 match on these
+    /// strings. Pinning only `A` leaves a rename of `B` or `C` — to `"warn"`
+    /// and `"note"`, say — passing the whole suite while breaking every
+    /// consumer.
+    #[test]
+    fn json_output_spells_every_tier_as_its_variant_name() {
+        let findings: Vec<Finding> = [Tier::A, Tier::B, Tier::C, Tier::Hygiene]
+            .into_iter()
+            .map(finding)
+            .collect();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&render_json(&findings)).expect("valid json");
+
+        assert_eq!(json[0]["tier"], "A");
+        assert_eq!(json[1]["tier"], "B");
+        assert_eq!(json[2]["tier"], "C");
+        assert_eq!(json[3]["tier"], "Hygiene");
     }
 }
 ```
