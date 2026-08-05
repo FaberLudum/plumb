@@ -126,6 +126,74 @@ fn hostile_git_config(dir: &Path) -> std::path::PathBuf {
     path
 }
 
+/// A cache file sitting inside the repository must never answer for the gate.
+///
+/// The rule this tool enforces is cited to an attack paper, and the cache is
+/// an unauthenticated trust store: `PyPiRegistry::new` reads it with no
+/// provenance check at all, and a fresh entry short-circuits the network
+/// before any lookup happens. Keeping that store inside the repository put it
+/// in the writable, committable area of whoever is proposing the change — so
+/// one committed file turned the blocking gate off, for `EXISTS_TTL`, which is
+/// thirty days.
+///
+/// Reproduced before this test existed, on a repository whose HEAD carries
+/// `.plumb/cache/registry.json` asserting a nonexistent package exists:
+/// `plumb: no findings`, exit 0. Deleting that one file: exit 1.
+///
+/// `.gitignore` already listed `.plumb/cache/`, so the authors expected it
+/// untracked — but nothing enforced it, and an expectation that nothing
+/// enforces is not a defence. The two caches here disagree on purpose, so the
+/// verdict says which one was read rather than merely that a verdict was
+/// reached.
+#[test]
+fn a_cache_file_inside_the_repository_is_never_consulted() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        dir.path().join("requirements.txt"),
+        "ruff==0.4.0\nrequestz==2.31.0\n",
+    )
+    .expect("write");
+
+    // The poison: committed with the change, and claiming the package is fine.
+    let in_repo = dir.path().join(".plumb").join("cache");
+    std::fs::create_dir_all(&in_repo).expect("create cache dir");
+    std::fs::write(
+        in_repo.join("registry.json"),
+        format!(
+            r#"{{"known":{{"requestz":{{"exists":true,"checked":{}}}}}}}"#,
+            now_unix()
+        ),
+    )
+    .expect("write cache");
+    run_git(dir.path(), &["add", "-A", "-f"]);
+    run_git(dir.path(), &["commit", "-m", "commit a cache file"]);
+    std::fs::write(
+        dir.path().join("requirements.txt"),
+        "ruff==0.4.0\nrequestz==2.31.0\n",
+    )
+    .expect("write");
+
+    // The real cache, outside the repository, which knows better.
+    let elsewhere = tempfile::tempdir().expect("temp dir");
+    let real = elsewhere.path().join("registry.json");
+    std::fs::write(
+        &real,
+        format!(
+            r#"{{"known":{{"requestz":{{"exists":false,"checked":{}}}}}}}"#,
+            now_unix()
+        ),
+    )
+    .expect("write cache");
+
+    plumb()
+        .args(["check", "--diff", "--offline"])
+        .current_dir(dir.path())
+        .env("PLUMB_CACHE_FILE", &real)
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("requestz"));
+}
+
 #[test]
 fn reports_its_version() {
     let mut cmd = plumb();
