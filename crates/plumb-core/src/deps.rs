@@ -1,6 +1,52 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
+//! Computes which dependencies a change adds.
+//!
+//! The comparison is a set difference between the names parsed from the
+//! manifest at HEAD and the names parsed from the manifest on disk, not a read
+//! of the `+` lines in the diff. Reformatting a manifest — reordering it,
+//! respelling a name, repinning a version — produces a diff full of added
+//! lines that add no dependency, and every name reported here becomes a
+//! registry lookup that can block a build, so a phantom addition is a failed
+//! build for no reason.
+
+use crate::manifest::Ecosystem;
+use std::collections::BTreeSet;
+
+/// A dependency present after a change but not before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddedDependency {
+    pub name: String,
+    pub ecosystem: Ecosystem,
+    pub manifest: String,
+}
+
+/// Computes dependencies added by a change.
+///
+/// `before` is `None` when the manifest did not exist at HEAD, in which case
+/// every name in `after` counts as added.
+///
+/// Results come out in the sorted order of the underlying `BTreeSet`, so the
+/// findings a run reports do not depend on how the manifest was written.
+pub fn added(
+    manifest_path: &str,
+    before: Option<&BTreeSet<String>>,
+    after: &BTreeSet<String>,
+) -> Vec<AddedDependency> {
+    let empty = BTreeSet::new();
+    let before = before.unwrap_or(&empty);
+
+    after
+        .difference(before)
+        .map(|name| AddedDependency {
+            name: name.clone(),
+            ecosystem: Ecosystem::PyPi,
+            manifest: manifest_path.to_string(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
