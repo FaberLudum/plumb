@@ -537,6 +537,74 @@ mod tests {
         );
     }
 
+    /// A partially staged manifest is checked on the side that is not being
+    /// committed.
+    ///
+    /// Recorded, not endorsed. `git diff HEAD` lists a path when *either* the
+    /// index or the worktree differs from HEAD, and the after-side is then
+    /// read from the **worktree**. For a manifest that is staged one way and
+    /// left another way on disk those are different files, and the gate reads
+    /// the one that is not about to be committed. Here the commit lands with a
+    /// package PyPI does not have, and the gate said nothing.
+    ///
+    /// This defeats the pre-commit use case specifically, which is the one
+    /// place a gate on a working diff is meant to be wired in.
+    ///
+    /// Not fixed in this version, and the obvious fix is worse than it looks.
+    /// Reading the after-side from `git show :<path>` — the index — regresses
+    /// the case the README leads with: an ordinary unstaged edit has an index
+    /// copy identical to HEAD, so it would add nothing and report nothing.
+    /// Measured on git 2.47.1, with `requirements.txt` edited and not staged:
+    ///
+    /// ```text
+    /// git diff --name-only HEAD  ->  requirements.txt
+    /// cat requirements.txt       ->  ruff==0.4.0
+    ///                                plumbnope-zq7x4v==1.0
+    /// git show :requirements.txt ->  ruff==0.4.0
+    /// ```
+    ///
+    /// So the honest fix is the union of the index and the worktree as the
+    /// after-side, which changes what "added" means and needs its own round of
+    /// evidence. Until then the README says the pre-commit story is not yet
+    /// honest.
+    #[test]
+    fn a_partially_staged_manifest_is_checked_on_the_wrong_side() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write(
+            dir.path(),
+            "requirements.txt",
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        );
+        run_git(dir.path(), &["add", "requirements.txt"]);
+        // The worktree goes back to what HEAD holds; the index keeps the
+        // addition. `git commit` will commit the index.
+        write(dir.path(), "requirements.txt", "ruff==0.4.0\n");
+        let registry = StubRegistry::default();
+
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+
+        assert_eq!(
+            outcome.code, 0,
+            "recorded, not endorsed: the staged addition is invisible"
+        );
+        assert!(
+            registry.asked().is_empty(),
+            "the staged name was never looked up: {:?}",
+            registry.asked()
+        );
+
+        // And the commit lands with it, which is what makes this worth pinning
+        // rather than merely noting.
+        run_git(dir.path(), &["commit", "-m", "land it"]);
+        let committed = git::show_at_head(dir.path(), "requirements.txt")
+            .expect("show succeeds")
+            .unwrap_or_default();
+        assert!(
+            committed.contains("requestz"),
+            "the fixture did not actually commit the staged addition: {committed:?}"
+        );
+    }
+
     /// One byte that is not UTF-8 used to uncheck a whole manifest in silence.
     ///
     /// `read_to_string(...).unwrap_or_default()` made `after` empty, so no
