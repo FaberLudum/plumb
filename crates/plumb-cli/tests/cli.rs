@@ -284,6 +284,41 @@ fn a_leftover_cache_inside_the_repository_is_reported_not_read() {
         );
 }
 
+/// One byte that is not UTF-8 must not silently uncheck a whole manifest.
+///
+/// `read_to_string` fails on invalid UTF-8, and the result was
+/// `.unwrap_or_default()` — so the after-side read as empty, no name was
+/// looked up, and the run exited 0. Verified on a one-byte difference:
+/// `# cafe pinned` blocks, `# caf\xe9 pinned` reports nothing. A Latin-1
+/// comment in a `requirements.txt` is ordinary, and the package below it is
+/// not checked at all.
+///
+/// The exit code stays 0, deliberately: a file this process could not decode
+/// is not evidence that a package does not exist, and every other failure to
+/// establish anything in this design — a firewall, an outage, an offline cold
+/// cache — is non-blocking too. What was wrong was the silence, not the
+/// verdict. So it is reported the way stale cache answers are reported, on
+/// stderr, naming the file and the reason.
+#[test]
+fn a_manifest_that_is_not_utf8_is_reported_rather_than_skipped() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    // `\xe9` is `é` in Latin-1 and is not valid UTF-8 on its own.
+    std::fs::write(
+        in_repo(dir.path(), "requirements.txt"),
+        b"# caf\xe9 pinned\nruff==0.4.0\nrequestz==2.31.0\n",
+    )
+    .expect("write");
+    seed_cache(dir.path(), "requestz", false, 0);
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(0)
+        .stderr(
+            predicates::str::contains("requirements.txt").and(predicates::str::contains("UTF-8")),
+        );
+}
+
 /// The mirror: no leftover file, no note. A warning every run prints is one
 /// every reader learns to skip.
 #[test]
