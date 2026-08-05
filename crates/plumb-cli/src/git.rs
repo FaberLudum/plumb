@@ -48,18 +48,59 @@ pub fn repo_root(from: &Path) -> Result<PathBuf> {
 /// Output is decoded lossily, so it can contain U+FFFD wherever the diff
 /// carried bytes that are not valid UTF-8. See the body for why.
 ///
-/// `core.quotePath=false` is set for the same reason the decoding is lossy:
-/// what comes back has to be usable. By default git escapes every non-ASCII
-/// byte of a path into C-style octal and wraps the result in quotes, so
-/// `café/requirements.txt` arrives as `"caf\303\251/requirements.txt"` and
-/// matches no manifest — a file silently never checked rather than one
-/// reported as unreadable. Overriding it here, rather than teaching the parser
-/// to unescape, keeps the encoding question with the process that knows the
-/// answer. It does not cover a path holding a quote, a backslash or a control
-/// character: those stay escaped whatever this is set to.
+/// # Why the invocation is this long
+///
+/// The gate reads paths out of this output. Every documented setting that
+/// changes how a path is spelled, or that puts anything in front of the
+/// header, therefore switches the gate off — not loudly, but by making it
+/// report a clean run over a manifest it never opened. All of the settings
+/// below are legal and ordinary; `color.ui = always` is someone who likes
+/// coloured diffs, and it was enough on its own.
+///
+/// - `--no-color` beats `color.ui` and `color.diff`. An escape sequence in
+///   front of `diff --git` means no file is recorded at all.
+/// - `--no-ext-diff` beats `diff.external` and the `GIT_EXTERNAL_DIFF`
+///   environment variable, which replace the whole diff with another tool's
+///   output, and beats a per-attribute `diff.<driver>.command`.
+/// - `--src-prefix=a/ --dst-prefix=b/` beat `diff.mnemonicPrefix`,
+///   `diff.noprefix`, `diff.srcPrefix` and `diff.dstPrefix`. `w/…` and
+///   `src/…` both survive the `b/` strip and then resolve to nothing on disk.
+/// - `--no-textconv` refuses per-attribute content converters. Their output is
+///   never read — only paths are — so converting can only cost time or, when
+///   the converter is missing, fail the run outright.
+/// - `-c core.quotePath=false` stops a non-ASCII path arriving as
+///   `"caf\303\251/requirements.txt"`, escaped and quoted, matching no
+///   manifest. Overriding it here rather than teaching the parser to unescape
+///   keeps the encoding question with the process that knows the answer.
+/// - `-c diff.relative=false` is belt and braces: it limits the diff to the
+///   working directory and prints paths relative to it. Callers pass the
+///   repository root today, which defuses it, but a caller that stopped doing
+///   so would get silence rather than an error.
+///
+/// Command-line arguments are preferred to `-c` wherever git has one, because
+/// they outrank configuration whatever a given git version calls the setting.
+///
+/// Two things this deliberately does **not** do. It does not pass `--text`,
+/// which would defeat a `-diff` attribute suppressing the hunk — measured, one
+/// changed 8 MB binary turns a 115-byte diff into 16.8 MB, and the gate reads
+/// no hunk content anyway. And `core.quotePath=false` does not reach a path
+/// holding a quote, a backslash or a control character: those stay escaped and
+/// are still skipped.
 pub fn working_diff(repo: &Path) -> Result<String> {
     let output = Command::new("git")
-        .args(["-c", "core.quotePath=false", "diff", "HEAD"])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "-c",
+            "diff.relative=false",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "HEAD",
+        ])
         .current_dir(repo)
         .output()
         .context("failed to run git; is it installed and on PATH?")?;
