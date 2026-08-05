@@ -1455,6 +1455,98 @@ dependencies = ["ruff"]
         }
     }
 
+    /// Conda namespaces name packages from a different registry, so they are
+    /// out of scope rather than unread.
+    ///
+    /// This is the `[build-system].requires` argument on a different axis. A
+    /// hallucinated conda package is a real defect, but conda is a separate
+    /// registry needing separate evidence — not an unread part of the PyPI
+    /// runtime set this gate reasons about.
+    ///
+    /// What makes it worth excluding rather than tolerating is that the
+    /// warning has no resolution path. Every other gap ends when someone
+    /// writes the parser; this one never does, because Plumb will not look a
+    /// conda name up on PyPI. A pixi project would carry a permanent warning
+    /// it could do nothing about, which is the warning-nobody-reads failure
+    /// the design excludes by principle, landing on users who did nothing
+    /// wrong.
+    ///
+    /// The exclusion is by namespace and not by path. pixi nests its scopes —
+    /// `feature.<name>`, `target.<platform>`, `package`, and their
+    /// combinations — so a path list is combinatorial and goes stale the next
+    /// time pixi adds a scope. The `pypi-` prefix is pixi's own marker for the
+    /// registry, so keying on it tracks the axis that actually matters and
+    /// catches a new PyPI table automatically.
+    #[test]
+    fn a_conda_dependency_table_is_out_of_scope_rather_than_a_gap() {
+        for text in [
+            "[tool.pixi.dependencies]\npython = \">=3.11\"\n",
+            "[tool.pixi.feature.docs.dependencies]\npython = \">=3.11\"\n",
+            "[tool.pixi.package.build-dependencies]\ncmake = \"*\"\n",
+            "[tool.pixi.package.host-dependencies]\npython = \"*\"\n",
+            "[tool.pixi.package.run-dependencies]\npython = \"*\"\n",
+            "[tool.pixi.target.linux-64.dependencies]\npython = \"*\"\n",
+            "[tool.pixi.feature.docs.target.osx-64.dependencies]\npython = \"*\"\n",
+            "[tool.conda-lock.dependencies]\npython = \">=3.11\"\n",
+        ] {
+            let manifest = parse_pyproject(text);
+            assert!(
+                manifest.gaps.is_empty(),
+                "gaps: {:?} for {text}",
+                manifest.gaps
+            );
+        }
+    }
+
+    /// The other half, and the one that keeps the namespace exclusion from
+    /// being a hole: pixi's PyPI tables are in scope and must keep warning, at
+    /// every nesting depth. They are marked by pixi's own `pypi-` prefix, so
+    /// the carve-out is keyed to the positive evidence rather than to a list.
+    #[test]
+    fn pixis_pypi_tables_still_warn_inside_the_conda_namespace() {
+        for (text, expected) in [
+            (
+                "[tool.pixi.pypi-dependencies]\nruff = \"*\"\n",
+                "tool.pixi.pypi-dependencies",
+            ),
+            (
+                "[tool.pixi.feature.docs.pypi-dependencies]\nmkdocs = \"*\"\n",
+                "tool.pixi.feature.docs.pypi-dependencies",
+            ),
+            (
+                "[tool.pixi.target.linux-64.pypi-dependencies]\nruff = \"*\"\n",
+                "tool.pixi.target.linux-64.pypi-dependencies",
+            ),
+        ] {
+            assert_eq!(
+                parse_pyproject(text).gaps,
+                vec![Gap::ToolDependencies(vec![expected.to_string()])],
+                "{text}"
+            );
+        }
+    }
+
+    /// The namespace is matched whole, not by prefix.
+    ///
+    /// Without this, any tool whose name merely starts with `pixi` inherits an
+    /// exclusion it was never granted — the silent false negative this module
+    /// exists to stop, reached through a fix for a false warning.
+    #[test]
+    fn a_namespace_that_merely_starts_like_a_conda_one_is_not_excluded() {
+        for text in [
+            "[tool.pixiedust.dependencies]\nplumbnope = \"*\"\n",
+            "[tool.conda-lockfile-helper.dependencies]\nplumbnope = \"*\"\n",
+        ] {
+            let manifest = parse_pyproject(text);
+            assert_eq!(
+                manifest.gaps.len(),
+                1,
+                "gaps: {:?} for {text}",
+                manifest.gaps
+            );
+        }
+    }
+
     /// A boolean under a matching key declares nothing, and hatch really does
     /// spell one `require-runtime-dependencies`.
     ///
