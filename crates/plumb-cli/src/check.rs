@@ -10,6 +10,10 @@
 //! violation. A firewall, an outage, an offline run and a manifest this
 //! version cannot read are all failures to establish anything, and a gate that
 //! blocked on those would be switched off within the week.
+//!
+//! Failing to establish anything is not the same as having nothing to say, and
+//! the two were conflated here once already. A manifest that could not be read
+//! still moves no verdict, but the run now reports it — see [`Unreadable`].
 
 use crate::git;
 use crate::registry::{Existence, Registry};
@@ -28,30 +32,94 @@ use std::path::Path;
 /// against the taxonomy itself.
 const PACKAGE_EXISTS_SOURCE: &str = "taxonomy §4.1";
 
+/// A manifest the change touched that this run could not read.
+///
+/// Carried out of [`collect`] rather than printed where it is discovered:
+/// `check` decides what happened, the command layer decides how to say it, and
+/// a module that printed would be a module the tests could not observe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unreadable {
+    /// Repository-relative, as git spells it.
+    pub path: String,
+    /// Why, in a form a user can act on.
+    pub reason: String,
+}
+
+/// What one run of the gate established.
+///
+/// [`Outcome::unreadable`] is not folded into the findings on purpose. A
+/// finding asserts something about the code under inspection and carries a
+/// tier and a citation; "this process could not decode a file" asserts
+/// something about this run and cites nothing.
+pub struct Outcome {
+    /// The rendered report, for stdout.
+    pub report: String,
+    /// `0` clean, `1` a Tier A violation, `2` warnings only.
+    pub code: i32,
+    /// Manifests left unchecked because they could not be read.
+    pub unreadable: Vec<Unreadable>,
+}
+
 /// Runs the diff-scoped gates and returns the rendered report and exit code.
 ///
 /// `registry` is a `&dyn Registry` so a caller can hand in a stub and stay
 /// offline; it is one registry for the whole run, not one per file, because a
 /// registry is where the cache and the unreachable-network latch live and both
 /// are useless if they are thrown away between manifests.
-pub fn run(repo: &Path, registry: &dyn Registry, json: bool) -> Result<(String, i32)> {
-    let findings = collect(repo, registry)?;
+pub fn run(repo: &Path, registry: &dyn Registry, json: bool) -> Result<Outcome> {
+    let (findings, unreadable) = collect(repo, registry)?;
 
-    let output = if json {
+    let report = if json {
         render_json(&findings)
     } else {
         render_text(&findings)
     };
 
-    Ok((output, exit_code(&findings)))
+    Ok(Outcome {
+        report,
+        code: exit_code(&findings),
+        unreadable,
+    })
 }
 
-/// Collects the findings for the working diff.
+/// Reads a manifest from the working tree.
+///
+/// Three outcomes, and the whole point is that they are three rather than one.
+/// `Ok(None)` is a file that is not there — deleted by the change under
+/// inspection, which is ordinary and says nothing. `Err` is a file that is
+/// there and could not be turned into text, which is not ordinary and must be
+/// said out loud.
+///
+/// Reading bytes and decoding separately, rather than `read_to_string`, is
+/// what separates those two: `read_to_string` reports invalid UTF-8 as an
+/// `io::Error` of kind `InvalidData`, indistinguishable at a glance from a
+/// genuine I/O failure and previously swallowed along with it.
+fn read_manifest(path: &Path) -> std::result::Result<Option<String>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        // A manifest the change deletes is listed by `git diff HEAD` and is
+        // not there to read. It adds no dependency, so there is nothing to
+        // report and nothing to warn about.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+
+    String::from_utf8(bytes).map(Some).map_err(|error| {
+        format!(
+            "not valid UTF-8 at byte {}",
+            error.utf8_error().valid_up_to()
+        )
+    })
+}
+
+/// Collects the findings for the working diff, and the manifests it could not
+/// read.
 ///
 /// Separate from [`run`] so the findings can be inspected before rendering
 /// flattens them into a string.
-fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
+fn collect(repo: &Path, registry: &dyn Registry) -> Result<(Vec<Finding>, Vec<Unreadable>)> {
     let mut findings = Vec::new();
+    let mut unreadable = Vec::new();
 
     for path in git::changed_paths(repo)? {
         // Ask the dispatch itself whether this path is a manifest, before
@@ -73,12 +141,32 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         // by `/`, which is what `manifest::parse` splits on and what `join`
         // accepts on every platform this runs on.
         //
-        // A manifest that cannot be read — deleted between the diff and now,
-        // or not UTF-8 — reads as empty, which yields no added dependencies
-        // and so no findings. Failing open is the right direction here: a file
-        // this process could not open is not evidence that a package does not
-        // exist.
-        let current = std::fs::read_to_string(repo.join(&path)).unwrap_or_default();
+        // A manifest that cannot be read yields no added dependencies and so
+        // no findings. Failing open is still the right direction — a file this
+        // process could not decode is not evidence that a package does not
+        // exist — but failing open *quietly* is not. This used to be
+        // `read_to_string(...).unwrap_or_default()`, and one Latin-1 byte in a
+        // comment therefore unchecked the whole file: `# cafe pinned` blocked,
+        // `# caf\xe9 pinned` exited 0 with nothing said on either stream.
+        //
+        // Note the asymmetry with `git::show_at_head`, which is strict about
+        // UTF-8 and aborts the run with exit 70. The two sides of the same
+        // comparison fail in opposite directions, and that is deliberate
+        // rather than an oversight: 70 is outside the 0/1/2 contract, so the
+        // before-side failure is unmistakable and can never be read as a clean
+        // run. The after-side failure could be, which is why it is reported.
+        // Neither is silent; only one is fatal.
+        let current = match read_manifest(&repo.join(&path)) {
+            Ok(Some(text)) => text,
+            Ok(None) => continue,
+            Err(reason) => {
+                unreadable.push(Unreadable {
+                    path: path.clone(),
+                    reason,
+                });
+                continue;
+            }
+        };
         let Some(after) = manifest::parse(&path, &current) else {
             continue;
         };
@@ -104,7 +192,7 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         }
     }
 
-    Ok(findings)
+    Ok((findings, unreadable))
 }
 
 /// The finding for a dependency no registry has.
@@ -234,7 +322,8 @@ mod tests {
             "ruff==0.4.0\nrequestz==2.31.0\n",
         );
 
-        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 1, "output was: {output}");
         assert!(output.contains("requestz"), "output was: {output}");
@@ -250,7 +339,8 @@ mod tests {
             "ruff==0.4.0\nhttpx==0.27.0\n",
         );
 
-        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 0, "output was: {output}");
     }
@@ -260,7 +350,8 @@ mod tests {
         let dir = repo_with_requirements("ruff==0.4.0\nrequestz==2.31.0\n");
         write(dir.path(), "requirements.txt", "ruff==0.4.0\n");
 
-        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 0, "output was: {output}");
     }
@@ -276,7 +367,8 @@ mod tests {
             "ruff==0.4.0\nmystery==1.0\n",
         );
 
-        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 0, "output was: {output}");
         assert!(!output.contains("mystery"), "output was: {output}");
@@ -291,7 +383,8 @@ mod tests {
             "ruff==0.4.0\nrequestz==2.31.0\n",
         );
 
-        let (output, code) = run(dir.path(), &StubRegistry::default(), true).expect("check runs");
+        let outcome = run(dir.path(), &StubRegistry::default(), true).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
         let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid json");
 
         assert_eq!(code, 1, "the rendering must not change the verdict");
@@ -317,7 +410,7 @@ mod tests {
         );
         let registry = StubRegistry::default();
 
-        let (_, code) = run(dir.path(), &registry, false).expect("check runs");
+        let code = run(dir.path(), &registry, false).expect("check runs").code;
 
         assert_eq!(code, 1);
         assert_eq!(registry.asked(), vec!["requestz"]);
@@ -334,7 +427,8 @@ mod tests {
         run_git(dir.path(), &["add", "-A"]);
         let registry = StubRegistry::default();
 
-        let (output, code) = run(dir.path(), &registry, false).expect("check runs");
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 1, "output was: {output}");
         assert!(
@@ -372,13 +466,13 @@ mod tests {
         write(dir.path(), "requirements-dev.txt", "requestz==2.31.0\n");
         let registry = StubRegistry::default();
 
-        let (_, unstaged) = run(dir.path(), &registry, false).expect("check runs");
+        let unstaged = run(dir.path(), &registry, false).expect("check runs").code;
         assert_eq!(unstaged, 0);
         assert!(registry.asked().is_empty(), "asked: {:?}", registry.asked());
 
         run_git(dir.path(), &["add", "-A"]);
 
-        let (_, staged) = run(dir.path(), &registry, false).expect("check runs");
+        let staged = run(dir.path(), &registry, false).expect("check runs").code;
         assert_eq!(staged, 1, "staging is what makes the manifest visible");
     }
 
@@ -415,7 +509,7 @@ mod tests {
         let registry = StubRegistry::default();
 
         // Uncommitted, the gate blocks on it.
-        let (_, uncommitted) = run(dir.path(), &registry, false).expect("check runs");
+        let uncommitted = run(dir.path(), &registry, false).expect("check runs").code;
         assert_eq!(
             uncommitted, 1,
             "the finding must exist before it can vanish"
@@ -428,7 +522,8 @@ mod tests {
         );
         let registry = StubRegistry::default();
 
-        let (output, committed) = run(dir.path(), &registry, false).expect("check runs");
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+        let (output, committed) = (outcome.report, outcome.code);
 
         assert_eq!(
             committed, 0,
@@ -440,6 +535,86 @@ mod tests {
             "nothing was looked up at all: {:?}",
             registry.asked()
         );
+    }
+
+    /// One byte that is not UTF-8 used to uncheck a whole manifest in silence.
+    ///
+    /// `read_to_string(...).unwrap_or_default()` made `after` empty, so no
+    /// name was looked up and the run exited 0 with nothing on either stream.
+    /// The verdict is still 0 — a file this process cannot decode is not
+    /// evidence that a package does not exist — but the run now says which
+    /// file it gave up on.
+    ///
+    /// The registry log is the load-bearing assertion. A version that decoded
+    /// lossily would also exit 0 here and would look fixed, while having
+    /// quietly turned `caf<U+FFFD>` into a name; asserting that nothing was
+    /// asked pins that the file was skipped rather than mangled.
+    #[test]
+    fn a_manifest_that_is_not_utf8_is_reported_rather_than_skipped_silently() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        // `\xe9` is `é` in Latin-1, and is not valid UTF-8 on its own.
+        fs::write(
+            dir.path().join("requirements.txt"),
+            b"# caf\xe9 pinned\nruff==0.4.0\nrequestz==2.31.0\n",
+        )
+        .expect("write");
+        let registry = StubRegistry::default();
+
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+
+        assert_eq!(
+            outcome.code, 0,
+            "an undecodable file is not evidence about a package"
+        );
+        assert!(registry.asked().is_empty(), "asked: {:?}", registry.asked());
+        assert_eq!(outcome.unreadable.len(), 1, "{:?}", outcome.unreadable);
+        assert_eq!(outcome.unreadable[0].path, "requirements.txt");
+        assert!(
+            outcome.unreadable[0].reason.contains("UTF-8"),
+            "reason was: {}",
+            outcome.unreadable[0].reason
+        );
+    }
+
+    /// The other half, and the one a fix for the test above could easily
+    /// break. `git diff HEAD` lists a manifest the change *deleted*, which is
+    /// then not there to read — an ordinary thing to do, saying nothing about
+    /// any package. Reporting it would put a line on the stderr of every run
+    /// that tidied up a requirements file, and a note that fires on ordinary
+    /// work is one every reader learns to skip.
+    #[test]
+    fn a_manifest_the_change_deletes_is_not_reported_as_unreadable() {
+        let dir = repo_with(&[
+            ("requirements.txt", "ruff==0.4.0\n"),
+            ("requirements-dev.txt", "pytest==8.0\n"),
+        ]);
+        fs::remove_file(dir.path().join("requirements-dev.txt")).expect("remove");
+        let registry = StubRegistry::default();
+
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+
+        assert_eq!(outcome.code, 0);
+        assert!(
+            outcome.unreadable.is_empty(),
+            "a deletion was reported as a failure to read: {:?}",
+            outcome.unreadable
+        );
+    }
+
+    /// A run with nothing wrong reports nothing, so the note stays meaningful.
+    #[test]
+    fn a_readable_manifest_produces_no_note() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write(
+            dir.path(),
+            "requirements.txt",
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 1);
+        assert!(outcome.unreadable.is_empty(), "{:?}", outcome.unreadable);
     }
 
     /// A directory with a space in its name is ordinary, and git terminates
@@ -456,7 +631,8 @@ mod tests {
             "ruff==0.4.0\nrequestz==2.31.0\n",
         );
 
-        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 1, "output was: {output}");
         assert!(
@@ -478,7 +654,8 @@ mod tests {
             "ruff==0.4.0\nrequestz==2.31.0\n",
         );
 
-        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 1, "output was: {output}");
         assert!(
@@ -513,7 +690,8 @@ mod tests {
             &["mv", "old/requirements.txt", "new/requirements.txt"],
         );
 
-        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 1, "output was: {output}");
         assert!(
@@ -534,7 +712,8 @@ mod tests {
             "[project]\ndependencies = [\"ruff\", \"requestz\"]\n",
         );
 
-        let (output, code) = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 1, "output was: {output}");
         assert!(
@@ -555,7 +734,8 @@ mod tests {
         write(dir.path(), "src/app.py", "import os\nimport requestz\n");
         let registry = StubRegistry::default();
 
-        let (output, code) = run(dir.path(), &registry, false).expect("check runs");
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 0, "output was: {output}");
         assert!(registry.asked().is_empty(), "asked: {:?}", registry.asked());
@@ -567,7 +747,8 @@ mod tests {
         let dir = repo_with_requirements("ruff==0.4.0\nrequestz==2.31.0\n");
         let registry = StubRegistry::default();
 
-        let (output, code) = run(dir.path(), &registry, false).expect("check runs");
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
 
         assert_eq!(code, 0, "output was: {output}");
         assert!(output.contains("no findings"), "output was: {output}");
@@ -616,7 +797,7 @@ mod tests {
         for (name, before, after) in scenarios {
             let dir = repo_with(&[(name, before)]);
             write(dir.path(), name, after);
-            findings.extend(collect(dir.path(), &registry).expect("check runs"));
+            findings.extend(collect(dir.path(), &registry).expect("check runs").0);
         }
 
         assert_eq!(
