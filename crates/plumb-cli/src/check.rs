@@ -936,9 +936,19 @@ mod tests {
         let taxonomy = fs::read_to_string(&taxonomy_path)
             .unwrap_or_else(|error| panic!("reading {}: {error}", taxonomy_path.display()));
 
-        // Every shape of input this gate emits a finding for. A finding built
-        // on a path not covered here would escape the check, so a new emission
-        // site means a new row.
+        // Every emission site in `collect` that a UTF-8 fixture can reach.
+        // A finding built on a path not covered here would escape the check, so
+        // a new emission site means a new row.
+        //
+        // The sentence used to claim all of them and list two, which is the
+        // kind of comment that makes a gap read as covered. There are four
+        // sites: the package finding, a gap on the after-side, the
+        // HEAD-unparseable finding, and a file that could not be decoded. The
+        // first three are below. The fourth needs a body that is not valid
+        // UTF-8, which a `&str` table cannot hold; it builds the same
+        // `manifest_not_fully_read` finding as the two rows that follow it —
+        // same rule, same tier, same citation — and is pinned end to end by
+        // `a_manifest_that_is_not_utf8_is_reported_rather_than_skipped_silently`.
         let scenarios: &[(&str, &str, &str)] = &[
             (
                 "requirements.txt",
@@ -956,6 +966,14 @@ mod tests {
                 "pyproject.toml",
                 "[project]\nname = \"demo\"\n",
                 "[tool.poetry.dependencies]\nrequests = \"^2.0\"\n",
+            ),
+            // The HEAD-unparseable finding, which is built on the before-side
+            // and so is reached by no row above: the after-side here parses and
+            // has no gap of its own.
+            (
+                "pyproject.toml",
+                "[project]\nname = \"demo\"\n{{{",
+                "[project]\nname = \"demo\"\ndependencies = [\"ruff\"]\n",
             ),
         ];
 
@@ -1135,6 +1153,37 @@ mod tests {
             "output was: {}",
             outcome.report
         );
+        assert!(registry.asked().is_empty(), "asked: {:?}", registry.asked());
+    }
+
+    /// The structural rule reaches the report, and the report names the table.
+    ///
+    /// End to end rather than at the parser, because the value of naming the
+    /// table is only realised in the sentence a user reads. `[tool.pdm]` is one
+    /// of five tools that reached exit 0 with `plumb: no findings` over a
+    /// package that does not exist, and none of them is named anywhere in the
+    /// code — the path in the message comes from the file.
+    #[test]
+    fn a_dependency_table_under_tool_warns_and_names_it() {
+        let dir = repo_with(&[("pyproject.toml", "[project]\nname = \"demo\"\n")]);
+        write(
+            dir.path(),
+            "pyproject.toml",
+            "[project]\nname = \"demo\"\n\n[tool.pdm.dev-dependencies]\ntest = [\"requestz\"]\n",
+        );
+        let registry = StubRegistry::default();
+
+        let outcome = run(dir.path(), &registry, false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert!(
+            output.contains("tool.pdm.dev-dependencies"),
+            "output was: {output}"
+        );
+        // The gap reports the blind spot; it does not close it. The name inside
+        // the unread table is still never looked up, and saying so here keeps
+        // the warning from being mistaken for coverage.
         assert!(registry.asked().is_empty(), "asked: {:?}", registry.asked());
     }
 
