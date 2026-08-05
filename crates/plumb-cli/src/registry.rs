@@ -387,16 +387,83 @@ mod tests {
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
     }
 
+    /// Long enough past either lifetime that no entry can still be fresh,
+    /// derived from the constants so the tests keep pinning the property when
+    /// the numbers change.
+    fn well_past_every_lifetime() -> i64 {
+        let longest = EXISTS_TTL.max(MISSING_TTL).as_secs();
+        i64::try_from(longest).expect("a lifetime fits an i64") * 2
+    }
+
+    /// The asymmetry, one level out from the lifetimes themselves. Offline
+    /// there is no way to refresh anything, so the choice is between the old
+    /// answer and no answer. A stale `Exists` only fails open, so honouring it
+    /// costs nothing and keeps the gate informative; a stale `Missing` would
+    /// block a build on evidence that cannot be checked, so it must not be.
+    ///
+    /// Returning `Unknown` to everything is not a safer gate, it is no gate.
     #[test]
-    fn an_expired_exists_is_not_returned_either() {
+    fn offline_honours_a_stale_answer_only_when_it_cannot_block() {
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("registry.json");
-        let long_ago = 120 * 24 * 60 * 60;
-        std::fs::write(&cache_path, cache_json(&[("ruff", true, long_ago)])).expect("write cache");
+        let age = well_past_every_lifetime();
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("ruff", true, age), ("requestz", false, age)]),
+        )
+        .expect("write cache");
 
         let registry = PyPiRegistry::new(true, cache_path);
 
-        assert_eq!(registry.exists("ruff"), Existence::Unknown);
+        assert_eq!(registry.exists("ruff"), Existence::Exists);
+        assert_eq!(registry.exists("requestz"), Existence::Unknown);
+    }
+
+    /// Honouring is a read, not a refresh. The timestamp records when PyPI
+    /// actually answered, and rewriting it on every offline read would be both
+    /// a lie and a leak: each run would push the entry forward, so it would
+    /// never expire and would never be re-queried once the network returned.
+    #[test]
+    fn honouring_a_stale_answer_does_not_refresh_its_timestamp() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let seeded = cache_json(&[("ruff", true, well_past_every_lifetime())]);
+        std::fs::write(&cache_path, &seeded).expect("write cache");
+
+        let registry = PyPiRegistry::new(true, cache_path.clone());
+        assert_eq!(registry.exists("ruff"), Existence::Exists);
+
+        let after = std::fs::read_to_string(&cache_path).expect("read cache");
+        assert_eq!(after, seeded, "reading a stale answer rewrote the cache");
+    }
+
+    /// Online the concession does not apply: fresh data is one request away,
+    /// so there is no case for answering from an expired entry.
+    #[test]
+    fn an_expired_answer_is_re_queried_when_the_network_is_there() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("ruff", true, well_past_every_lifetime())]),
+        )
+        .expect("write cache");
+        let registry = PyPiRegistry::new(false, cache_path);
+        let attempts = std::cell::Cell::new(0u32);
+        let answers_missing = |_: &str| {
+            attempts.set(attempts.get() + 1);
+            Outcome::Answered(Existence::Missing)
+        };
+
+        assert_eq!(
+            registry.exists_via("ruff", answers_missing),
+            Existence::Missing
+        );
+        assert_eq!(
+            attempts.get(),
+            1,
+            "a stale answer was honoured with the network up"
+        );
     }
 
     /// A clock that jumps backwards, or a hand-edited file, leaves entries
