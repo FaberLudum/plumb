@@ -63,21 +63,44 @@ mod tests {
     use std::fs;
     use std::process::Command;
 
+    /// Runs a git command in `dir` and asserts it succeeded.
+    ///
+    /// Asserting matters more than it looks. `.output().expect(..)` only checks
+    /// that git *spawned*; a command that runs and exits 128 is accepted
+    /// silently. A global `commit.gpgsign` with no usable key, or a global
+    /// `core.hooksPath`, then leaves the fixture with an unborn HEAD — and
+    /// `show_at_head_returns_none_for_a_new_file` passes against that, because
+    /// `git show HEAD:…` exits 128 and is mapped to `Ok(None)`. The one test
+    /// pinning the absence contract is the one that survives a fixture that
+    /// never ran.
+    ///
+    /// Ambient config is neutralised for the same reason: point
+    /// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not
+    /// exist so the fixture cannot inherit this machine's settings.
+    fn run_git(dir: &Path, args: &[&str]) {
+        let no_config = dir.join("no-such-gitconfig");
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", &no_config)
+            .env("GIT_CONFIG_SYSTEM", &no_config)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temp dir");
-        let run = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .current_dir(dir.path())
-                .output()
-                .expect("git runs");
-        };
-        run(&["init", "-b", "main"]);
-        run(&["config", "user.email", "test@example.com"]);
-        run(&["config", "user.name", "Test"]);
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
         fs::write(dir.path().join("requirements.txt"), "ruff==0.4.0\n").expect("write");
-        run(&["add", "-A"]);
-        run(&["commit", "-m", "initial"]);
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "initial"]);
         dir
     }
 
@@ -106,15 +129,30 @@ mod tests {
             "ruff==0.4.0\nrequestz==2.31.0\n",
         )
         .expect("write");
-        Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(dir.path())
-            .output()
-            .expect("git runs");
+        run_git(dir.path(), &["add", "-A"]);
 
         let diff = working_diff(dir.path()).expect("diff succeeds");
 
         assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff}");
+    }
+
+    /// `git diff` writes hunk bytes verbatim for anything its NUL heuristic
+    /// calls text, so one Latin-1 or Shift-JIS file changed anywhere in the
+    /// repository must not fail the whole gate. A lone `0xE9` is valid Latin-1,
+    /// invalid UTF-8, and carries no NUL, so git emits it raw rather than
+    /// suppressing the hunk as binary.
+    #[test]
+    fn working_diff_tolerates_non_utf8_content() {
+        let dir = init_repo();
+        let latin1 = dir.path().join("latin1.txt");
+        fs::write(&latin1, [0xE9, b'\n']).expect("write");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "add a latin-1 file"]);
+        fs::write(&latin1, [0xE9, 0xE9, b'\n']).expect("write");
+
+        let diff = working_diff(dir.path()).expect("diff succeeds despite non-UTF-8 content");
+
+        assert!(diff.contains("latin1.txt"), "diff was: {diff}");
     }
 
     #[test]
