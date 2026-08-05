@@ -307,6 +307,21 @@ index 1111111..2222222 100644
     }
 
     #[test]
+    fn keeps_an_added_line_whose_content_starts_with_two_pluses() {
+        const DIFF: &str = "\
+diff --git a/src/counter.c b/src/counter.c
+index 1111111..2222222 100644
+--- a/src/counter.c
++++ b/src/counter.c
+@@ -1 +1,2 @@
+ int total = 0;
++++i;
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files[0].added_lines, vec!["++i;"]);
+    }
+
+    #[test]
     fn skips_a_file_the_diff_deletes() {
         const DIFF: &str = "\
 diff --git a/old.py b/old.py
@@ -326,8 +341,19 @@ The header guard is deliberately absent from the implementation below. The
 `+++ ` branch already consumes post-image headers, which git always emits with
 a trailing space. A second `starts_with("+++")` guard inside the added-line
 branch would catch nothing git produces and would silently drop any real added
-line whose content begins with `++` — `++i;` in C, or a nested diff in a
-fixture. `keeps_an_added_line_whose_content_starts_with_a_plus` pins that.
+line whose content begins with `++`.
+
+Mind the plus count, because the first version of this note got it wrong.
+Content `+i;` appears in the diff as `++i;`, which the guard never matched —
+that case is safe either way and is pinned by
+`keeps_an_added_line_whose_content_starts_with_a_plus`. The defect needs
+content `++i;`, which appears as `+++i;`; that is what
+`keeps_an_added_line_whose_content_starts_with_two_pluses` pins, and it is the
+test that goes red against the guard.
+
+The added-line branch is a let-chain rather than a nested `if let`. Nesting
+trips clippy's `collapsible_if` under `-D warnings`; let-chains are stable in
+edition 2024 and the semantics are identical.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -363,10 +389,10 @@ pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
                 path: path.to_string(),
                 added_lines: Vec::new(),
             });
-        } else if let Some(added) = line.strip_prefix('+') {
-            if let Some(current) = files.last_mut() {
-                current.added_lines.push(added.to_string());
-            }
+        } else if let Some(added) = line.strip_prefix('+')
+            && let Some(current) = files.last_mut()
+        {
+            current.added_lines.push(added.to_string());
         }
     }
 
