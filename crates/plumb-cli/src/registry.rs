@@ -212,6 +212,59 @@ mod tests {
         assert_eq!(second.exists("requestz"), Existence::Missing);
     }
 
+    /// The rule the whole gate rests on: a name that comes back `Missing`
+    /// blocks a build. So every way of *failing to ask* must land on
+    /// `Unknown`, and a 5xx, a dead host or a socket error are all failures to
+    /// ask. Reading any of them as `Missing` would turn one proxy outage into
+    /// a blocking finding on every dependency at once.
+    #[test]
+    fn only_a_404_reads_as_missing() {
+        assert_eq!(classify(Ok(())), Existence::Exists);
+        assert_eq!(
+            classify(Err(ureq::Error::StatusCode(404))),
+            Existence::Missing
+        );
+        assert_eq!(
+            classify(Err(ureq::Error::StatusCode(500))),
+            Existence::Unknown
+        );
+        assert_eq!(
+            classify(Err(ureq::Error::StatusCode(403))),
+            Existence::Unknown
+        );
+        assert_eq!(classify(Err(ureq::Error::HostNotFound)), Existence::Unknown);
+        assert_eq!(
+            classify(Err(ureq::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::ConnectionRefused
+            )))),
+            Existence::Unknown
+        );
+    }
+
+    /// `Unknown` says something about this run's network, not about the
+    /// package, so recording it would freeze one outage into every later run.
+    #[test]
+    fn recording_stores_definite_answers_and_ignores_unknown() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = PyPiRegistry::new(false, cache_path.clone());
+
+        registry.record("nowhere", Existence::Unknown);
+        assert!(
+            !cache_path.exists(),
+            "an unknown answer created a cache file"
+        );
+
+        registry.record("ruff", Existence::Exists);
+        registry.record("requestz", Existence::Missing);
+
+        let reloaded = PyPiRegistry::new(true, cache_path);
+        assert_eq!(reloaded.exists("ruff"), Existence::Exists);
+        assert_eq!(reloaded.exists("requestz"), Existence::Missing);
+        // Offline, so this can only be a cache miss, not a fresh lookup.
+        assert_eq!(reloaded.exists("nowhere"), Existence::Unknown);
+    }
+
     /// Callers hold the registry as `&dyn Registry` so they can inject a stub,
     /// which only compiles while the trait stays object safe. A method taking
     /// or returning `Self`, or a generic parameter, would break that silently
