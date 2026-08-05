@@ -4,6 +4,7 @@
 use clap::Parser;
 
 mod git;
+mod registry;
 
 #[derive(Parser)]
 #[command(
