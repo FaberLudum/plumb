@@ -696,6 +696,14 @@ mod tests {
     fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temp dir");
         run_git(dir.path(), &["init", "-b", "main"]);
+        // Per-directory attributes outrank the global attributes file and the
+        // XDG default at `~/.config/git/attributes`. Without this, a developer
+        // whose global attributes mark `*.txt` as `binary` or `-diff` gets a
+        // suppressed hunk from `working_diff` — which honours ambient config,
+        // as production does — while the fixture neutralises that config for
+        // its own commands. Pinning it here removes the one variable the tests
+        // cannot otherwise control.
+        fs::write(dir.path().join(".gitattributes"), "* diff\n").expect("write");
         run_git(dir.path(), &["config", "user.email", "test@example.com"]);
         run_git(dir.path(), &["config", "user.name", "Test"]);
         fs::write(dir.path().join("requirements.txt"), "ruff==0.4.0\n").expect("write");
@@ -1223,7 +1231,7 @@ pub mod deps;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core deps`
-Expected: PASS, five tests.
+Expected: PASS, four tests.
 
 - [ ] **Step 5: Commit**
 
