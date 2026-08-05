@@ -590,6 +590,63 @@ ruff = "^0.4"
         assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
     }
 
+    /// A group table is a gap whenever it exists, which is not the rule the
+    /// main Poetry table gets.
+    ///
+    /// The asymmetry is Poetry's, not an inconsistency here. With
+    /// `[project].dependencies` present, `[tool.poetry.dependencies]` "is only
+    /// used to enrich project.dependencies for locking" and cannot add a name,
+    /// so warning on it would fire on a project Plumb reads correctly. A group
+    /// has no `[project]` counterpart to be enriched *into* — PEP 621 has no
+    /// notion of dependency groups — so its contents are unread whatever else
+    /// the file says.
+    #[test]
+    fn poetry_group_dependencies_are_a_gap_beside_project_dependencies() {
+        let text = r#"
+[project]
+name = "demo"
+dependencies = ["ruff==0.4.0"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+"#;
+        let manifest = parse_pyproject(text);
+        assert_eq!(manifest.names, set(&["ruff"]));
+        assert_eq!(manifest.gaps, vec![Gap::PoetryDependencies]);
+    }
+
+    /// A group that declares no dependencies is not evidence of any.
+    ///
+    /// `[tool.poetry.group.dev]` carries settings of its own — `optional` is
+    /// the common one — and a group with only those declares nothing. Keying
+    /// the gap on the group table rather than on its `dependencies` child is
+    /// the same warning-on-absence mistake as keying it on `[tool.poetry]`.
+    #[test]
+    fn a_poetry_group_without_a_dependencies_table_is_not_a_gap() {
+        let text = "[tool.poetry.group.dev]\noptional = true\n";
+        let manifest = parse_pyproject(text);
+        assert!(manifest.names.is_empty());
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
+    /// One unread Poetry layout is one gap, however many tables express it.
+    ///
+    /// The ordinary Poetry project has both — a main table and a dev group —
+    /// and the reader's action is the same for both, so two findings on one
+    /// file would be one finding and one repetition.
+    #[test]
+    fn the_two_poetry_tables_raise_a_single_gap() {
+        let text = r#"
+[tool.poetry.dependencies]
+requests = "^2.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+"#;
+        let manifest = parse_pyproject(text);
+        assert_eq!(manifest.gaps, vec![Gap::PoetryDependencies]);
+    }
+
     #[test]
     fn dependency_groups_are_a_gap_even_beside_a_read_project_table() {
         let text = r#"
@@ -668,10 +725,18 @@ dev = ["pytest"]
 
     #[test]
     fn a_gap_says_what_was_not_read() {
+        // One variant covers two tables, so the sentence has to name both:
+        // a reader whose file has only groups must not be sent looking for a
+        // `[tool.poetry.dependencies]` that is not there.
         assert!(
             Gap::PoetryDependencies
                 .describe()
                 .contains("tool.poetry.dependencies")
+        );
+        assert!(
+            Gap::PoetryDependencies
+                .describe()
+                .contains("tool.poetry.group")
         );
         assert!(
             Gap::DependencyGroups
