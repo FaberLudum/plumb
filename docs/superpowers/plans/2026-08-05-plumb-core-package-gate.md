@@ -290,8 +290,44 @@ index 2222222..3333333 100644
     fn returns_empty_for_an_empty_diff() {
         assert!(parse_unified_diff("").is_empty());
     }
+
+    #[test]
+    fn keeps_an_added_line_whose_content_starts_with_a_plus() {
+        const DIFF: &str = "\
+diff --git a/src/counter.c b/src/counter.c
+index 1111111..2222222 100644
+--- a/src/counter.c
++++ b/src/counter.c
+@@ -1 +1,2 @@
+ int total = 0;
+++i;
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files[0].added_lines, vec!["+i;"]);
+    }
+
+    #[test]
+    fn skips_a_file_the_diff_deletes() {
+        const DIFF: &str = "\
+diff --git a/old.py b/old.py
+deleted file mode 100644
+index 3333333..0000000
+--- a/old.py
++++ /dev/null
+@@ -1 +0,0 @@
+-print('gone')
+";
+        assert!(parse_unified_diff(DIFF).is_empty());
+    }
 }
 ```
+
+The header guard is deliberately absent from the implementation below. The
+`+++ ` branch already consumes post-image headers, which git always emits with
+a trailing space. A second `starts_with("+++")` guard inside the added-line
+branch would catch nothing git produces and would silently drop any real added
+line whose content begins with `++` — `++i;` in C, or a nested diff in a
+fixture. `keeps_an_added_line_whose_content_starts_with_a_plus` pins that.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -328,9 +364,6 @@ pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
                 added_lines: Vec::new(),
             });
         } else if let Some(added) = line.strip_prefix('+') {
-            if line.starts_with("+++") {
-                continue;
-            }
             if let Some(current) = files.last_mut() {
                 current.added_lines.push(added.to_string());
             }
