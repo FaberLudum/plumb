@@ -544,6 +544,30 @@ line-length = 100
         assert_eq!(manifest.gaps, vec![Gap::PoetryDependencies]);
     }
 
+    /// The evidence a Poetry gap needs is a dependency table, not Poetry.
+    ///
+    /// Without this, the condition can be relaxed from
+    /// `[tool.poetry.dependencies]` to `[tool]`, `[tool.poetry]` or "this looks
+    /// like a Poetry project" and every test still passes — the two Poetry
+    /// tests either have no `[tool]` table at all or have `[project]`
+    /// dependencies that suppress the gap anyway. A file whose only Poetry
+    /// content is metadata declares no dependencies, and warning on it is the
+    /// warning-on-absence this module is not allowed to do.
+    #[test]
+    fn a_poetry_table_that_declares_no_dependencies_is_not_a_gap() {
+        let text = r#"
+[tool.poetry]
+name = "demo"
+version = "0.1.0"
+
+[tool.poetry.scripts]
+demo = "demo:main"
+"#;
+        let manifest = parse_pyproject(text);
+        assert!(manifest.names.is_empty());
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
     #[test]
     fn a_poetry_table_beside_project_dependencies_is_not_a_gap() {
         let text = r#"
@@ -607,6 +631,25 @@ dev = ["pytest"]
                 "line: {line}"
             );
         }
+    }
+
+    /// `--requirement` has to be followed by `=` or whitespace.
+    ///
+    /// Both halves of that guard, because each fails a different way. A long
+    /// form separated by a tab is an include and a version that only accepts a
+    /// space misses it — the silent miss this module exists to stop. An option
+    /// whose name merely begins with `--requirement` is not an include, and a
+    /// bare `strip_prefix` would report one, naming a path that is really the
+    /// tail of an option.
+    #[test]
+    fn the_long_include_option_is_matched_whole() {
+        assert_eq!(
+            parse_requirements("--requirement\tbase.txt\n").gaps,
+            vec![Gap::Include("base.txt".to_string())]
+        );
+
+        let manifest = parse_requirements("--requirements-of-some-future-pip base.txt\n");
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
     }
 
     #[test]
