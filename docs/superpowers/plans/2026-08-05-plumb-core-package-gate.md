@@ -438,8 +438,11 @@ pub struct ChangedFile {
 
 /// Parses `git diff` output into one entry per changed file.
 ///
-/// Only the post-image path (`+++ b/...`) and added lines are extracted; hunk
-/// offsets and removals are deliberately ignored.
+/// A file is recorded when a `+++ b/...` post-image header directly follows a
+/// `--- ` pre-image header, which git always emits alongside it. Requiring the
+/// pair keeps an added line whose content begins with `++ ` from being mistaken
+/// for a header. Only the post-image path and added lines are extracted; hunk
+/// offsets, removals and renames are deliberately ignored.
 pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
     let mut after_pre_image_header = false;
