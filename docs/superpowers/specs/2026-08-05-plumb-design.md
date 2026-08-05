@@ -359,6 +359,39 @@ From phase 3 onward the framework is built under its own rules. It is itself
 AI-generated code and is exactly the kind of project the taxonomy describes.
 If it cannot survive its own gates, that is a finding worth having early.
 
+### 12.1 Self-application, and its limit
+
+Self-application is partial by construction. Plumb is written in Rust while
+the planned gate packs target Python, TypeScript and .NET, so the Tier A
+dependency gate cannot run on Plumb until a crates.io ecosystem pack exists.
+The language-agnostic gates — boundaries, volume and coupling, adapter drift,
+index freshness — apply from the moment they are built.
+
+**Dogfooding proves usability, not efficacy.** A tool whose only evidence is
+that its own repository passes its own gates is a sample of one, judged by its
+authors. Worse, it invites tuning Tier B thresholds until the home repository
+goes green, which is precisely how a tool becomes self-confirming.
+
+The rule that prevents this: **thresholds are calibrated on external
+repositories, never on this one.** Success criterion 3 (§10) requires a
+control repository we did not write.
+
+What self-application does earn is credibility of a different kind. A quality
+tool whose own repository fails its own gates is dead on first inspection, and
+running the gates in this project's CI is the cheapest possible demonstration
+that they work at all.
+
+### 12.2 This repository as an H3 dataset
+
+Plumb is being built by AI across many sessions, with full git history. That
+is exactly the data H3 needs and almost nobody keeps: a longitudinal record
+with session boundaries, on a single project, over time.
+
+The Tier C instrumentation (§5.3) runs here first. It is not dogfooding — the
+project becomes the first dataset for a hypothesis the literature has never
+tested. Whatever it shows, including nothing, is worth publishing alongside
+the tool.
+
 ## 13. Risks
 
 **Tier B thresholds are uncalibrated.** Volume and coupling deltas have no
