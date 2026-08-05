@@ -268,6 +268,51 @@ const NON_INSTALLING_KEYS: [&str; 5] = [
 /// documented schema.
 const NOT_A_DEPENDENCY_TABLE: [&str; 1] = ["tool.ruff.analyze.include-dependencies"];
 
+/// Namespaces under `[tool]` whose dependency tables name conda packages.
+const CONDA_NAMESPACES: [&str; 2] = ["conda-lock", "pixi"];
+
+/// pixi's own marker for a table that names PyPI packages instead of conda
+/// ones.
+const PYPI_KEY_PREFIX: &str = "pypi-";
+
+/// Whether a matched key names conda packages rather than PyPI ones.
+///
+/// This is the `[build-system].requires` argument on a different axis. A
+/// hallucinated conda package is a real defect, but conda is a *different
+/// registry* — a separate rule with separate evidence, not an unread part of
+/// the PyPI runtime set this gate reasons about.
+///
+/// It is also the one exclusion that would otherwise produce a warning with no
+/// resolution path. Every other gap ends when someone teaches Plumb the format;
+/// this one never would, because Plumb will not look a conda name up on PyPI.
+/// A pixi or conda-lock project would carry a permanent warning it could do
+/// nothing about — the warning nobody reads, landing on users who did nothing
+/// wrong.
+///
+/// By namespace rather than by path, which is the opposite choice from
+/// [`NOT_A_DEPENDENCY_TABLE`] and is deliberate. pixi nests its scopes —
+/// `feature.<name>`, `target.<platform>`, `package`, and their combinations,
+/// so `tool.pixi.feature.docs.target.osx-64.dependencies` is an ordinary path —
+/// which makes a path list combinatorial and certain to go stale the next time
+/// pixi adds a scope.
+///
+/// The direction is still right. The `pypi-` prefix is pixi's own marker for
+/// the registry, so keying the carve-out to that *positive* evidence means a
+/// new PyPI table is caught the day it ships, and only the conda side is
+/// silent. The global property is untouched too: this names two documented
+/// namespaces, so every tool outside them still warns by default.
+///
+/// The namespace is compared whole. A prefix test would hand
+/// `[tool.pixiedust]` an exclusion it was never granted, which is a silent
+/// false negative bought with a fix for a false warning.
+fn is_conda_dependency_path(segments: &[&str], key: &str) -> bool {
+    segments.first() == Some(&"tool")
+        && segments
+            .get(1)
+            .is_some_and(|namespace| CONDA_NAMESPACES.contains(namespace))
+        && !key.starts_with(PYPI_KEY_PREFIX)
+}
+
 /// Finds dependency declarations anywhere under `[tool]`, by the shape of the
 /// key rather than by the name of the tool.
 ///
@@ -307,6 +352,7 @@ fn tool_dependency_paths(document: &toml::Table) -> Vec<String> {
                 // configuration. Report it and stop — see 1 and 2 above.
                 let path = child.join(".");
                 if !is_handled_poetry_path(&child)
+                    && !is_conda_dependency_path(&child, key)
                     && !NON_INSTALLING_KEYS.contains(&key.as_str())
                     && !NOT_A_DEPENDENCY_TABLE.contains(&path.as_str())
                     && (value.is_array() || value.as_table().is_some())
