@@ -62,6 +62,14 @@ pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
             // would let `index …`, `new file mode …` and the `--- ` line fall
             // through to the added-line branch below.
             if let Some(path) = line.strip_prefix("+++ ") {
+                // A tab ends the filename field. git appends one whenever the
+                // path contains a space, and a POSIX unified diff carries a
+                // timestamp after it. Keeping either makes the path match no
+                // manifest, which is a silently unchecked file rather than a
+                // reported one. A path that really contains a tab arrives
+                // C-style quoted, so an unquoted tab here is always the
+                // terminator.
+                let path = path.split_once('\t').map_or(path, |(name, _)| name);
                 let path = path.strip_prefix("b/").unwrap_or(path);
                 if path != "/dev/null" {
                     files.push(ChangedFile {
