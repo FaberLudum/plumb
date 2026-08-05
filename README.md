@@ -51,16 +51,56 @@ Proposing a Tier A rule on a preprint is a rejection. Propose it as Tier B.
 
 ## Status
 
-**Early, and honest about it.** The first rule — every package a change adds
-must actually exist on its registry — has its components built and tested, but
-they are not yet wired into a working command. `plumb --version` is the only
-thing the binary does today.
-
-What exists and is tested: git diff parsing, Python manifest parsing for
-`requirements*.txt` and PEP 621 `pyproject.toml`, added-dependency computation,
-findings with tier-based exit codes, and a PyPI client with an on-disk cache,
-an expiry policy and an offline mode. 81 tests, no network access from any of
+**Early, and honest about it.** One rule is built and runs: every package a
+change adds must actually exist on its registry. `plumb check --diff` asks git
+for the paths a change touched, reads each Python manifest among them as it
+stands and as it stands at HEAD, looks up only the names the change adds, and
+blocks on a name PyPI does not have. 124 tests, no network access from any of
 them.
+
+```console
+$ plumb check --diff
+blocking: package `reqeusts` does not exist on PyPI [package-exists]
+  requirements.txt
+  evidence: taxonomy §4.1
+$ echo $?
+1
+```
+
+`--json` emits the same findings as an array, `--offline` never contacts a
+registry. Exit codes are a fixed contract: `0` clean, `1` blocking, `2`
+warnings only. A run that could not happen — not a repository, no git — exits
+outside that contract instead, so a broken gate can never be read as a clean
+one.
+
+What it does not do yet, stated because a gate that stays quiet about its blind
+spots is worse than one that has none:
+
+- PyPI only. TypeScript and .NET manifests are the same shape of code, one
+  ecosystem at a time.
+- Three filenames, at any depth: `requirements.txt`, `requirements-*.txt` and
+  `pyproject.toml`. From a `pyproject.toml` it reads PEP 621 `[project]`
+  `dependencies` and `optional-dependencies`, nothing else.
+  `requirements_dev.txt` and `requirements.dev.txt` are knowingly given up —
+  prose and manifest are indistinguishable by name, and parsing prose
+  manufactures blocking findings, which is the more expensive mistake.
+- Two of the formats it does not read are worse than unread. A Poetry
+  `pyproject.toml` with no `[project]` table is recognised as a manifest and
+  read as declaring nothing, so every dependency it gains passes unexamined and
+  unreported; a `requirements/base.txt` layout is not recognised at all,
+  equally quietly. Both are silent false negatives on a blocking gate, which is
+  the failure this project exists to catch, and they are the next thing to fix.
+  PEP 735 `[dependency-groups]` and `[build-system].requires` are simply
+  unread.
+- Two known false positives, both of which block a build that is fine. A
+  requirement given as a direct URL (`name @ https://…`) yields a name the
+  index does not have. And moving a manifest without editing it re-checks every
+  name in it, because nothing stands at its new path in HEAD — so a package
+  from a private index blocks a rename that changed no dependency at all. That
+  second one is a trade taken on purpose: before it, a manifest moved into
+  place carried its additions past the gate unlooked-at.
+- `git diff HEAD` reports tracked changes only, so a manifest that has never
+  been staged is invisible.
 
 What the first rule rests on: Spracklen et al. (USENIX Security 2025) measured
 19.7% of packages referenced by code-generating models as non-existent, across
@@ -81,15 +121,16 @@ Rust 1.97, edition 2024.
 Those are two different things and the numbers invite confusion. `1.97` is the
 compiler, released July 2026 — current stable. `2024` is the language edition,
 of which exactly four exist: 2015, 2018, 2021 and 2024. There is no newer one
-to adopt. Dependencies track current releases, none is pinned by hand.
+to adopt.
 
 ```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-```bash
-cargo clippy --workspace --all-targets --locked -- -D warnings
-```
+The version is not repeated in those commands or in CI: `rust-toolchain.toml`
+names it, and `rustup toolchain install` installs what that file selects.
 
 Dependencies track current releases and none is pinned by hand. `Cargo.lock` is
 committed and builds use `--locked`. Every third-party crate has a row in
@@ -100,13 +141,16 @@ not enough — Plumb's own Tier A rule, applied to Plumb.
 
 Plumb makes exactly one class of outbound request: resolving package names
 against public registries. Nothing else leaves your machine, and there is no
-telemetry. Registry answers are cached on disk, and `--offline` disables
-lookups entirely — unresolved names are then reported as unknown rather than as
-violations.
+telemetry. Registry answers are cached on disk under `.plumb/cache/`, and
+`--offline` disables lookups entirely.
 
 An unreachable network is never a rule violation. A blocking gate that fails
 when the network hiccups gets disabled within a week, and then catches nothing
-at all.
+at all. So a name that cannot be resolved yields no finding — including every
+name in an offline run with a cold cache, which will report nothing and exit
+`0`. An offline run that answered from cache entries past their lifetime says
+so on stderr; one that could not answer at all does not, and that is a gap
+worth knowing about before wiring `--offline` into CI.
 
 ## Contributing
 
