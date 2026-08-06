@@ -17,6 +17,27 @@ pub struct Artefacts {
     pub index: String,
 }
 
+/// The project name declared in `architecture.md`'s first line.
+///
+/// `greenfield` always writes that line as `# Architecture — <name>`, so
+/// parsing it back out is the one reliable way for `plumb adapters` to title
+/// its generated files with the name the user actually answered at `plumb
+/// init` — the repository directory name is a coincidence, not a source of
+/// truth, and the two drift the moment a checkout is renamed or cloned under
+/// a different name. `None` when the first line does not have that shape (or
+/// the document is empty), so a caller can fall back to something else
+/// instead of titling a file with an empty or wrong name.
+pub fn project_name_of(architecture: &str) -> Option<String> {
+    const PREFIX: &str = "# Architecture — ";
+    let first_line = architecture.lines().next()?;
+    let name = first_line.strip_prefix(PREFIX)?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 pub fn greenfield(bootstrap: &Bootstrap) -> Artefacts {
     let mut architecture = format!(
         "# Architecture — {}\n\n\
@@ -110,6 +131,26 @@ mod tests {
             "the empty index must name the command that fills it:\n{}",
             artefacts.index
         );
+    }
+
+    #[test]
+    fn project_name_of_reads_the_name_after_the_architecture_heading() {
+        assert_eq!(
+            project_name_of("# Architecture — demo-project\n\nModules...\n"),
+            Some("demo-project".to_string())
+        );
+    }
+
+    #[test]
+    fn project_name_of_returns_none_when_the_first_line_does_not_match_the_shape() {
+        assert_eq!(project_name_of("# Something else\n\nbody\n"), None);
+        assert_eq!(project_name_of("Architecture — demo\n"), None);
+    }
+
+    #[test]
+    fn project_name_of_returns_none_for_an_empty_document() {
+        assert_eq!(project_name_of(""), None);
+        assert_eq!(project_name_of("# Architecture — \n"), None);
     }
 
     #[test]

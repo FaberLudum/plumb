@@ -11,16 +11,20 @@
 
 use anyhow::{Context, Result, bail};
 use plumb_core::adapters::{opens_with_marker, render};
-use plumb_core::layer1::Artefacts;
+use plumb_core::layer1::{Artefacts, project_name_of};
 use std::io::Write;
 use std::path::Path;
 
 pub fn run(repo: &Path, force: bool, mut output: impl Write) -> Result<()> {
     let artefacts = read_artefacts(repo)?;
-    let project_name = repo
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string());
+    // `.plumb/architecture.md` carries the name `plumb init` actually
+    // captured; the repository directory name is only a fallback for the
+    // case that file does not have the expected shape.
+    let project_name = project_name_of(&artefacts.architecture).unwrap_or_else(|| {
+        repo.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "project".to_string())
+    });
     let targets = render(&project_name, &artefacts);
 
     // Guard every target before writing any, so a refusal leaves the
