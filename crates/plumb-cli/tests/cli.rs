@@ -1055,3 +1055,28 @@ fn index_without_an_agreement_points_at_init() {
         .code(70)
         .stderr(predicates::str::contains("plumb init"));
 }
+
+/// `.plumb/index.md` drifts the same way the generated instruction files do:
+/// someone scans it once with `plumb index`, then the public surface grows
+/// and nobody re-runs the scan. `check --diff` catches that too, end to end
+/// through `init`, `index` and `check` as a real user would run them.
+#[test]
+fn a_stale_index_warns_end_to_end() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    plumb_in(dir.path()).args(["init", "--defaults"]).assert().success();
+    let src = in_repo(dir.path(), "src");
+    std::fs::create_dir_all(&src).expect("mkdir");
+    std::fs::write(src.join("lib.rs"), "pub fn first() {}\n").expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    run_git(&repo(dir.path()), &["commit", "-m", "sources"]);
+    plumb_in(dir.path()).arg("index").assert().success();
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    run_git(&repo(dir.path()), &["commit", "-m", "scan"]);
+    std::fs::write(src.join("lib.rs"), "pub fn first() {}\npub fn second() {}\n").expect("write");
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(2)
+        .stdout(predicates::str::contains("index-stale"));
+}

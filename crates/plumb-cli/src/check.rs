@@ -1439,6 +1439,22 @@ mod tests {
         );
         findings.extend(drift_findings);
 
+        // The stale-index finding is emitted from a fifth site: a scanned
+        // index that a fresh scan of the tracked sources contradicts.
+        let dir = repo_with(&[("src/lib.rs", "pub fn old() {}\n")]);
+        write_full_plumb(dir.path());
+        scan_index_into_plumb(dir.path());
+        write(dir.path(), "src/lib.rs", "pub fn old() {}\npub fn brand_new() {}\n");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "grow the surface"]);
+        let stale_index_findings = collect(dir.path(), &registry).expect("check runs");
+        assert_eq!(
+            stale_index_findings.len(),
+            1,
+            "the stale-index scenario emitted the wrong number of findings: {stale_index_findings:#?}"
+        );
+        findings.extend(stale_index_findings);
+
         for finding in &findings {
             assert!(!finding.rule.is_empty(), "unnamed rule: {finding:#?}");
             assert!(!finding.message.is_empty(), "empty message: {finding:#?}");
@@ -1708,6 +1724,69 @@ mod tests {
         ] {
             fs::write(dir.join(".plumb").join(name), content).expect("write artefact");
         }
+    }
+
+    /// Scans `dir`'s tracked files into `.plumb/index.md`, the same way
+    /// `plumb index` does. A second copy of the scan loop rather than a call
+    /// into `index_cmd::run`, because that entry point also requires and
+    /// reports on `.plumb/`'s presence and writes progress lines to a
+    /// `Write` — noise this fixture has no use for. `scan_index` in
+    /// `index_cmd.rs` is the shared core both this helper's production
+    /// counterpart (the stale-index gate) and `index_cmd::run` call, so the
+    /// two cannot drift on what counts as a symbol; this test helper stays a
+    /// thin duplicate of the same loop shape for that reason.
+    fn scan_index_into_plumb(dir: &Path) {
+        use plumb_core::index::{render, symbols};
+        let mut entries = Vec::new();
+        for path in crate::git::tracked_files(dir).expect("tracked files") {
+            if let Ok(bytes) = fs::read(dir.join(&path)) {
+                let text = String::from_utf8_lossy(&bytes);
+                entries.push((path.clone(), symbols(&path, &text)));
+            }
+        }
+        fs::write(dir.join(".plumb").join("index.md"), render(&entries)).expect("write index");
+    }
+
+    #[test]
+    fn a_scanned_index_that_no_longer_matches_warns() {
+        let dir = repo_with(&[("src/lib.rs", "pub fn old() {}\n")]);
+        write_full_plumb(dir.path());
+        scan_index_into_plumb(dir.path());
+        // The public surface changes; nobody re-runs the scan.
+        write(dir.path(), "src/lib.rs", "pub fn old() {}\npub fn brand_new() {}\n");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "grow the surface"]);
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert!(output.contains("index-stale"), "output was: {output}");
+        assert!(output.contains("plumb index"), "output was: {output}");
+    }
+
+    #[test]
+    fn a_matching_scanned_index_does_not_warn() {
+        let dir = repo_with(&[("src/lib.rs", "pub fn only() {}\n")]);
+        write_full_plumb(dir.path());
+        scan_index_into_plumb(dir.path());
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
+    #[test]
+    fn a_never_scanned_placeholder_index_is_not_stale() {
+        let dir = repo_with(&[("src/lib.rs", "pub fn anything() {}\n")]);
+        write_full_plumb(dir.path());
+        // write_full_plumb leaves greenfield's placeholder index in place:
+        // it carries no SCAN_MARKER, so adoption without a first scan stays
+        // silent.
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
     }
 
     fn generate_adapters(dir: &Path) {
