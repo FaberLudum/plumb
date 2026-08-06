@@ -45,9 +45,8 @@ fn body(project_name: &str, artefacts: &Artefacts) -> String {
 /// future drift gate can tell both apart from an edited copy.
 pub fn render(project_name: &str, artefacts: &Artefacts) -> Vec<Adapter> {
     let body = body(project_name, artefacts);
-    let markdown = format!(
-        "<!-- {MARKER}; edits will be overwritten — edit .plumb/ instead -->\n\n{body}"
-    );
+    let markdown =
+        format!("<!-- {MARKER}; edits will be overwritten — edit .plumb/ instead -->\n\n{body}");
     let plain = format!("# {MARKER}; edits will be overwritten — edit .plumb/ instead\n\n{body}");
 
     vec![
