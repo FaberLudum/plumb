@@ -55,7 +55,10 @@ pub fn run(repo: &Path, force: bool, mut output: impl Write) -> Result<()> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(anyhow::Error::new(error)).with_context(|| {
-                        format!("reading {} to check whether plumb generated it", target.path)
+                        format!(
+                            "reading {} to check whether plumb generated it",
+                            target.path
+                        )
                     });
                 }
             }
