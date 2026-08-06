@@ -296,6 +296,11 @@ mod tests {
         fs::write(path, body).expect("write");
     }
 
+    fn write_architecture(dir: &Path, body: &str) {
+        fs::create_dir_all(dir.join(".plumb")).expect("create .plumb");
+        fs::write(dir.join(".plumb").join("architecture.md"), body).expect("write");
+    }
+
     /// A repository whose HEAD holds `files`.
     ///
     /// This used to write a `* diff` attribute, because a developer whose
@@ -901,6 +906,47 @@ mod tests {
         assert!(registry.asked().is_empty(), "asked: {:?}", registry.asked());
     }
 
+    #[test]
+    fn an_undeclared_cross_module_import_warns() {
+        let dir = repo_with(&[("crates/core/src/lib.rs", "// empty\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        write(dir.path(), "crates/core/src/lib.rs", "use cli::main;\n");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert!(output.contains("boundary"), "output was: {output}");
+        assert!(output.contains("crates/core/src/lib.rs"), "output was: {output}");
+    }
+
+    #[test]
+    fn a_declared_dependency_does_not_warn() {
+        let dir = repo_with(&[("crates/cli/src/main.rs", "// empty\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        write(dir.path(), "crates/cli/src/main.rs", "use core::check;\n");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
+    #[test]
+    fn without_an_architecture_no_boundary_checking_happens() {
+        let dir = repo_with(&[("crates/core/src/lib.rs", "// empty\n")]);
+        write(dir.path(), "crates/core/src/lib.rs", "use cli::main;\n");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
     /// A clean tree is a clean run, not an error.
     #[test]
     fn an_unchanged_repository_reports_nothing() {
@@ -990,6 +1036,23 @@ mod tests {
             scenarios.len(),
             "a scenario emitted no finding, so it proves nothing: {findings:#?}"
         );
+
+        // The boundary finding is emitted from a different site than the
+        // manifest scenarios above and needs an architecture in place.
+        let dir = repo_with(&[("crates/core/src/lib.rs", "// empty\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        write(dir.path(), "crates/core/src/lib.rs", "use cli::main;\n");
+        let boundary_findings = collect(dir.path(), &registry).expect("check runs");
+        assert_eq!(
+            boundary_findings.len(),
+            1,
+            "the boundary scenario emitted no finding: {boundary_findings:#?}"
+        );
+        findings.extend(boundary_findings);
+
         for finding in &findings {
             assert!(!finding.rule.is_empty(), "unnamed rule: {finding:#?}");
             assert!(!finding.message.is_empty(), "empty message: {finding:#?}");

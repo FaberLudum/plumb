@@ -405,6 +405,36 @@ fn check_exits_one_when_an_added_dependency_does_not_exist() {
         .stdout(predicates::str::contains("requestz"));
 }
 
+/// The whole binary, from a working diff carrying an undeclared cross-module
+/// import to exit code 2. `--offline` is exercised for the same reason as the
+/// package-existence test above: this rule never touches a registry, so the
+/// flag is here to prove that, not because the finding needs it.
+#[test]
+fn an_undeclared_import_warns_end_to_end() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    let plumb_dir = in_repo(dir.path(), ".plumb");
+    std::fs::create_dir_all(&plumb_dir).expect("create .plumb");
+    std::fs::write(
+        plumb_dir.join("architecture.md"),
+        "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+    )
+    .expect("write architecture");
+    let src = in_repo(dir.path(), "crates/core/src");
+    std::fs::create_dir_all(&src).expect("create src");
+    std::fs::write(src.join("lib.rs"), "use cli::main;\n").expect("write source");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    run_git(&repo(dir.path()), &["commit", "-m", "add architecture"]);
+    std::fs::write(src.join("lib.rs"), "use cli::main;\nuse cli::extra;\n").expect("edit source");
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicates::str::contains("boundary").and(predicates::str::contains("crates/core")),
+        );
+}
+
 /// `git diff` prints paths relative to the repository root, so the gate has to
 /// resolve the root rather than trust the working directory. Without that this
 /// run reads no manifest, finds nothing, and exits 0 — passing silently, which
