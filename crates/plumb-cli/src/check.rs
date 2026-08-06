@@ -11,6 +11,14 @@
 //! version cannot read are all failures to establish anything, and a gate that
 //! blocked on those would be switched off within the week.
 //!
+//! A second, independent gate rides the same loop over changed paths: a
+//! `.plumb/architecture.md` at the repository root, when one exists, is
+//! parsed once and every non-manifest changed path is checked against it for
+//! imports crossing a boundary the architecture does not declare. No
+//! architecture file is not an error — most repositories have not written one
+//! yet — so its absence disables this gate silently rather than warning about
+//! a file that was never required to exist.
+//!
 //! Failing to establish anything is not the same as having nothing to say, and
 //! the two were conflated here once already. A manifest that could not be read
 //! or was only partly understood still moves no verdict on any package, but it
@@ -20,6 +28,8 @@
 use crate::git;
 use crate::registry::{Existence, Registry};
 use anyhow::Result;
+use plumb_core::architecture::{self, Architecture};
+use plumb_core::boundaries;
 use plumb_core::deps::{self, AddedDependency};
 use plumb_core::finding::{Finding, Tier, exit_code};
 use plumb_core::manifest::{self, Ecosystem, Gap};
@@ -100,6 +110,17 @@ fn read_manifest(path: &Path) -> std::result::Result<Option<String>, String> {
 fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
 
+    // Read once for the whole run, not once per path: a registry is reused
+    // across manifests for the same reason (see `run`'s doc comment), and an
+    // architecture is no different. Absent — most repositories have not
+    // written one — the boundary gate is off for this run, silently: a
+    // project that never adopted `.plumb/architecture.md` has made no claim
+    // this gate could hold it to.
+    let architecture: Option<Architecture> =
+        std::fs::read_to_string(repo.join(".plumb").join("architecture.md"))
+            .ok()
+            .map(|text| architecture::parse(&text));
+
     for path in git::changed_paths(repo)? {
         // Ask the dispatch itself whether this path is a manifest, before
         // reading a byte of it. A change touching a thousand source files
@@ -113,6 +134,24 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         // sound only while the dispatch is a function of the path alone, which
         // `a_manifest_is_recognised_from_its_path_alone` pins.
         if manifest::parse(&path, "").is_none() {
+            // Not a manifest, so the package-existence gate has nothing to
+            // say about it — but it may still be source the boundary gate
+            // cares about, when an architecture was found above.
+            //
+            // Unreadable here is skipped rather than reported. `read_manifest`
+            // draws that line for manifests because a manifest Plumb cannot
+            // read is a manifest whose added dependencies go unchecked, which
+            // is worth a finding. A source file this gate cannot read is not
+            // yet — coverage reporting for source files is a future gate's
+            // job, not this one's.
+            if let Some(architecture) = &architecture
+                && let Ok(bytes) = std::fs::read(repo.join(&path))
+            {
+                let text = String::from_utf8_lossy(&bytes);
+                for violation in boundaries::violations(architecture, &path, &text) {
+                    findings.push(boundary_violation(&violation));
+                }
+            }
             continue;
         }
 
@@ -227,6 +266,24 @@ fn package_does_not_exist(dependency: &AddedDependency) -> Finding {
         ),
         location: dependency.manifest.clone(),
         source: PACKAGE_EXISTS_SOURCE.to_string(),
+    }
+}
+
+/// A boundary crossing the architecture does not declare.
+///
+/// Tier B: the evidence (taxonomy §4.5) is a preprint, and path-based module
+/// attribution plus line-based import extraction is a heuristic that needs
+/// per-project calibration before it can block anything.
+fn boundary_violation(violation: &boundaries::Violation) -> Finding {
+    Finding {
+        rule: "boundary".to_string(),
+        tier: Tier::B,
+        message: format!(
+            "{} imports `{}`, but {} may not depend on {}",
+            violation.file, violation.import, violation.from_module, violation.to_module
+        ),
+        location: violation.file.clone(),
+        source: "taxonomy §4.5".to_string(),
     }
 }
 
@@ -920,7 +977,10 @@ mod tests {
 
         assert_eq!(code, 2, "output was: {output}");
         assert!(output.contains("boundary"), "output was: {output}");
-        assert!(output.contains("crates/core/src/lib.rs"), "output was: {output}");
+        assert!(
+            output.contains("crates/core/src/lib.rs"),
+            "output was: {output}"
+        );
     }
 
     #[test]
