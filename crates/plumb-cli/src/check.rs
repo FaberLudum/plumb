@@ -17,7 +17,12 @@
 //! imports crossing a boundary the architecture does not declare. No
 //! architecture file is not an error — most repositories have not written one
 //! yet — so its absence disables this gate silently rather than warning about
-//! a file that was never required to exist.
+//! a file that was never required to exist. It reports only violations the
+//! change introduces, the same before/after shape as the package-existence
+//! gate: a violation already present at HEAD is reported again on every
+//! future touch to that file unless it is filtered, which mutes the gate on
+//! exactly the projects that would benefit most from it — one legacy
+//! crossing, and every unrelated edit to that file warns forever.
 //!
 //! Failing to establish anything is not the same as having nothing to say, and
 //! the two were conflated here once already. A manifest that could not be read
@@ -43,6 +48,7 @@ use plumb_core::deps::{self, AddedDependency};
 use plumb_core::finding::{Finding, Tier, exit_code};
 use plumb_core::manifest::{self, Ecosystem, Gap};
 use plumb_core::report::{render_json, render_text};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// The taxonomy section behind the package existence rule.
@@ -167,8 +173,42 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
                 && let Ok(bytes) = std::fs::read(repo.join(&path))
             {
                 let text = String::from_utf8_lossy(&bytes);
-                for violation in boundaries::violations(architecture, &path, &text) {
-                    findings.push(boundary_violation(&violation));
+                let current = boundaries::violations(architecture, &path, &text);
+
+                // Reported only if it is new, the same shape of fix
+                // `deps::added` already is for the manifest gate: a
+                // violation already present at HEAD predates this change,
+                // so it is legacy adoption noise, not something the change
+                // did. Warning on it anyway is the gate-muting hazard Tier B
+                // exists to avoid — a comment-only edit to a file that has
+                // always had an undeclared import would warn forever, which
+                // is exactly the kind of warning a reader learns to ignore
+                // and then the whole gate gets turned off. Comparing by
+                // `(import, to_module)` pair rather than by line number is
+                // what keeps a line move from resurrecting a suppressed
+                // warning.
+                //
+                // `git::show_at_head` is strict about UTF-8 and aborts the
+                // whole run for the manifest path (see its doc comment);
+                // that is disproportionate for a Tier B gate over a file
+                // this gate is not even required to be able to read, so an
+                // undecodable HEAD version is folded into the same "no text
+                // at HEAD" case as a genuinely new file — both mean every
+                // current violation counts as new.
+                let at_head = match git::show_at_head(repo, &path) {
+                    Ok(Some(head_text)) => boundaries::violations(architecture, &path, &head_text),
+                    Ok(None) | Err(_) => Vec::new(),
+                };
+                let pre_existing: HashSet<(&str, &str)> = at_head
+                    .iter()
+                    .map(|violation| (violation.import.as_str(), violation.to_module.as_str()))
+                    .collect();
+
+                for violation in &current {
+                    let key = (violation.import.as_str(), violation.to_module.as_str());
+                    if !pre_existing.contains(&key) {
+                        findings.push(boundary_violation(violation));
+                    }
                 }
             }
             continue;
@@ -1118,6 +1158,115 @@ mod tests {
         let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
 
         assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
+    /// The gate-muting hazard: the boundary gate used to scan the whole
+    /// working-tree file, so a legacy import that already violated the
+    /// boundary at HEAD re-warned on every touch to the file — even a
+    /// comment-only one, which is what this pins. The manifest gate already
+    /// solved this class of false positive by comparing before against
+    /// after and reporting only additions; the boundary gate must do the
+    /// same, or a project with one pre-existing crossing gets a warning on
+    /// every unrelated edit to that file forever, which is exactly how a
+    /// Tier B gate gets muted.
+    #[test]
+    fn a_pre_existing_violation_does_not_re_warn_on_an_unrelated_touch() {
+        let dir = repo_with(&[("crates/core/src/lib.rs", "use cli::main;\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        // The violation is already there at HEAD; this change adds only an
+        // unrelated comment line.
+        write(
+            dir.path(),
+            "crates/core/src/lib.rs",
+            "use cli::main;\n// unrelated comment\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(
+            outcome.code, 0,
+            "a violation that predates the change re-warned on an unrelated touch: {}",
+            outcome.report
+        );
+    }
+
+    /// The other half: a change that adds a genuinely new undeclared import
+    /// on top of a pre-existing one reports only the new one. Line moves
+    /// must not resurrect a suppressed warning either, which is why the
+    /// comparison is by `(import, to_module)` pair rather than by line
+    /// number — not separately pinned here because nothing in this gate's
+    /// extraction is line-position-sensitive to begin with.
+    #[test]
+    fn a_new_import_is_reported_while_a_pre_existing_one_is_not() {
+        let dir = repo_with(&[("crates/core/src/lib.rs", "use cli::main;\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n\
+             ## crates/cli\n\nMay depend on: core.\n\n\
+             ## crates/extra\n\nMay depend on: (none).\n",
+        );
+        write(
+            dir.path(),
+            "crates/core/src/lib.rs",
+            "use cli::main;\nuse extra::thing;\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert_eq!(
+            output.matches("[boundary]").count(),
+            1,
+            "the pre-existing violation must not be reported alongside the new one: {output}"
+        );
+        assert!(output.contains("extra"), "output was: {output}");
+        assert!(
+            !output.contains("may not depend on crates/cli"),
+            "the pre-existing violation re-warned: {output}"
+        );
+    }
+
+    /// `git::show_at_head` is strict about UTF-8 and aborts the whole run
+    /// with exit 70 for the manifest path — see its doc comment. That is
+    /// disproportionate here: a HEAD version of a scanned file this process
+    /// cannot decode is not a reason to abort a Tier B gate, so it is read
+    /// as "no text at HEAD", the same as a new file, meaning every current
+    /// violation counts as new rather than the run failing outside the 0/1/2
+    /// contract.
+    #[test]
+    fn an_undecodable_head_version_of_a_scanned_file_does_not_abort_the_run() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        fs::create_dir_all(dir.path().join("crates/core/src")).expect("create dirs");
+        // `\xFF` is not valid UTF-8 in any position.
+        fs::write(
+            dir.path().join("crates/core/src/lib.rs"),
+            [b'/', b'/', 0xFF, b'\n'],
+        )
+        .expect("write");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "initial"]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        write(dir.path(), "crates/core/src/lib.rs", "use cli::main;\n");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(
+            code, 2,
+            "an undecodable HEAD version must not abort the run, and the current \
+             violation, having no comparable HEAD text, must still be reported: {output}"
+        );
+        assert!(output.contains("boundary"), "output was: {output}");
     }
 
     /// A file `boundaries::is_scannable` would reject — no declared module
