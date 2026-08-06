@@ -14,7 +14,40 @@ pub struct Architecture {
 }
 
 pub fn parse(text: &str) -> Architecture {
-    todo!()
+    let mut modules: Vec<Module> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            let path = heading.trim().trim_end_matches('/').to_string();
+            if !path.is_empty() {
+                modules.push(Module {
+                    path,
+                    may_depend_on: Vec::new(),
+                });
+            }
+        } else if let Some(rest) = trimmed.trim_start().strip_prefix("May depend on:")
+            && let Some(current) = modules.last_mut()
+        {
+            current.may_depend_on = parse_dependencies(rest);
+        }
+    }
+    Architecture { modules }
+}
+
+/// The text after "May depend on:", cleaned into a list.
+///
+/// Prose after an em dash is commentary, not a dependency; "(none)" is the
+/// explicit empty list. Trailing periods are punctuation, not path syntax.
+fn parse_dependencies(rest: &str) -> Vec<String> {
+    let before_dash = rest.split('—').next().unwrap_or("");
+    if before_dash.trim_start().starts_with("(none)") {
+        return Vec::new();
+    }
+    before_dash
+        .split(',')
+        .map(|item| item.trim().trim_end_matches('.').trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
