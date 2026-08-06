@@ -11,7 +11,7 @@
 
 use crate::git;
 use anyhow::{Context, Result, bail};
-use plumb_core::index::{render, symbols};
+use plumb_core::index::{Symbol, render, symbols};
 use std::io::Write;
 use std::path::Path;
 
@@ -31,6 +31,33 @@ const GENERATED_FILE_PATHS: &[&str] = &[
     ".github/copilot-instructions.md",
 ];
 
+/// Reads every one of `tracked`'s paths under `repo` and extracts its public
+/// symbols, in the same order they were listed.
+///
+/// The shared core of `plumb index` and `check --diff`'s stale-index gate:
+/// both need "what would a scan of this tree produce right now", and a
+/// second copy of this loop in `check.rs` is exactly the kind of duplicated
+/// dispatch that drifts the first time this one learns a new extension or a
+/// new skip condition. `pub(crate)` rather than private, so `check.rs` can
+/// call it directly — both modules are `plumb-cli`, so this is wiring within
+/// a crate rather than a boundary crossing.
+///
+/// A tracked path that cannot be read — permission denied, a submodule
+/// gitlink with nothing checked out, a symlink pointing nowhere — holds no
+/// extractable symbols either way, so it is skipped rather than failing the
+/// whole scan over one file nobody can open.
+pub(crate) fn scan_entries(repo: &Path, tracked: &[String]) -> Vec<(String, Vec<Symbol>)> {
+    let mut entries = Vec::with_capacity(tracked.len());
+    for path in tracked {
+        let Ok(bytes) = std::fs::read(repo.join(path)) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        entries.push((path.clone(), symbols(path, &text)));
+    }
+    entries
+}
+
 /// Regenerates `.plumb/index.md` from every file git tracks.
 pub fn run(repo: &Path, mut output: impl Write) -> Result<()> {
     if !repo.join(".plumb").exists() {
@@ -38,22 +65,8 @@ pub fn run(repo: &Path, mut output: impl Write) -> Result<()> {
     }
 
     let tracked = git::tracked_files(repo)?;
-    let mut entries = Vec::with_capacity(tracked.len());
-    let mut symbol_count = 0usize;
-    for path in &tracked {
-        // A tracked path that cannot be read — permission denied, a
-        // submodule gitlink with nothing checked out, a symlink pointing
-        // nowhere — holds no extractable symbols either way, so it is
-        // skipped rather than failing the whole scan over one file nobody
-        // can open.
-        let Ok(bytes) = std::fs::read(repo.join(path)) else {
-            continue;
-        };
-        let text = String::from_utf8_lossy(&bytes);
-        let found = symbols(path, &text);
-        symbol_count += found.len();
-        entries.push((path.clone(), found));
-    }
+    let entries = scan_entries(repo, &tracked);
+    let symbol_count: usize = entries.iter().map(|(_, syms)| syms.len()).sum();
 
     let rendered = render(&entries);
     let index_path = repo.join(".plumb").join("index.md");

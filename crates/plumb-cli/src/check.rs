@@ -318,6 +318,34 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         }
     }
 
+    // A fourth, independent gate, and independent of the drift gate above in
+    // particular: whether a *scanned* `.plumb/index.md` still matches a
+    // fresh scan of the tracked source files right now. It needs only the
+    // index file itself, not all four `.plumb/` artefacts — an index can be
+    // scanned long before an architecture is written.
+    //
+    // "Scanned" is what `SCAN_MARKER` distinguishes. `greenfield`'s
+    // placeholder index carries no marker, so a project that adopted
+    // `.plumb/` but never ran `plumb index` is not stale — there is no scan
+    // for a fresh one to contradict, and warning anyway would make adoption
+    // itself the trigger. Once a real scan has run, a fresh rebuild that
+    // disagrees with what is on disk means the public surface moved and
+    // nobody re-ran the command.
+    if let Ok(disk) = std::fs::read(repo.join(".plumb").join("index.md")) {
+        let disk_text = String::from_utf8_lossy(&disk);
+        if disk_text.contains(plumb_core::index::SCAN_MARKER) {
+            let tracked = git::tracked_files(repo)?;
+            // `index_cmd::scan_entries` rather than a second copy of the
+            // scan loop here: the command and this gate must never disagree
+            // about what one scan of the same tree produces.
+            let entries = crate::index_cmd::scan_entries(repo, &tracked);
+            let fresh = plumb_core::index::render(&entries);
+            if !same_ignoring_line_endings(&disk, fresh.as_bytes()) {
+                findings.push(index_stale());
+            }
+        }
+    }
+
     Ok(findings)
 }
 
@@ -436,6 +464,23 @@ fn adapter_drift(path: &str) -> Finding {
         tier: Tier::B,
         message: format!("{path} does not match .plumb/; run `plumb adapters`"),
         location: path.to_string(),
+        source: "taxonomy §11".to_string(),
+    }
+}
+
+/// A scanned index that a fresh scan contradicts.
+///
+/// Tier B, §11's class: it describes this repository's artefacts. A stale
+/// map is worse than no map — it tells the next agent that what exists
+/// does not — so the placeholder is exempt and only a real scan can go
+/// stale. The remedy is one command and the message names it.
+fn index_stale() -> Finding {
+    Finding {
+        rule: "index-stale".to_string(),
+        tier: Tier::B,
+        message: ".plumb/index.md does not match the tracked sources; run `plumb index`"
+            .to_string(),
+        location: ".plumb/index.md".to_string(),
         source: "taxonomy §11".to_string(),
     }
 }
@@ -1444,7 +1489,11 @@ mod tests {
         let dir = repo_with(&[("src/lib.rs", "pub fn old() {}\n")]);
         write_full_plumb(dir.path());
         scan_index_into_plumb(dir.path());
-        write(dir.path(), "src/lib.rs", "pub fn old() {}\npub fn brand_new() {}\n");
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn old() {}\npub fn brand_new() {}\n",
+        );
         run_git(dir.path(), &["add", "-A"]);
         run_git(dir.path(), &["commit", "-m", "grow the surface"]);
         let stale_index_findings = collect(dir.path(), &registry).expect("check runs");
@@ -1753,7 +1802,11 @@ mod tests {
         write_full_plumb(dir.path());
         scan_index_into_plumb(dir.path());
         // The public surface changes; nobody re-runs the scan.
-        write(dir.path(), "src/lib.rs", "pub fn old() {}\npub fn brand_new() {}\n");
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn old() {}\npub fn brand_new() {}\n",
+        );
         run_git(dir.path(), &["add", "-A"]);
         run_git(dir.path(), &["commit", "-m", "grow the surface"]);
 
