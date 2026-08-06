@@ -154,8 +154,9 @@ fn contains_source(dir: &Path) -> bool {
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
-            if contains_source(&path) {
+            if !SKIPPED_DIRS.contains(&name.as_str()) && contains_source(&path) {
                 return true;
             }
         } else if has_source_extension(&path) {
@@ -169,4 +170,35 @@ fn has_source_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| SOURCE_EXTENSIONS.contains(&extension))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A source file nested inside a skipped directory must not count, at any
+    /// depth. `contains_source` recurses past the top-level loop in
+    /// `detect_modules`, and the skip list has to apply at every level it
+    /// recurses into — otherwise a top-level directory whose only source file
+    /// lives inside a vendored `node_modules` (or `target`, `.git`, and so on)
+    /// is detected as a module for code nobody wrote.
+    #[test]
+    fn a_source_file_inside_a_nested_skipped_directory_does_not_make_its_parent_a_module() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let vendored = dir.path().join("frontend").join("node_modules").join("dep");
+        std::fs::create_dir_all(&vendored).expect("create dirs");
+        std::fs::write(vendored.join("index.js"), "module.exports = {};\n").expect("write");
+
+        let modules = detect_modules(dir.path());
+
+        assert!(
+            !modules.contains(&"frontend".to_string()),
+            "a nested node_modules made `frontend` look like a source module: {modules:?}"
+        );
+        assert_eq!(
+            modules,
+            vec!["core".to_string()],
+            "no real source anywhere should fall back to the empty-repository default: {modules:?}"
+        );
+    }
 }
