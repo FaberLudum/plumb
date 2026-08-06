@@ -29,7 +29,7 @@ pub struct Violation {
 /// dependency per language, and boundary findings are Tier B precisely
 /// because of heuristics like this one.
 pub fn imports(path: &str, text: &str) -> Vec<String> {
-    match extension(path) {
+    match extension(path).as_str() {
         "rs" => rust_imports(text),
         "py" => python_imports(text),
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => javascript_imports(text),
@@ -75,8 +75,20 @@ pub fn violations(architecture: &Architecture, path: &str, text: &str) -> Vec<Vi
     found
 }
 
-fn extension(path: &str) -> &str {
-    path.rsplit('.').next().unwrap_or("")
+/// The lowercased extension of `path`'s final path segment, or empty when it
+/// has none.
+///
+/// Two things a caller must not have to know: a path with no `.` in its
+/// final segment has no extension — `rsplit('.')` alone answers that with the
+/// whole remaining string instead, which a dotless file named exactly `rs`
+/// would then match against the `"rs"` arm below — and matching must be
+/// case-insensitive, since `LIB.RS` is as much a Rust file as `lib.rs`.
+fn extension(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name.rsplit_once('.') {
+        Some((_, ext)) if !ext.is_empty() => ext.to_lowercase(),
+        _ => String::new(),
+    }
 }
 
 /// The module owning `path`: longest component-wise prefix match.
@@ -268,6 +280,28 @@ mod tests {
     #[test]
     fn an_unknown_extension_has_no_imports() {
         assert!(imports("README.md", "use x::y;\n").is_empty());
+    }
+
+    /// No `.` anywhere in the path used to hand the whole trailing string —
+    /// the entire path, since `rsplit('.')` with no match yields the input
+    /// unchanged — to the extension match. A file literally named `rs`, with
+    /// no extension at all, would then land in the `"rs"` arm by accident.
+    #[test]
+    fn a_dotless_path_has_no_extension() {
+        assert!(imports("rs", "use plumb_core::manifest;\n").is_empty());
+        assert!(imports("tools/rs", "use plumb_core::manifest;\n").is_empty());
+    }
+
+    /// `LIB.RS` is as much a Rust file as `lib.rs`; matching the extension
+    /// case-sensitively silently skipped every uppercase or mixed-case name.
+    #[test]
+    fn extension_matching_is_case_insensitive() {
+        let text = "use plumb_core::manifest;\n";
+        assert_eq!(
+            imports("crates/x/src/LIB.RS", text),
+            vec!["plumb_core"],
+            "an uppercase extension was not recognised"
+        );
     }
 
     fn two_crates() -> architecture::Architecture {
