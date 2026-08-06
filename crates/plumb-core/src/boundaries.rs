@@ -169,22 +169,30 @@ fn python_name(rest: &str) -> &str {
 
 /// `import NAME[.rest]` and `from NAME[.rest] import …`. `from .` is a
 /// relative import and is skipped.
+///
+/// A bare `import` may name several modules on one line, comma-separated —
+/// `import os, sys` — which `from NAME import …` cannot: there the comma
+/// separates *imported names* from one module, not modules themselves, so
+/// only the single name after `from` is ever a module. Only the `import` arm
+/// therefore splits on `,`; the `from` arm keeps taking one name, as before.
 fn python_imports(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
-        let rest = if let Some(rest) = trimmed.strip_prefix("from ") {
+        if let Some(rest) = trimmed.strip_prefix("from ") {
             if rest.starts_with('.') {
                 continue;
             }
-            Some(rest)
-        } else {
-            trimmed.strip_prefix("import ")
-        };
-        if let Some(rest) = rest {
             let name = python_name(rest);
             if !name.is_empty() {
                 names.push(name.to_string());
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("import ") {
+            for segment in rest.split(',') {
+                let name = python_name(segment.trim());
+                if !name.is_empty() {
+                    names.push(name.to_string());
+                }
             }
         }
     }
@@ -266,6 +274,15 @@ mod tests {
         let text =
             "import requests\nfrom flask import Flask\nfrom . import sibling\nimport os.path\n";
         assert_eq!(imports("api/app.py", text), vec!["requests", "flask", "os"]);
+    }
+
+    /// `import os, sys` used to extract `os,` — the comma glued onto the
+    /// name because the same single-name extraction ran over the whole
+    /// comma-joined rest of the line — matching no module and so silently
+    /// clearing the boundary check for both names on that line.
+    #[test]
+    fn a_multi_name_import_yields_every_name() {
+        assert_eq!(imports("app.py", "import os, sys\n"), vec!["os", "sys"]);
     }
 
     #[test]
