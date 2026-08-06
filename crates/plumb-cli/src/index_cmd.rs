@@ -11,7 +11,7 @@
 
 use crate::git;
 use anyhow::{Context, Result, bail};
-use plumb_core::index::{Symbol, render, symbols};
+use plumb_core::index::{Symbol, has_scannable_extension, render, symbols};
 use std::io::Write;
 use std::path::Path;
 
@@ -46,9 +46,21 @@ const GENERATED_FILE_PATHS: &[&str] = &[
 /// gitlink with nothing checked out, a symlink pointing nowhere — holds no
 /// extractable symbols either way, so it is skipped rather than failing the
 /// whole scan over one file nobody can open.
+///
+/// `has_scannable_extension` is asked before a single byte is read: it is
+/// the same path-only filter `symbols`'s own dispatch already applies after
+/// the fact, so a path it rejects — a lockfile, an image, any other tracked
+/// file `symbols` could never extract anything from — is never opened at
+/// all. This scan runs over every tracked file on every `check --diff` (the
+/// index-staleness gate, not only `plumb index` itself), so skipping the
+/// read here is what keeps that from reading the whole tree's binaries into
+/// memory on every invocation.
 pub(crate) fn scan_entries(repo: &Path, tracked: &[String]) -> Vec<(String, Vec<Symbol>)> {
     let mut entries = Vec::with_capacity(tracked.len());
     for path in tracked {
+        if !has_scannable_extension(path) {
+            continue;
+        }
         let Ok(bytes) = std::fs::read(repo.join(path)) else {
             continue;
         };
@@ -96,6 +108,29 @@ pub fn run(repo: &Path, mut output: impl Write) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `scan_entries` used to read every tracked path's full bytes before
+    /// asking whether the extension could ever yield a symbol, so a
+    /// lockfile, an image, or any other tracked file with no scannable
+    /// extension was read into memory on every scan for no reason — the
+    /// `.plumb/index.md` freshness check runs this over every tracked file
+    /// on every `check --diff`, not only over a diff. `has_scannable_extension`
+    /// gates the read now, so a path it rejects must not appear in the
+    /// returned entries at all — `render`'s own empty-symbol filter already
+    /// hides such an entry from the document either way, so this cannot
+    /// change what `plumb index` writes, only what it reads to get there.
+    #[test]
+    fn scan_entries_skips_paths_with_no_scannable_extension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("notes.txt"), "pub fn x() {}\n").expect("write");
+        std::fs::write(dir.path().join("lib.rs"), "pub fn y() {}\n").expect("write");
+
+        let tracked = vec!["notes.txt".to_string(), "lib.rs".to_string()];
+        let entries = scan_entries(dir.path(), &tracked);
+
+        let paths: Vec<&str> = entries.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(paths, vec!["lib.rs"], "entries were {entries:?}");
+    }
 
     /// If this ever drifts, the "instruction files exist" check above would
     /// start missing a real target or watching one that no longer exists.
