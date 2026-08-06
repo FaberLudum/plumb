@@ -4,6 +4,7 @@
 mod adapters_cmd;
 mod check;
 mod git;
+mod index_cmd;
 mod init;
 mod registry;
 
@@ -91,6 +92,8 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Regenerate .plumb/index.md from the tracked source files.
+    Index,
 }
 
 fn main() -> ExitCode {
@@ -125,6 +128,16 @@ fn main() -> ExitCode {
                 Err(error) => return failed(&error),
             };
             match adapters_cmd::run(&repo, force, std::io::stdout()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => failed(&error),
+            }
+        }
+        Commands::Index => {
+            let repo = match git::repo_root(Path::new(".")) {
+                Ok(repo) => repo,
+                Err(error) => return failed(&error),
+            };
+            match index_cmd::run(&repo, std::io::stdout()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => failed(&error),
             }

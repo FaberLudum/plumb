@@ -164,7 +164,6 @@ pub fn changed_paths(repo: &Path) -> Result<Vec<String>> {
 /// The index scan must be reproducible from a fresh clone, so it cannot depend
 /// on untracked scratch files or build output that `.gitignore` excludes. Only
 /// paths committed and tracked in the index appear in the result.
-#[allow(dead_code)]
 pub fn tracked_files(repo: &Path) -> Result<Vec<String>> {
     let output = Command::new("git")
         .args(["ls-files", "-z"])
