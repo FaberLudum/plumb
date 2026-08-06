@@ -21,6 +21,39 @@ pub fn symbols(path: &str, text: &str) -> Vec<Symbol> {
     }
 }
 
+/// Whether `path` is worth reading at all for the index scan: a known
+/// source extension.
+///
+/// Path-only — no `text` parameter — on purpose, the same shape as
+/// `boundaries::is_scannable`: [`symbols`] already returns an empty `Vec`
+/// for an unrecognised extension without opening the file, so a caller that
+/// knows the extension in advance can skip `std::fs::read` entirely for a
+/// path this predicate rejects — see `plumb-cli`'s `scan_entries`, which
+/// calls this before reading so a lockfile, an image, or any other tracked
+/// binary in the repository is never read into memory for a scan whose
+/// answer was always going to be "no symbols".
+pub fn has_scannable_extension(path: &str) -> bool {
+    is_known_extension(&extension(path))
+}
+
+/// Whether `extension` (already lowercased by [`extension`]) is one
+/// [`symbols`] does anything with.
+///
+/// This list must be kept identical to the extensions matched in
+/// [`symbols`]'s dispatch. The two are not merged into one because
+/// [`symbols`] needs `text` to decide *which* extractor to run, while
+/// [`has_scannable_extension`] must answer with no `text` at all — but a
+/// language added to one list and not the other silently reopens the gap
+/// [`has_scannable_extension`] exists to close:
+/// `every_known_extension_is_dispatched_by_symbols` pins that they stay in
+/// step.
+fn is_known_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs"
+    )
+}
+
 /// The full index document from (path, symbols) pairs. Sorts by path;
 /// files with no symbols are omitted; always ends with a newline.
 pub fn render(entries: &[(String, Vec<Symbol>)]) -> String {
@@ -430,6 +463,48 @@ const internal = 1;\n";
     #[test]
     fn an_unknown_extension_yields_no_symbols() {
         assert!(symbols("README.md", "pub fn x() {}\n").is_empty());
+    }
+
+    /// The path-only filter `symbols` implicitly applies via its extension
+    /// dispatch, exposed so a caller (`plumb-cli`'s `scan_entries`) can skip
+    /// `std::fs::read` entirely for a path `symbols` could never extract
+    /// anything from — a lockfile, an image, any tracked binary.
+    #[test]
+    fn has_scannable_extension_matches_a_known_source_extension() {
+        assert!(has_scannable_extension("crates/x/src/lib.rs"));
+        assert!(!has_scannable_extension("Cargo.lock"));
+        assert!(!has_scannable_extension("assets/logo.png"));
+        assert!(!has_scannable_extension("tools/README"));
+    }
+
+    /// `has_scannable_extension`'s extension list and `symbols`'s dispatch
+    /// must name the same languages, the same shape as
+    /// `boundaries::every_known_extension_is_dispatched_by_imports`: a
+    /// language added to one list and not the other silently reopens the gap
+    /// `has_scannable_extension` exists to close.
+    #[test]
+    fn every_known_extension_is_dispatched_by_symbols() {
+        let cases: &[(&str, &str)] = &[
+            ("rs", "pub fn x() {}\n"),
+            ("py", "def x():\n"),
+            ("ts", "export function x() {}\n"),
+            ("tsx", "export function x() {}\n"),
+            ("js", "export function x() {}\n"),
+            ("jsx", "export function x() {}\n"),
+            ("mjs", "export function x() {}\n"),
+            ("cjs", "export function x() {}\n"),
+        ];
+        for (ext, text) in cases {
+            let path = format!("file.{ext}");
+            assert!(
+                has_scannable_extension(&path),
+                "{ext} is dispatched by symbols but not recognised by has_scannable_extension"
+            );
+            assert!(
+                !symbols(&path, text).is_empty(),
+                "{ext} is recognised by has_scannable_extension but symbols() extracted nothing for it"
+            );
+        }
     }
 
     #[test]
