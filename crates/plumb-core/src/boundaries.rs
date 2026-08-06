@@ -21,7 +21,9 @@ pub struct Violation {
 /// one `text.lines()` pass, matching a small set of surface patterns per
 /// language family. It misses imports that span multiple lines (a
 /// parenthesised Python `from x import (a, b)` split across lines, a
-/// multi-line `use` group in Rust) and it does not know about strings or
+/// multi-line `use` group in Rust) and imports produced by macro expansion
+/// (a `use` a Rust macro generates is never a literal source line, so there
+/// is nothing for this pass to match), and it does not know about strings or
 /// comments, so an import-shaped line inside either can false-positive.
 /// That trade is deliberate: it keeps this crate free of a parser
 /// dependency per language, and boundary findings are Tier B precisely

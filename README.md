@@ -266,8 +266,10 @@ nothing else is there:
 - The boundary gate's import extraction is line-based, one `text.lines()`
   pass per file: an import split across multiple lines (a parenthesised
   Python `from x import (a, b)`, a multi-line Rust `use` group) is missed
-  entirely, and it does not know about strings or comments, so an
-  import-shaped line inside either can false-positive. Module attribution is
+  entirely, and so is one produced by macro expansion — a `use` a Rust macro
+  generates never exists as a literal source line for the extractor to match.
+  It also does not know about strings or comments, so an import-shaped line
+  inside either can false-positive. Module attribution is
   path-prefix-based — the longest declared module path that prefixes the
   file's path wins — so a module boundary that does not line up with the
   directory layout is not seen. The drift comparison deliberately ignores
