@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
-use crate::architecture::Architecture;
+use crate::architecture::{Architecture, Module};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
@@ -16,13 +16,215 @@ pub struct Violation {
 }
 
 /// Top-level names imported by `text`, per the extension of `path`.
+///
+/// This is a documented heuristic, not a parser: extraction is line-based,
+/// one `text.lines()` pass, matching a small set of surface patterns per
+/// language family. It misses imports that span multiple lines (a
+/// parenthesised Python `from x import (a, b)` split across lines, a
+/// multi-line `use` group in Rust) and it does not know about strings or
+/// comments, so an import-shaped line inside either can false-positive.
+/// That trade is deliberate: it keeps this crate free of a parser
+/// dependency per language, and boundary findings are Tier B precisely
+/// because of heuristics like this one.
 pub fn imports(path: &str, text: &str) -> Vec<String> {
-    todo!()
+    match extension(path) {
+        "rs" => rust_imports(text),
+        "py" => python_imports(text),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => javascript_imports(text),
+        _ => Vec::new(),
+    }
 }
 
 /// Boundary violations committed by one file's imports.
+///
+/// `path` is attributed to a module by longest path-prefix match; a file
+/// under no declared module is skipped, not flagged. Each extracted import
+/// is resolved to a target module by name; an import matching no module
+/// (`std`, `serde`, third-party packages, …) is not ours to police and is
+/// ignored. An import targeting the file's own module is always allowed.
+/// Everything else must be named in the file's module's `May depend on:`
+/// list, or it is a violation.
 pub fn violations(architecture: &Architecture, path: &str, text: &str) -> Vec<Violation> {
-    todo!()
+    let Some(from) = module_of(architecture, path) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for import in imports(path, text) {
+        let Some(target) = target_of(architecture, &import) else {
+            continue;
+        };
+        if target.path == from.path {
+            continue;
+        }
+        if from
+            .may_depend_on
+            .iter()
+            .any(|entry| permits(entry, target))
+        {
+            continue;
+        }
+        found.push(Violation {
+            file: path.to_string(),
+            from_module: from.path.clone(),
+            to_module: target.path.clone(),
+            import,
+        });
+    }
+    found
+}
+
+fn extension(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or("")
+}
+
+/// The module owning `path`: longest component-wise prefix match.
+fn module_of<'a>(architecture: &'a Architecture, path: &str) -> Option<&'a Module> {
+    architecture
+        .modules
+        .iter()
+        .filter(|module| {
+            path.strip_prefix(module.path.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
+        .max_by_key(|module| module.path.len())
+}
+
+/// `-` and `_` are the same letter for matching: a crate named
+/// `plumb-core` is imported as `plumb_core`.
+fn normalise(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+/// The module an import name targets: last path segment match.
+fn target_of<'a>(architecture: &'a Architecture, import: &str) -> Option<&'a Module> {
+    let wanted = normalise(import);
+    architecture.modules.iter().find(|module| {
+        module
+            .path
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| normalise(segment) == wanted)
+    })
+}
+
+/// Whether `permitted` (an entry of May-depend-on) names `module`.
+fn permits(permitted: &str, module: &Module) -> bool {
+    permitted == module.path
+        || module
+            .path
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| normalise(segment) == normalise(permitted))
+}
+
+/// Stops NAME at `::`, `;`, whitespace or `{` — whichever comes first.
+fn rust_name(rest: &str) -> &str {
+    let end = rest
+        .find(|c: char| c == ':' || c == ';' || c.is_whitespace() || c == '{')
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// `use NAME::…;` / `use NAME;` (also `pub use`), `extern crate NAME;`.
+/// `crate`, `self` and `super` name the current crate, not a dependency.
+fn rust_imports(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let rest = trimmed
+            .strip_prefix("pub use ")
+            .or_else(|| trimmed.strip_prefix("use "))
+            .or_else(|| trimmed.strip_prefix("extern crate "));
+        if let Some(rest) = rest {
+            let name = rust_name(rest);
+            if !name.is_empty() && name != "crate" && name != "self" && name != "super" {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Stops a dotted Python module path at the first `.` or whitespace.
+fn python_name(rest: &str) -> &str {
+    let end = rest
+        .find(|c: char| c == '.' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// `import NAME[.rest]` and `from NAME[.rest] import …`. `from .` is a
+/// relative import and is skipped.
+fn python_imports(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let rest = if let Some(rest) = trimmed.strip_prefix("from ") {
+            if rest.starts_with('.') {
+                continue;
+            }
+            Some(rest)
+        } else {
+            trimmed.strip_prefix("import ")
+        };
+        if let Some(rest) = rest {
+            let name = python_name(rest);
+            if !name.is_empty() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// The quoted spec after the first `from '`/`from "`/`require('`/`require("`
+/// found in `line`, if any.
+fn javascript_spec(line: &str) -> Option<&str> {
+    for marker in ["from '", "from \"", "require('", "require(\""] {
+        if let Some(index) = line.find(marker) {
+            let quote = marker.chars().last().unwrap_or('\'');
+            let after = &line[index + marker.len()..];
+            if let Some(end) = after.find(quote) {
+                return Some(&after[..end]);
+            }
+        }
+    }
+    None
+}
+
+/// The module segment(s) a JS/TS import spec names: the first path
+/// segment, or the first two joined for a `@scope/name` package. A
+/// relative spec (starting with `.`) is skipped.
+fn javascript_segment(spec: &str) -> Option<String> {
+    if spec.starts_with('.') {
+        return None;
+    }
+    if let Some(scoped) = spec.strip_prefix('@') {
+        let mut segments = scoped.splitn(2, '/');
+        let scope = segments.next().unwrap_or("");
+        let name = segments
+            .next()
+            .and_then(|rest| rest.split('/').next())
+            .unwrap_or("");
+        return if name.is_empty() {
+            Some(format!("@{scope}"))
+        } else {
+            Some(format!("@{scope}/{name}"))
+        };
+    }
+    let segment = spec.split('/').next().unwrap_or("");
+    if segment.is_empty() {
+        None
+    } else {
+        Some(segment.to_string())
+    }
+}
+
+fn javascript_imports(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(javascript_spec)
+        .filter_map(javascript_segment)
+        .collect()
 }
 
 #[cfg(test)]
@@ -47,11 +249,9 @@ mod tests {
 
     #[test]
     fn python_imports_yield_the_top_name() {
-        let text = "import requests\nfrom flask import Flask\nfrom . import sibling\nimport os.path\n";
-        assert_eq!(
-            imports("api/app.py", text),
-            vec!["requests", "flask", "os"]
-        );
+        let text =
+            "import requests\nfrom flask import Flask\nfrom . import sibling\nimport os.path\n";
+        assert_eq!(imports("api/app.py", text), vec!["requests", "flask", "os"]);
     }
 
     #[test]
