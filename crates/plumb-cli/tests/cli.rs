@@ -714,3 +714,52 @@ fn help_and_version_are_not_errors() {
         plumb().args(&args).assert().success();
     }
 }
+
+#[test]
+fn init_with_defaults_writes_the_working_agreement() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+
+    plumb_in(dir.path())
+        .args(["init", "--defaults"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(".plumb/architecture.md"));
+
+    for file in [
+        ".plumb/architecture.md",
+        ".plumb/conventions.md",
+        ".plumb/invariants.md",
+        ".plumb/index.md",
+    ] {
+        assert!(in_repo(dir.path(), file).exists(), "{file} was not written");
+    }
+    assert!(in_repo(dir.path(), ".plumb/decisions").is_dir());
+}
+
+#[test]
+fn init_refuses_a_repository_that_already_has_an_agreement() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::create_dir_all(in_repo(dir.path(), ".plumb")).expect("create .plumb");
+
+    plumb_in(dir.path())
+        .args(["init", "--defaults"])
+        .assert()
+        .code(70)
+        .stderr(predicates::str::contains(".plumb"));
+}
+
+#[test]
+fn init_reads_answers_from_stdin() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+
+    plumb_in(dir.path())
+        .arg("init")
+        .write_stdin("demo\napi, storage\n\n\n")
+        .assert()
+        .success();
+
+    let architecture =
+        std::fs::read_to_string(in_repo(dir.path(), ".plumb/architecture.md")).expect("read");
+    assert!(architecture.contains("## api"), "{architecture}");
+    assert!(architecture.contains("## storage"), "{architecture}");
+}
