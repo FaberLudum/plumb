@@ -73,18 +73,23 @@ warnings only. A run that could not happen — not a repository, no git — exit
 outside that contract instead, so a broken gate can never be read as a clean
 one.
 
-Two more commands exist alongside the check: `plumb init` writes a fresh
+Three more commands exist alongside the check: `plumb init` writes a fresh
 project's `.plumb/` working agreement — `architecture.md`, `conventions.md`,
 `invariants.md` and an empty `index.md` — from a short bootstrap Q&A.
-`plumb adapters` renders that working agreement into the instruction files
-each coding harness reads: `CLAUDE.md`, `AGENTS.md`, `.cursorrules` and
-`.github/copilot-instructions.md`, refusing to overwrite a hand-written file
-unless `--force` is given. This repository dogfoods both: its own
-`CLAUDE.md`, `AGENTS.md`, `.cursorrules` and Copilot instructions are
-generated output, not hand-maintained — edit `.plumb/` and run
-`plumb adapters` to update them.
+`plumb index` scans the tracked source files for their public surface —
+functions, structs, enums, traits, constants, modules — and writes the result
+to `.plumb/index.md`; that index rides into the generated instruction files,
+which is what gives an agent the "what already exists" map instead of a blank
+repository. `plumb adapters` renders the working agreement, index included,
+into the instruction files each coding harness reads: `CLAUDE.md`,
+`AGENTS.md`, `.cursorrules` and `.github/copilot-instructions.md`, refusing
+to overwrite a hand-written file unless `--force` is given. This repository
+dogfoods all three: its own `.plumb/index.md`, `CLAUDE.md`, `AGENTS.md`,
+`.cursorrules` and Copilot instructions are generated output, not
+hand-maintained — edit `.plumb/` or the tracked sources and run `plumb index`
+then `plumb adapters` to update them.
 
-Two Tier B gates run alongside the manifest check. The first validates
+Three Tier B gates run alongside the manifest check. The first validates
 imports against the module boundaries declared in `.plumb/architecture.md`:
 each changed file is attributed to a module by path, its imports are
 extracted with a heuristic, line-based matcher covering the Rust, Python and
@@ -114,6 +119,21 @@ warning: CLAUDE.md does not match .plumb/; run `plumb adapters` [adapter-drift]
   evidence: taxonomy §11
 ```
 
+The third warns when `.plumb/index.md` has drifted from the tracked source
+files it claims to describe — a fresh scan of every tracked source, compared
+against what is committed, on every invocation rather than only over changed
+paths, the same shape as the adapter-drift check above. Dogfooded on this
+repository: appending a function to `crates/plumb-cli/src/git.rs` without
+re-running `plumb index` produces
+
+```console
+warning: .plumb/index.md does not match the tracked sources; run `plumb index` [index-stale]
+  .plumb/index.md
+  evidence: taxonomy §11
+```
+
+and the run exits `2`.
+
 ### What `--diff` compares, and what that rules out
 
 **`--diff` compares the working tree against HEAD** — it runs
@@ -132,12 +152,12 @@ checking anything. Checking a commit or a commit range needs
 implemented yet**. Until it is, the useful place for the manifest and
 boundary checks is a developer's working copy.
 
-The adapter-drift check is the one exception to that promise, by design: it
-does not read `git diff` at all, and runs once per invocation over the
-repository's current state rather than over changed paths — see the second
-Tier B gate described above. So a fresh clone of a repository whose committed
-generated files have already drifted from `.plumb/` still exits `2` on the
-very first, otherwise-untouched run.
+The adapter-drift and index-stale checks are the exception to that promise,
+by design: neither reads `git diff` at all, and both run once per invocation
+over the repository's current state rather than over changed paths — see the
+second and third Tier B gates described above. So a fresh clone of a
+repository whose committed generated files or index have already drifted
+still exits `2` on the very first, otherwise-untouched run.
 
 The pre-commit story is not honest yet either, and for a reason worth stating
 precisely: **`git commit` commits the index, and this gate never reads the
@@ -289,6 +309,20 @@ nothing else is there:
   line-ending differences: git normalises CRLF and LF at checkout, so
   comparing raw bytes would warn on every clean Windows clone for a
   difference nobody introduced.
+- The index scanner's symbol extraction is line-based, the same shape of
+  matcher as the boundary gate's imports: a macro-generated declaration is
+  missed because it never exists as a literal source line, and a multi-line
+  declaration is missed past its first line. It also does not know about
+  strings or comments, so a `pub fn` spelled out inside either can
+  false-positive — dogfooding this on Plumb's own source caught it directly:
+  `crates/plumb-core/src/index.rs` has a test whose expected-output string
+  contains the literal text `pub fn run`, `pub struct Outcome`, `pub fn
+  method` and `pub const MARKER`, and all four are listed in `.plumb/index.md`
+  as if they were real public items of that module, alongside the ones that
+  actually are. And Rust's own `pub` is over-inclusive on purpose here: `pub`
+  inside a private (non-`pub`) module is still counted as public surface,
+  because the scanner reads declarations, not effective visibility — so it
+  over-reports rather than staying silent on re-exports it cannot trace.
 
 What the first rule rests on: Spracklen et al. (USENIX Security 2025) measured
 19.7% of packages referenced by code-generating models as non-existent, across
