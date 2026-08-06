@@ -75,6 +75,39 @@ pub fn violations(architecture: &Architecture, path: &str, text: &str) -> Vec<Vi
     found
 }
 
+/// Whether `path` is worth reading at all for the boundary gate: a known
+/// source extension, attributed to a module the architecture declares.
+///
+/// Path-only — no `text` parameter — on purpose. These are exactly the two
+/// filters [`violations`] applies before it can report anything: an
+/// unrecognised extension is matched by no arm of [`imports`], and a file
+/// under no declared module is skipped by [`violations`] outright before a
+/// single import is even extracted. Answering both without a byte of the
+/// file's content is what lets a caller decide not to read it — see
+/// `plumb-cli`'s `check.rs`, which calls this before `std::fs::read` so a
+/// diff touching an unrelated multi-gigabyte binary pays nothing for a scan
+/// whose answer was always going to be "no findings".
+pub fn is_scannable(architecture: &Architecture, path: &str) -> bool {
+    is_known_extension(&extension(path)) && module_of(architecture, path).is_some()
+}
+
+/// Whether `extension` (already lowercased by [`extension`]) is one
+/// [`imports`] does anything with.
+///
+/// This list must be kept identical to the extensions matched in
+/// [`imports`]'s dispatch. The two are not merged into one because
+/// [`imports`] needs `text` to decide *which* extractor to run, while
+/// [`is_scannable`] must answer with no `text` at all — but a language added
+/// to one list and not the other silently reopens the gap `is_scannable`
+/// exists to close: `every_known_extension_is_dispatched_by_imports` pins
+/// that they stay in step.
+fn is_known_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs"
+    )
+}
+
 /// The lowercased extension of `path`'s final path segment, or empty when it
 /// has none.
 ///
@@ -391,5 +424,53 @@ mod tests {
             "use plumb_core::manifest;\n",
         );
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// The two path-only filters `violations` applies before it can report
+    /// anything, exposed so a caller can decide not to read a file's content
+    /// at all when neither would ever let it through.
+    #[test]
+    fn is_scannable_requires_both_a_known_extension_and_a_declared_module() {
+        let architecture = two_crates();
+        assert!(
+            is_scannable(&architecture, "crates/plumb-core/src/lib.rs"),
+            "a Rust file under a declared module must be scannable"
+        );
+        assert!(
+            !is_scannable(&architecture, "crates/plumb-core/README.md"),
+            "an unrecognised extension must not be scannable, even under a declared module"
+        );
+        assert!(
+            !is_scannable(&architecture, "tools/gen.rs"),
+            "a file under no declared module must not be scannable, even with a known extension"
+        );
+        assert!(
+            !is_scannable(&architecture, "tools/README"),
+            "neither condition holding must not be scannable"
+        );
+    }
+
+    /// `is_scannable`'s extension list and `imports`'s dispatch must name the
+    /// same languages. This would fail the moment one names a language the
+    /// other does not: `is_scannable` returning true for an extension
+    /// `imports` does nothing with would let a scannable file through with
+    /// no findings ever possible, and the reverse would skip reading a file
+    /// `imports` could actually have extracted something from.
+    #[test]
+    fn every_known_extension_is_dispatched_by_imports() {
+        for ext in ["rs", "py", "ts", "tsx", "js", "jsx", "mjs", "cjs"] {
+            let path = format!("x.{ext}");
+            assert!(
+                is_known_extension(ext),
+                "{ext} is dispatched by imports but not recognised by is_known_extension"
+            );
+            // A line every one of these extractors recognises as an import,
+            // so a wired-up extractor never returns empty here by coincidence.
+            let text = "import x\nuse x\nfrom 'x'\nrequire('x')\n";
+            assert!(
+                !imports(&path, text).is_empty(),
+                "{ext} is recognised by is_known_extension but imports() extracted nothing for it"
+            );
+        }
     }
 }
