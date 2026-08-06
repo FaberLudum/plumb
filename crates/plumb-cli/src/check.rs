@@ -147,6 +147,15 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
             // say about it — but it may still be source the boundary gate
             // cares about, when an architecture was found above.
             //
+            // `is_scannable` is asked before a single byte is read: both
+            // filters it applies — a known source extension, attribution to
+            // a declared module — are path-only, so a diff touching a file
+            // neither filter would ever let through (an unrelated binary, a
+            // file the architecture says nothing about) is never opened at
+            // all. Reading it first and filtering after, as this used to,
+            // meant a multi-gigabyte binary in the diff was read in full for
+            // a scan whose answer was always going to be no findings.
+            //
             // Unreadable here is skipped rather than reported. `read_manifest`
             // draws that line for manifests because a manifest Plumb cannot
             // read is a manifest whose added dependencies go unchecked, which
@@ -154,6 +163,7 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
             // yet — coverage reporting for source files is a future gate's
             // job, not this one's.
             if let Some(architecture) = &architecture
+                && boundaries::is_scannable(architecture, &path)
                 && let Ok(bytes) = std::fs::read(repo.join(&path))
             {
                 let text = String::from_utf8_lossy(&bytes);
@@ -1104,6 +1114,30 @@ mod tests {
     fn without_an_architecture_no_boundary_checking_happens() {
         let dir = repo_with(&[("crates/core/src/lib.rs", "// empty\n")]);
         write(dir.path(), "crates/core/src/lib.rs", "use cli::main;\n");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
+    /// A file `boundaries::is_scannable` would reject — no declared module
+    /// owns `tools/` here — must never trip the gate, however unreadable its
+    /// content is. This is the shape of file the filter exists to keep
+    /// `std::fs::read` away from entirely: before `is_scannable` gated the
+    /// read, a diff-wide multi-gigabyte binary under no declared module was
+    /// still read in full for a scan that could only ever answer "no
+    /// findings". The invalid UTF-8 byte here is not the point — it stands
+    /// in for "content this gate has no business opening" and pins that
+    /// opening it anyway would at least not crash the run.
+    #[test]
+    fn a_file_under_no_declared_module_never_blocks_however_it_is_encoded() {
+        let dir = repo_with(&[("tools/gen.rs", "// empty\n")]);
+        write_architecture(dir.path(), "## crates/core\n\nMay depend on: (none).\n");
+        fs::write(
+            dir.path().join("tools/gen.rs"),
+            [b'u', b's', b'e', b' ', 0xFF, b';', b'\n'],
+        )
+        .expect("write");
 
         let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
 
