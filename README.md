@@ -84,6 +84,31 @@ unless `--force` is given. This repository dogfoods both: its own
 generated output, not hand-maintained — edit `.plumb/` and run
 `plumb adapters` to update them.
 
+Two Tier B gates run alongside the manifest check. The first validates
+imports against the module boundaries declared in `.plumb/architecture.md`:
+each changed file is attributed to a module by path, its imports are
+extracted with a heuristic, line-based matcher covering the Rust, Python and
+JavaScript/TypeScript family of import syntaxes, and an import reaching a
+module outside the file's declared `May depend on:` list warns rather than
+blocks:
+
+```console
+warning: crates/plumb-core/src/lib.rs imports `plumb_cli`, but crates/plumb-core may not depend on crates/plumb-cli [boundary]
+  crates/plumb-core/src/lib.rs
+  evidence: taxonomy §4.5
+```
+
+The second warns when the generated instruction files have drifted from
+`.plumb/` — the same four files `plumb adapters` writes, compared against
+what re-rendering `.plumb/` right now would produce, byte-for-byte apart from
+line endings:
+
+```console
+warning: CLAUDE.md does not match .plumb/; run `plumb adapters` [adapter-drift]
+  CLAUDE.md
+  evidence: taxonomy §11
+```
+
 ### What `--diff` compares, and what that rules out
 
 **`--diff` compares the working tree against HEAD** — it runs
@@ -238,6 +263,17 @@ nothing else is there:
   manifest moved into place carried its additions past the gate unlooked-at.
 - `git diff HEAD` reports tracked changes only, so a manifest that has never
   been staged is invisible.
+- The boundary gate's import extraction is line-based, one `text.lines()`
+  pass per file: an import split across multiple lines (a parenthesised
+  Python `from x import (a, b)`, a multi-line Rust `use` group) is missed
+  entirely, and it does not know about strings or comments, so an
+  import-shaped line inside either can false-positive. Module attribution is
+  path-prefix-based — the longest declared module path that prefixes the
+  file's path wins — so a module boundary that does not line up with the
+  directory layout is not seen. The drift comparison deliberately ignores
+  line-ending differences: git normalises CRLF and LF at checkout, so
+  comparing raw bytes would warn on every clean Windows clone for a
+  difference nobody introduced.
 
 What the first rule rests on: Spracklen et al. (USENIX Security 2025) measured
 19.7% of packages referenced by code-generating models as non-existent, across
@@ -246,8 +282,7 @@ models — a three- to fourfold drop, and still not zero. 43% of hallucinated
 names recur identically across runs, which is what makes slopsquatting a
 practical attack rather than a theoretical one.
 
-Not yet built: the boundary check that makes an architecture document
-executable, volume and coupling tracking, and the cross-session drift
+Not yet built: volume and coupling tracking, and the cross-session drift
 instrumentation. Those are what distinguish Plumb from a linter, and they come
 next.
 
