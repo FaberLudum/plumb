@@ -58,6 +58,20 @@ pub fn run(repo: &Path, force: bool, mut output: impl Write) -> Result<()> {
         }
     }
 
+    // Checked for every target before any target is written, for the same
+    // reason as the marker guard above: `create_dir_all` runs lazily inside
+    // the write loop, so without this a directory component that exists as a
+    // regular file only fails once earlier targets are already on disk.
+    for target in &targets {
+        if let Some(blocker) = write_blocked_by(repo, target.path) {
+            bail!(
+                "{} cannot be written because {} exists and is not a directory",
+                target.path,
+                blocker.display()
+            );
+        }
+    }
+
     for target in &targets {
         let path = repo.join(target.path);
         if let Some(parent) = path.parent() {
@@ -69,6 +83,24 @@ pub fn run(repo: &Path, force: bool, mut output: impl Write) -> Result<()> {
         writeln!(output, "wrote {}", target.path)?;
     }
     Ok(())
+}
+
+/// The first ancestor directory of `target_path`, if any, that already
+/// exists as something other than a directory — which would make
+/// `create_dir_all` fail partway through the write loop.
+fn write_blocked_by(repo: &Path, target_path: &str) -> Option<std::path::PathBuf> {
+    let path = repo.join(target_path);
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        if dir == repo {
+            break;
+        }
+        if dir.exists() && !dir.is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        ancestor = dir.parent();
+    }
+    None
 }
 
 fn read_artefacts(repo: &Path) -> Result<Artefacts> {
