@@ -110,9 +110,7 @@ fn python_symbols(text: &str) -> Vec<Symbol> {
 
         // Try to match "def NAME"
         if let Some(rest) = line.strip_prefix("def ") {
-            if let Some(n) = extract_python_name(rest)
-                .filter(|name| !name.starts_with('_'))
-            {
+            if let Some(n) = extract_python_name(rest).filter(|name| !name.starts_with('_')) {
                 found.push(Symbol {
                     kind: "def".to_string(),
                     name: n,
@@ -120,9 +118,7 @@ fn python_symbols(text: &str) -> Vec<Symbol> {
             }
         } else if let Some(rest) = line.strip_prefix("class ") {
             // Try to match "class NAME"
-            if let Some(n) = extract_python_name(rest)
-                .filter(|name| !name.starts_with('_'))
-            {
+            if let Some(n) = extract_python_name(rest).filter(|name| !name.starts_with('_')) {
                 found.push(Symbol {
                     kind: "class".to_string(),
                     name: n,
