@@ -11,19 +11,44 @@
 //! version cannot read are all failures to establish anything, and a gate that
 //! blocked on those would be switched off within the week.
 //!
+//! A second, independent gate rides the same loop over changed paths: a
+//! `.plumb/architecture.md` at the repository root, when one exists, is
+//! parsed once and every non-manifest changed path is checked against it for
+//! imports crossing a boundary the architecture does not declare. No
+//! architecture file is not an error — most repositories have not written one
+//! yet — so its absence disables this gate silently rather than warning about
+//! a file that was never required to exist. It reports only violations the
+//! change introduces, the same before/after shape as the package-existence
+//! gate: a violation already present at HEAD is reported again on every
+//! future touch to that file unless it is filtered, which mutes the gate on
+//! exactly the projects that would benefit most from it — one legacy
+//! crossing, and every unrelated edit to that file warns forever.
+//!
 //! Failing to establish anything is not the same as having nothing to say, and
 //! the two were conflated here once already. A manifest that could not be read
 //! or was only partly understood still moves no verdict on any package, but it
 //! is a Tier B finding — the run warns, so exit 0 keeps meaning "checked and
 //! clean" rather than "checked, or silently skipped".
+//!
+//! A third gate runs once per invocation, after the loop rather than inside
+//! it: whether `CLAUDE.md`, `AGENTS.md`, `.cursorrules` and
+//! `.github/copilot-instructions.md` still match what `plumb adapters` would
+//! render from `.plumb/` right now. All four `.plumb/` artefacts present is
+//! the bar for checking at all — a partially adopted `.plumb/` is `plumb
+//! init`'s business, not this one's — and a target that does not exist on
+//! disk is not adopted, so it is not drift either. Only a target that exists
+//! and differs is.
 
 use crate::git;
 use crate::registry::{Existence, Registry};
 use anyhow::Result;
+use plumb_core::architecture::{self, Architecture};
+use plumb_core::boundaries;
 use plumb_core::deps::{self, AddedDependency};
 use plumb_core::finding::{Finding, Tier, exit_code};
 use plumb_core::manifest::{self, Ecosystem, Gap};
 use plumb_core::report::{render_json, render_text};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// The taxonomy section behind the package existence rule.
@@ -100,6 +125,17 @@ fn read_manifest(path: &Path) -> std::result::Result<Option<String>, String> {
 fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
 
+    // Read once for the whole run, not once per path: a registry is reused
+    // across manifests for the same reason (see `run`'s doc comment), and an
+    // architecture is no different. Absent — most repositories have not
+    // written one — the boundary gate is off for this run, silently: a
+    // project that never adopted `.plumb/architecture.md` has made no claim
+    // this gate could hold it to.
+    let architecture: Option<Architecture> =
+        std::fs::read_to_string(repo.join(".plumb").join("architecture.md"))
+            .ok()
+            .map(|text| architecture::parse(&text));
+
     for path in git::changed_paths(repo)? {
         // Ask the dispatch itself whether this path is a manifest, before
         // reading a byte of it. A change touching a thousand source files
@@ -113,6 +149,68 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         // sound only while the dispatch is a function of the path alone, which
         // `a_manifest_is_recognised_from_its_path_alone` pins.
         if manifest::parse(&path, "").is_none() {
+            // Not a manifest, so the package-existence gate has nothing to
+            // say about it — but it may still be source the boundary gate
+            // cares about, when an architecture was found above.
+            //
+            // `is_scannable` is asked before a single byte is read: both
+            // filters it applies — a known source extension, attribution to
+            // a declared module — are path-only, so a diff touching a file
+            // neither filter would ever let through (an unrelated binary, a
+            // file the architecture says nothing about) is never opened at
+            // all. Reading it first and filtering after, as this used to,
+            // meant a multi-gigabyte binary in the diff was read in full for
+            // a scan whose answer was always going to be no findings.
+            //
+            // Unreadable here is skipped rather than reported. `read_manifest`
+            // draws that line for manifests because a manifest Plumb cannot
+            // read is a manifest whose added dependencies go unchecked, which
+            // is worth a finding. A source file this gate cannot read is not
+            // yet — coverage reporting for source files is a future gate's
+            // job, not this one's.
+            if let Some(architecture) = &architecture
+                && boundaries::is_scannable(architecture, &path)
+                && let Ok(bytes) = std::fs::read(repo.join(&path))
+            {
+                let text = String::from_utf8_lossy(&bytes);
+                let current = boundaries::violations(architecture, &path, &text);
+
+                // Reported only if it is new, the same shape of fix
+                // `deps::added` already is for the manifest gate: a
+                // violation already present at HEAD predates this change,
+                // so it is legacy adoption noise, not something the change
+                // did. Warning on it anyway is the gate-muting hazard Tier B
+                // exists to avoid — a comment-only edit to a file that has
+                // always had an undeclared import would warn forever, which
+                // is exactly the kind of warning a reader learns to ignore
+                // and then the whole gate gets turned off. Comparing by
+                // `(import, to_module)` pair rather than by line number is
+                // what keeps a line move from resurrecting a suppressed
+                // warning.
+                //
+                // `git::show_at_head` is strict about UTF-8 and aborts the
+                // whole run for the manifest path (see its doc comment);
+                // that is disproportionate for a Tier B gate over a file
+                // this gate is not even required to be able to read, so an
+                // undecodable HEAD version is folded into the same "no text
+                // at HEAD" case as a genuinely new file — both mean every
+                // current violation counts as new.
+                let at_head = match git::show_at_head(repo, &path) {
+                    Ok(Some(head_text)) => boundaries::violations(architecture, &path, &head_text),
+                    Ok(None) | Err(_) => Vec::new(),
+                };
+                let pre_existing: HashSet<(&str, &str)> = at_head
+                    .iter()
+                    .map(|violation| (violation.import.as_str(), violation.to_module.as_str()))
+                    .collect();
+
+                for violation in &current {
+                    let key = (violation.import.as_str(), violation.to_module.as_str());
+                    if !pre_existing.contains(&key) {
+                        findings.push(boundary_violation(violation));
+                    }
+                }
+            }
             continue;
         }
 
@@ -186,7 +284,85 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         }
     }
 
+    // A third, independent gate: whether the generated instruction files
+    // still match what `plumb adapters` would produce from `.plumb/` today.
+    // Not folded into the per-path loop above, because drift is a property
+    // of the repository's current state, not of any one changed path — a
+    // change that touches nothing in `.plumb/` can still be the run that
+    // first notices a drift introduced earlier and never checked. All four
+    // artefacts present is the bar for checking at all; a partially adopted
+    // `.plumb/` is init's business, not this gate's, so it says nothing
+    // rather than guessing at a project name or rendering from gaps.
+    if let Some(artefacts) = read_full_plumb(repo) {
+        let project_name = plumb_core::layer1::project_name_of(&artefacts.architecture)
+            .unwrap_or_else(|| {
+                repo.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "project".to_string())
+            });
+        for adapter in plumb_core::adapters::render(&project_name, &artefacts) {
+            // `read`, not `read_to_string`: a target that exists but is not
+            // valid UTF-8 must still be compared, and bytes rather than
+            // `String` is what lets that comparison happen without an
+            // encoding decision — a target this process cannot decode is not
+            // equal to a rendered `String` no matter how it is read, so it
+            // counts as drifted rather than crashing or being skipped.
+            match std::fs::read(repo.join(adapter.path)) {
+                Ok(bytes) if !same_ignoring_line_endings(&bytes, adapter.content.as_bytes()) => {
+                    findings.push(adapter_drift(adapter.path));
+                }
+                // Matches (up to line endings), or absent — absent is not
+                // adopted, not drifted.
+                Ok(_) | Err(_) => {}
+            }
+        }
+    }
+
     Ok(findings)
+}
+
+/// Whether two byte strings are equal once every `\r` is dropped.
+///
+/// Git normalises line endings at checkout — `core.autocrlf` on Windows, or
+/// any repository whose `.gitattributes` marks text files, materialises
+/// committed LF content as CRLF on disk — while [`plumb_core::adapters::render`]
+/// always produces LF-only content. A byte-for-byte comparison therefore
+/// found drift on an ordinary clean checkout on Windows: this was caught by
+/// dogfooding on this very repository, where `check --diff` warned on all
+/// four generated files with nothing actually out of step with `.plumb/`. A
+/// gate that warns on every Windows clone is a gate that gets disabled before
+/// it catches anything real — the exact failure mode Tier B exists to avoid.
+///
+/// Filtering `\r` out of both sides, rather than only the disk side, keeps
+/// the comparison symmetric: a repository with `autocrlf=input` normalises
+/// committed CRLF to LF on checkout, so the disk side can just as easily be
+/// the LF one. Staying at the byte level — never decoding to `String` — is
+/// what keeps a non-UTF-8 disk file comparing rather than crashing, which
+/// `a_generated_file_that_drifted_warns`'s sibling tests rely on.
+fn same_ignoring_line_endings(disk: &[u8], rendered: &[u8]) -> bool {
+    disk.iter()
+        .filter(|&&b| b != b'\r')
+        .eq(rendered.iter().filter(|&&b| b != b'\r'))
+}
+
+/// Reads all four `.plumb/` artefacts, if every one of them is present.
+///
+/// One artefact missing is not an error and not a finding: partial adoption
+/// is what `plumb init` and `plumb adapters` are for, and this gate has
+/// nothing to compare against until all four exist. Reading with
+/// `read_to_string` rather than treating a decode failure as drift is
+/// deliberate — an artefact this process cannot even read is not a claim
+/// about what any generated file should contain, so it disables the gate the
+/// same way absence does rather than manufacturing a comparison from nothing.
+fn read_full_plumb(repo: &Path) -> Option<plumb_core::layer1::Artefacts> {
+    let plumb_dir = repo.join(".plumb");
+    let read = |name: &str| std::fs::read_to_string(plumb_dir.join(name)).ok();
+    Some(plumb_core::layer1::Artefacts {
+        architecture: read("architecture.md")?,
+        conventions: read("conventions.md")?,
+        invariants: read("invariants.md")?,
+        index: read("index.md")?,
+    })
 }
 
 /// A manifest Plumb recognised and did not fully read.
@@ -227,6 +403,40 @@ fn package_does_not_exist(dependency: &AddedDependency) -> Finding {
         ),
         location: dependency.manifest.clone(),
         source: PACKAGE_EXISTS_SOURCE.to_string(),
+    }
+}
+
+/// A boundary crossing the architecture does not declare.
+///
+/// Tier B: the evidence (taxonomy §4.5) is a preprint, and path-based module
+/// attribution plus line-based import extraction is a heuristic that needs
+/// per-project calibration before it can block anything.
+fn boundary_violation(violation: &boundaries::Violation) -> Finding {
+    Finding {
+        rule: "boundary".to_string(),
+        tier: Tier::B,
+        message: format!(
+            "{} imports `{}`, but {} may not depend on {}",
+            violation.file, violation.import, violation.from_module, violation.to_module
+        ),
+        location: violation.file.clone(),
+        source: "taxonomy §4.5".to_string(),
+    }
+}
+
+/// A generated instruction file that no longer matches its source.
+///
+/// Tier B, and it describes this repository's artefacts rather than the code
+/// under inspection — the same honesty class as taxonomy §10. An agent reads
+/// the generated file; when the file and `.plumb/` disagree, the agent is
+/// working from rules nobody chose.
+fn adapter_drift(path: &str) -> Finding {
+    Finding {
+        rule: "adapter-drift".to_string(),
+        tier: Tier::B,
+        message: format!("{path} does not match .plumb/; run `plumb adapters`"),
+        location: path.to_string(),
+        source: "taxonomy §11".to_string(),
     }
 }
 
@@ -294,6 +504,11 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent");
         }
         fs::write(path, body).expect("write");
+    }
+
+    fn write_architecture(dir: &Path, body: &str) {
+        fs::create_dir_all(dir.join(".plumb")).expect("create .plumb");
+        fs::write(dir.join(".plumb").join("architecture.md"), body).expect("write");
     }
 
     /// A repository whose HEAD holds `files`.
@@ -901,6 +1116,183 @@ mod tests {
         assert!(registry.asked().is_empty(), "asked: {:?}", registry.asked());
     }
 
+    #[test]
+    fn an_undeclared_cross_module_import_warns() {
+        let dir = repo_with(&[("crates/core/src/lib.rs", "// empty\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        write(dir.path(), "crates/core/src/lib.rs", "use cli::main;\n");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert!(output.contains("boundary"), "output was: {output}");
+        assert!(
+            output.contains("crates/core/src/lib.rs"),
+            "output was: {output}"
+        );
+    }
+
+    #[test]
+    fn a_declared_dependency_does_not_warn() {
+        let dir = repo_with(&[("crates/cli/src/main.rs", "// empty\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        write(dir.path(), "crates/cli/src/main.rs", "use core::check;\n");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
+    #[test]
+    fn without_an_architecture_no_boundary_checking_happens() {
+        let dir = repo_with(&[("crates/core/src/lib.rs", "// empty\n")]);
+        write(dir.path(), "crates/core/src/lib.rs", "use cli::main;\n");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
+    /// The gate-muting hazard: the boundary gate used to scan the whole
+    /// working-tree file, so a legacy import that already violated the
+    /// boundary at HEAD re-warned on every touch to the file — even a
+    /// comment-only one, which is what this pins. The manifest gate already
+    /// solved this class of false positive by comparing before against
+    /// after and reporting only additions; the boundary gate must do the
+    /// same, or a project with one pre-existing crossing gets a warning on
+    /// every unrelated edit to that file forever, which is exactly how a
+    /// Tier B gate gets muted.
+    #[test]
+    fn a_pre_existing_violation_does_not_re_warn_on_an_unrelated_touch() {
+        let dir = repo_with(&[("crates/core/src/lib.rs", "use cli::main;\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        // The violation is already there at HEAD; this change adds only an
+        // unrelated comment line.
+        write(
+            dir.path(),
+            "crates/core/src/lib.rs",
+            "use cli::main;\n// unrelated comment\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(
+            outcome.code, 0,
+            "a violation that predates the change re-warned on an unrelated touch: {}",
+            outcome.report
+        );
+    }
+
+    /// The other half: a change that adds a genuinely new undeclared import
+    /// on top of a pre-existing one reports only the new one. Line moves
+    /// must not resurrect a suppressed warning either, which is why the
+    /// comparison is by `(import, to_module)` pair rather than by line
+    /// number — not separately pinned here because nothing in this gate's
+    /// extraction is line-position-sensitive to begin with.
+    #[test]
+    fn a_new_import_is_reported_while_a_pre_existing_one_is_not() {
+        let dir = repo_with(&[("crates/core/src/lib.rs", "use cli::main;\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n\
+             ## crates/cli\n\nMay depend on: core.\n\n\
+             ## crates/extra\n\nMay depend on: (none).\n",
+        );
+        write(
+            dir.path(),
+            "crates/core/src/lib.rs",
+            "use cli::main;\nuse extra::thing;\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert_eq!(
+            output.matches("[boundary]").count(),
+            1,
+            "the pre-existing violation must not be reported alongside the new one: {output}"
+        );
+        assert!(output.contains("extra"), "output was: {output}");
+        assert!(
+            !output.contains("may not depend on crates/cli"),
+            "the pre-existing violation re-warned: {output}"
+        );
+    }
+
+    /// `git::show_at_head` is strict about UTF-8 and aborts the whole run
+    /// with exit 70 for the manifest path — see its doc comment. That is
+    /// disproportionate here: a HEAD version of a scanned file this process
+    /// cannot decode is not a reason to abort a Tier B gate, so it is read
+    /// as "no text at HEAD", the same as a new file, meaning every current
+    /// violation counts as new rather than the run failing outside the 0/1/2
+    /// contract.
+    #[test]
+    fn an_undecodable_head_version_of_a_scanned_file_does_not_abort_the_run() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        fs::create_dir_all(dir.path().join("crates/core/src")).expect("create dirs");
+        // `\xFF` is not valid UTF-8 in any position.
+        fs::write(
+            dir.path().join("crates/core/src/lib.rs"),
+            [b'/', b'/', 0xFF, b'\n'],
+        )
+        .expect("write");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "initial"]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        write(dir.path(), "crates/core/src/lib.rs", "use cli::main;\n");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(
+            code, 2,
+            "an undecodable HEAD version must not abort the run, and the current \
+             violation, having no comparable HEAD text, must still be reported: {output}"
+        );
+        assert!(output.contains("boundary"), "output was: {output}");
+    }
+
+    /// A file `boundaries::is_scannable` would reject — no declared module
+    /// owns `tools/` here — must never trip the gate, however unreadable its
+    /// content is. This is the shape of file the filter exists to keep
+    /// `std::fs::read` away from entirely: before `is_scannable` gated the
+    /// read, a diff-wide multi-gigabyte binary under no declared module was
+    /// still read in full for a scan that could only ever answer "no
+    /// findings". The invalid UTF-8 byte here is not the point — it stands
+    /// in for "content this gate has no business opening" and pins that
+    /// opening it anyway would at least not crash the run.
+    #[test]
+    fn a_file_under_no_declared_module_never_blocks_however_it_is_encoded() {
+        let dir = repo_with(&[("tools/gen.rs", "// empty\n")]);
+        write_architecture(dir.path(), "## crates/core\n\nMay depend on: (none).\n");
+        fs::write(
+            dir.path().join("tools/gen.rs"),
+            [b'u', b's', b'e', b' ', 0xFF, b';', b'\n'],
+        )
+        .expect("write");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
     /// A clean tree is a clean run, not an error.
     #[test]
     fn an_unchanged_repository_reports_nothing() {
@@ -990,6 +1382,63 @@ mod tests {
             scenarios.len(),
             "a scenario emitted no finding, so it proves nothing: {findings:#?}"
         );
+
+        // The boundary finding is emitted from a different site than the
+        // manifest scenarios above and needs an architecture in place.
+        let dir = repo_with(&[("crates/core/src/lib.rs", "// empty\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        write(dir.path(), "crates/core/src/lib.rs", "use cli::main;\n");
+        let boundary_findings = collect(dir.path(), &registry).expect("check runs");
+        assert_eq!(
+            boundary_findings.len(),
+            1,
+            "the boundary scenario emitted no finding: {boundary_findings:#?}"
+        );
+        findings.extend(boundary_findings);
+
+        // The drift finding is emitted from a fourth site and needs a full
+        // `.plumb/` plus at least one generated target on disk. Only
+        // `CLAUDE.md` is generated here, rather than all four targets via
+        // `generate_adapters`: every rendered target embeds all four
+        // artefacts in its body, so drifting one artefact after generating
+        // all four would make all four targets differ and this scenario
+        // would no longer prove "exactly one finding, exactly one citation" —
+        // it would still pass, but by coincidence rather than by design.
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        {
+            use plumb_core::adapters::render;
+            use plumb_core::layer1::Artefacts;
+            let read = |name: &str| {
+                fs::read_to_string(dir.path().join(".plumb").join(name)).expect("read artefact")
+            };
+            let artefacts = Artefacts {
+                architecture: read("architecture.md"),
+                conventions: read("conventions.md"),
+                invariants: read("invariants.md"),
+                index: read("index.md"),
+            };
+            let claude_md = render("demo", &artefacts)
+                .into_iter()
+                .find(|adapter| adapter.path == "CLAUDE.md")
+                .expect("render includes CLAUDE.md");
+            fs::write(dir.path().join(claude_md.path), claude_md.content).expect("write adapter");
+        }
+        let conventions = dir.path().join(".plumb").join("conventions.md");
+        let mut text = fs::read_to_string(&conventions).expect("read");
+        text.push_str("\n## New rule\n\nAdded after generation.\n");
+        fs::write(&conventions, text).expect("write");
+        let drift_findings = collect(dir.path(), &registry).expect("check runs");
+        assert_eq!(
+            drift_findings.len(),
+            1,
+            "the drift scenario emitted the wrong number of findings: {drift_findings:#?}"
+        );
+        findings.extend(drift_findings);
+
         for finding in &findings {
             assert!(!finding.rule.is_empty(), "unnamed rule: {finding:#?}");
             assert!(!finding.message.is_empty(), "empty message: {finding:#?}");
@@ -1240,5 +1689,108 @@ mod tests {
 
         assert_eq!(code, 2, "output was: {output}");
         assert!(output.contains("requirements.txt"), "output was: {output}");
+    }
+
+    fn write_full_plumb(dir: &Path) {
+        use plumb_core::layer1::{Bootstrap, greenfield};
+        let artefacts = greenfield(&Bootstrap {
+            project_name: "demo".to_string(),
+            modules: vec!["core".to_string()],
+            error_handling: "errors propagate".to_string(),
+            test_shape: "one behaviour per test".to_string(),
+        });
+        fs::create_dir_all(dir.join(".plumb")).expect("create .plumb");
+        for (name, content) in [
+            ("architecture.md", &artefacts.architecture),
+            ("conventions.md", &artefacts.conventions),
+            ("invariants.md", &artefacts.invariants),
+            ("index.md", &artefacts.index),
+        ] {
+            fs::write(dir.join(".plumb").join(name), content).expect("write artefact");
+        }
+    }
+
+    fn generate_adapters(dir: &Path) {
+        use plumb_core::adapters::render;
+        use plumb_core::layer1::Artefacts;
+        let read =
+            |name: &str| fs::read_to_string(dir.join(".plumb").join(name)).expect("read artefact");
+        let artefacts = Artefacts {
+            architecture: read("architecture.md"),
+            conventions: read("conventions.md"),
+            invariants: read("invariants.md"),
+            index: read("index.md"),
+        };
+        for adapter in render("demo", &artefacts) {
+            let path = dir.join(adapter.path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create parent");
+            }
+            fs::write(path, adapter.content).expect("write adapter");
+        }
+    }
+
+    #[test]
+    fn a_generated_file_that_drifted_warns() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        generate_adapters(dir.path());
+        // Drift: the working agreement changes, nobody regenerates.
+        let conventions = dir.path().join(".plumb").join("conventions.md");
+        let mut text = fs::read_to_string(&conventions).expect("read");
+        text.push_str("\n## New rule\n\nAdded after generation.\n");
+        fs::write(&conventions, text).expect("write");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert!(output.contains("adapter-drift"), "output was: {output}");
+        assert!(output.contains("plumb adapters"), "output was: {output}");
+    }
+
+    #[test]
+    fn matching_generated_files_do_not_warn() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        generate_adapters(dir.path());
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
+    /// Git normalises line endings at checkout (`core.autocrlf` on Windows,
+    /// or any repository whose `.gitattributes` declares text files), and
+    /// `render` produces LF-only content. A checkout of exactly what was
+    /// committed can therefore hold CRLF bytes for content that is, per git,
+    /// unchanged and undrifted — the false positive the dogfood run on this
+    /// repository actually hit on Windows, warning on all four targets on a
+    /// clean tree. The comparison must not mistake a line-ending convention
+    /// for a content difference, or this gate warns on every ordinary
+    /// Windows clone and gets turned off before it catches anything real.
+    #[test]
+    fn a_target_that_differs_only_by_line_ending_does_not_warn() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        generate_adapters(dir.path());
+        let claude_md = dir.path().join("CLAUDE.md");
+        let content = fs::read_to_string(&claude_md).expect("read");
+        fs::write(&claude_md, content.replace('\n', "\r\n")).expect("write CRLF");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
+    #[test]
+    fn an_absent_generated_file_is_not_drift() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        // No adapters generated at all: adoption is optional, absence is not drift.
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
     }
 }

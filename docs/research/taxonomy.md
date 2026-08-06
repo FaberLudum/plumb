@@ -372,3 +372,23 @@ on avoiding.
 
 This section has no invalidation condition, because it rests on no claim that
 new evidence could refute. It goes away when the formats are read.
+
+## 11. Self-consistency
+
+Like §10, the findings in this section describe Plumb's own artefacts, not
+defects in the code under inspection, and rest on no evidence row.
+
+The agent instruction files (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`,
+`.github/copilot-instructions.md`) are generated from `.plumb/` and declare
+so in their first line. Between generations they can drift: someone edits
+`.plumb/` and forgets to regenerate, or edits a generated file directly
+despite the marker. Either way, the next agent session reads rules that no
+longer match the working agreement — rules nobody chose.
+
+| Finding | Emitted when |
+|---|---|
+| `adapter-drift` | A generated instruction file exists and does not match what `plumb adapters` would produce from the current `.plumb/` |
+
+Tier B: drift is a maintenance fault in this repository, not a defect in the
+change under review, and blocking a diff over it would punish the wrong
+commit. The remedy is one command, and the finding names it.

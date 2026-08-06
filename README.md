@@ -84,6 +84,36 @@ unless `--force` is given. This repository dogfoods both: its own
 generated output, not hand-maintained — edit `.plumb/` and run
 `plumb adapters` to update them.
 
+Two Tier B gates run alongside the manifest check. The first validates
+imports against the module boundaries declared in `.plumb/architecture.md`:
+each changed file is attributed to a module by path, its imports are
+extracted with a heuristic, line-based matcher covering the Rust, Python and
+JavaScript/TypeScript family of import syntaxes, and an import reaching a
+module outside the file's declared `May depend on:` list warns rather than
+blocks. The comparison is before-versus-after, the same shape as the
+manifest check's: **the gate reports only violations the change
+introduces.** A violation already present at HEAD is legacy, not something
+the change did, so a comment-only edit to a file that has always had an
+undeclared import does not re-warn on it — only a violation the change adds
+is reported:
+
+```console
+warning: crates/plumb-core/src/lib.rs imports `plumb_cli`, but crates/plumb-core may not depend on crates/plumb-cli [boundary]
+  crates/plumb-core/src/lib.rs
+  evidence: taxonomy §4.5
+```
+
+The second warns when the generated instruction files have drifted from
+`.plumb/` — the same four files `plumb adapters` writes, compared against
+what re-rendering `.plumb/` right now would produce, byte-for-byte apart from
+line endings:
+
+```console
+warning: CLAUDE.md does not match .plumb/; run `plumb adapters` [adapter-drift]
+  CLAUDE.md
+  evidence: taxonomy §11
+```
+
 ### What `--diff` compares, and what that rules out
 
 **`--diff` compares the working tree against HEAD** — it runs
@@ -94,12 +124,20 @@ manifest blocks while it is uncommitted and passes the moment it is committed.
 
 The consequence is worth stating plainly, because it is the opposite of what a
 gate is usually assumed to do. **On a fresh clone or a CI checkout the tree is
-clean, so `plumb check --diff` examines nothing and exits `0` whatever the
-commit under test added.** Wiring this into a CI job that clones a branch gives
-a permanently green check that is not checking anything. Checking a commit or a
-commit range needs `plumb check --repo`, which the design spec reserves and
-**which is not implemented yet**. Until it is, the useful place for `--diff` is
-a developer's working copy.
+clean, so the manifest and boundary checks examine nothing and exit `0`
+whatever the commit under test added.** Wiring this into a CI job that clones
+a branch gives those two checks a permanently green result that is not
+checking anything. Checking a commit or a commit range needs
+`plumb check --repo`, which the design spec reserves and **which is not
+implemented yet**. Until it is, the useful place for the manifest and
+boundary checks is a developer's working copy.
+
+The adapter-drift check is the one exception to that promise, by design: it
+does not read `git diff` at all, and runs once per invocation over the
+repository's current state rather than over changed paths — see the second
+Tier B gate described above. So a fresh clone of a repository whose committed
+generated files have already drifted from `.plumb/` still exits `2` on the
+very first, otherwise-untouched run.
 
 The pre-commit story is not honest yet either, and for a reason worth stating
 precisely: **`git commit` commits the index, and this gate never reads the
@@ -238,6 +276,19 @@ nothing else is there:
   manifest moved into place carried its additions past the gate unlooked-at.
 - `git diff HEAD` reports tracked changes only, so a manifest that has never
   been staged is invisible.
+- The boundary gate's import extraction is line-based, one `text.lines()`
+  pass per file: an import split across multiple lines (a parenthesised
+  Python `from x import (a, b)`, a multi-line Rust `use` group) is missed
+  entirely, and so is one produced by macro expansion — a `use` a Rust macro
+  generates never exists as a literal source line for the extractor to match.
+  It also does not know about strings or comments, so an import-shaped line
+  inside either can false-positive. Module attribution is
+  path-prefix-based — the longest declared module path that prefixes the
+  file's path wins — so a module boundary that does not line up with the
+  directory layout is not seen. The drift comparison deliberately ignores
+  line-ending differences: git normalises CRLF and LF at checkout, so
+  comparing raw bytes would warn on every clean Windows clone for a
+  difference nobody introduced.
 
 What the first rule rests on: Spracklen et al. (USENIX Security 2025) measured
 19.7% of packages referenced by code-generating models as non-existent, across
@@ -246,8 +297,7 @@ models — a three- to fourfold drop, and still not zero. 43% of hallucinated
 names recur identically across runs, which is what makes slopsquatting a
 practical attack rather than a theoretical one.
 
-Not yet built: the boundary check that makes an architecture document
-executable, volume and coupling tracking, and the cross-session drift
+Not yet built: volume and coupling tracking, and the cross-session drift
 instrumentation. Those are what distinguish Plumb from a linter, and they come
 next.
 
