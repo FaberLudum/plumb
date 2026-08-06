@@ -409,6 +409,13 @@ fn check_exits_one_when_an_added_dependency_does_not_exist() {
 /// import to exit code 2. `--offline` is exercised for the same reason as the
 /// package-existence test above: this rule never touches a registry, so the
 /// flag is here to prove that, not because the finding needs it.
+///
+/// The source file is committed *without* the import: the boundary gate
+/// reports only violations a change introduces, so a violation already
+/// present at HEAD — which committing it alongside the architecture in one
+/// commit would have produced — would be legacy and suppressed rather than
+/// reported. Introducing it in the working-tree edit is what makes this the
+/// change that adds it.
 #[test]
 fn an_undeclared_import_warns_end_to_end() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
@@ -421,10 +428,10 @@ fn an_undeclared_import_warns_end_to_end() {
     .expect("write architecture");
     let src = in_repo(dir.path(), "crates/core/src");
     std::fs::create_dir_all(&src).expect("create src");
-    std::fs::write(src.join("lib.rs"), "use cli::main;\n").expect("write source");
+    std::fs::write(src.join("lib.rs"), "// empty\n").expect("write source");
     run_git(&repo(dir.path()), &["add", "-A"]);
     run_git(&repo(dir.path()), &["commit", "-m", "add architecture"]);
-    std::fs::write(src.join("lib.rs"), "use cli::main;\nuse cli::extra;\n").expect("edit source");
+    std::fs::write(src.join("lib.rs"), "use cli::main;\n").expect("edit source");
 
     plumb_in(dir.path())
         .args(["check", "--diff", "--offline"])
