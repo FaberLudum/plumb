@@ -309,3 +309,66 @@ This taxonomy is dated by construction. Revisit it if:
 - In Mao et al. many differences are statistically significant yet negligible
   in magnitude, because the sample is enormous. Always read the p-value and
   Cohen's d together.
+
+## 10. Coverage reporting
+
+The findings in this section are not derived from evidence, and saying so is
+the point of the section.
+
+Everything above describes defects in AI-generated code, each traced to a
+study. A coverage finding describes Plumb instead: it reports that Plumb did
+not read something, so that a run which established nothing cannot be mistaken
+for a run which found nothing.
+
+They exist because the alternative is worse. A manifest in a format Plumb does
+not parse used to yield an empty dependency set, which the gate reported as a
+clean result — a silent false negative on a blocking gate, which is the exact
+failure this project was built to catch. Reporting the gap is the honest
+reading; filing it among the evidence rows would break the project's first rule
+in the act of honouring it.
+
+Coverage findings are Tier B. They warn and never block, because a gate that
+fails on every project in a format it has not learned yet is uninstalled before
+it catches anything.
+
+| Finding | Emitted when |
+|---|---|
+| `manifest-understood` | A recognised manifest declares dependencies in a form Plumb did not read, or could not be read at all |
+
+A coverage finding reports a gap; it does not close it, and it does not claim
+the gap list is complete. Two silences remain and neither is expressible as a
+`manifest-understood` finding, because in both cases nothing was read to have a
+finding attached to it:
+
+- A file not recognised as a manifest at all. Recognition is by filename, so
+  `requirements.in`, `setup.py`, `setup.cfg`, `Pipfile` and an included
+  `requirements/base.txt` are never opened.
+- A dependency declaration inside a recognised `pyproject.toml` that is not
+  spelled `dependencies`. The rule for tool tables keys on that word, so
+  `[tool.tox.env_run_base].deps`, `[tool.briefcase.app.<name>].requires`,
+  `[tool.cibuildwheel].test-requires`, `[tool.flit.metadata].dev-requires` and
+  PEP 725 `[external]` produce no finding. `[build-system].requires` is
+  excluded deliberately — it is in nearly every `pyproject.toml`, and a warning
+  that always fires is one nobody reads.
+
+Both are silent false negatives on a blocking gate. They are recorded here
+rather than in the README alone because the README describes a version and this
+describes the rule.
+
+A third silence is a decision rather than a gap, and belongs here for the same
+reason `[build-system].requires` does. **Conda dependencies are out of scope.**
+The rule in §4.1 is about a package that does not exist in the registry the
+project installs from, and Plumb reads one registry, PyPI. Conda tables —
+pixi's `dependencies`, `build-`, `host-` and `run-dependencies` at any scope,
+and `[tool.conda-lock.dependencies]` — produce no finding, while pixi's
+`pypi-dependencies` tables still do.
+
+A hallucinated conda package is a real defect and this is not a claim
+otherwise; it is a claim that it needs its own rule with its own evidence and
+its own registry. It is excluded rather than warned about because it is the one
+gap that could never be closed by writing a parser, so the warning would be
+permanent and unactionable — the failure mode the Tier B argument above depends
+on avoiding.
+
+This section has no invalidation condition, because it rests on no claim that
+new evidence could refute. It goes away when the formats are read.

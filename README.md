@@ -126,27 +126,95 @@ nothing else is there:
   `requirements_notes.txt`, and prose read as a manifest manufactures blocking
   findings. Restricting it to `-` narrows that problem without solving it — see
   the first of the false positives below.
-- Some of the formats it does not read are worse than unread, because they are
-  unread while *looking* checked. A Poetry `pyproject.toml` with no `[project]`
-  table is recognised as a manifest and read as declaring nothing, so every
-  dependency it gains passes unexamined and unreported. A `requirements/`
-  directory is the same trap and is easy to underestimate: the common layout is
-  a top-level `requirements.txt` that does little more than
-  `-r requirements/base.txt`,
-  and that top-level file **is** recognised — but every `-`-prefixed line is
-  dropped, so it reads as declaring nothing, reports nothing, and exits `0`
-  while `requirements/base.txt` gains whatever it likes. Includes are not
-  followed and `requirements/base.txt` is not recognised on its own either.
-  `requirements.in`, the hand-edited pip-compile source — which is exactly
+- Several declaration shapes inside a recognised manifest are still unread,
+  but no longer silently. Each produces a Tier B `manifest-understood` warning
+  naming the file and the shape that was missed, and the run exits `2`:
+  - Poetry's tables, `[tool.poetry.dependencies]` and
+    `[tool.poetry.group.<name>.dependencies]`.
+  - PEP 735 `[dependency-groups]`.
+  - An `-r`/`--requirement` include in a requirements file.
+  - PEP 621 `dynamic` listing `dependencies` or `optional-dependencies` — the
+    standard's own way of saying the dependencies are declared somewhere else.
+  - Any key named `dependencies`, or ending in `-dependencies`, anywhere under
+    `[tool]`, whose value is an array or a table. This is a rule about the
+    shape of the key, not a list of tools, and it is what covers
+    `[tool.pdm.dev-dependencies]`, `[tool.hatch.envs.<name>].dependencies` and
+    `.extra-dependencies`, `[tool.uv].dev-dependencies` and
+    `.extra-build-dependencies`, `[tool.pixi.pypi-dependencies]` and its conda
+    tables, `[tool.setuptools.dynamic].dependencies` and the pre-1.2
+    `[tool.poetry.dev-dependencies]` — none of which is named anywhere in the
+    code.
+
+    Four things keep it off ordinary configuration. A matched key is not
+    descended into, so a package called `dependencies` inside a pixi or Poetry
+    table is not read as a second declaration. Only an array or a table
+    counts, which is what excludes hatch's boolean
+    `require-runtime-dependencies`. Two exclusions are carried explicitly,
+    both against a published schema: `[tool.ruff.analyze.include-dependencies]`
+    maps file paths to file globs rather than to packages, and uv's
+    `constraint-`, `build-constraint-`, `override-`, `exclude-` and rye's
+    `excluded-dependencies` are documented as never installing anything, so a
+    project using them is read in full and does not warn. And the conda
+    namespaces are out of scope — see below.
+  - A declaration whose value is not the shape the reader takes, such as
+    `dependencies = "ruff"` instead of a list.
+
+  On a Poetry manifest it prints `pyproject.toml was not fully read:
+  dependencies are declared under [tool.poetry] — in
+  [tool.poetry.dependencies] or a [tool.poetry.group.<name>.dependencies]
+  table — which Plumb does not read`; on a PDM one, `pyproject.toml was not
+  fully read: dependencies are declared in [tool.pdm.dev-dependencies], which
+  Plumb does not read`. The dependencies in those shapes are still not looked
+  up — the warning reports the gap, it does not close it.
+- What is still silent, measured rather than assumed. Two kinds:
+
+  **Files not recognised as manifests at all**, because recognition is by
+  filename: `requirements.in` (the hand-edited pip-compile source — exactly
   where a hallucinated name is introduced, before it is ever compiled into a
-  pinned `requirements.txt` — is not recognised at all. All of these are silent
-  false negatives on a blocking gate, which is the failure this project exists
-  to catch, and they are the next thing to fix. PEP 735 `[dependency-groups]`
-  and `[build-system].requires` are simply unread.
-- A manifest that is not valid UTF-8 is not checked. One Latin-1 byte in a
-  comment is enough, and it costs the whole file, not the line: nothing in it
-  is looked up. The run says so on stderr and still exits `0`, because a file
-  the tool could not decode is not evidence that a package does not exist.
+  pinned `requirements.txt`), `requirements/base.txt` reached through an
+  include (the include warns, the file it names is never read on its own),
+  `requirements_dev.txt` and `requirements.dev.txt`, `setup.py`, `setup.cfg`
+  and `Pipfile`.
+
+  **Declarations inside a recognised `pyproject.toml` that are not spelled
+  `dependencies`.** The structural rule above keys on that word, so a tool
+  that calls its dependency list something else is not covered. Measured, each
+  exiting `0` with `plumb: no findings` over a package that does not exist:
+  `[tool.tox.env_run_base].deps`, `[tool.briefcase.app.<name>].requires`,
+  `[tool.cibuildwheel].test-requires`, `[tool.flit.metadata].dev-requires`,
+  PEP 725 `[external].dependencies` — which is a top-level table, not under
+  `[tool]` — and `[build-system].requires`. The last is deliberate: it appears
+  in nearly every `pyproject.toml`, and a warning that always fires is one
+  nobody reads.
+
+  These are silent false negatives on a blocking gate, which is the failure
+  this project exists to catch. The list is what was measured, not what was
+  assumed, and it is not a proof that nothing else is missing: any tool that
+  spells its dependency list some third way is silent until someone finds it.
+- **Conda dependencies are out of scope, and are not checked at all.** This is
+  a decision rather than a gap, and it is stated here because the difference is
+  invisible from the outside: a pixi or conda-lock project gets a clean run, and
+  a clean run must not be read as "these dependencies were checked".
+
+  Plumb checks one registry, PyPI. A hallucinated conda package is a real
+  defect and Plumb does not look for it. Concretely, no warning and no lookup
+  for `[tool.pixi.dependencies]`, `[tool.pixi.feature.<name>.dependencies]`,
+  pixi's `build-`, `host-` and `run-dependencies` under `package`, its
+  per-platform `[tool.pixi.target.<platform>.…]` variants, or
+  `[tool.conda-lock.dependencies]`. The PyPI side of the same file *is*
+  checked: `[tool.pixi.pypi-dependencies]` and its scoped forms warn like any
+  other unread table.
+
+  Excluded rather than warned about because this gap has no resolution path.
+  Every other one ends when someone teaches Plumb the format; this one never
+  would, since Plumb will not look a conda name up on PyPI — so it would be a
+  permanent warning that no action could clear, landing on projects that did
+  nothing wrong. Checking conda needs a conda rule with its own evidence.
+- A manifest that is not valid UTF-8 is not checked, and says so the same way:
+  one Latin-1 byte costs the whole file, nothing in it is looked up, and the
+  run warns — `requirements.txt was not fully read: not valid UTF-8 at byte 5`
+  — and exits `2`. Not a blocking `1`, because a file the tool could not
+  decode is not evidence that a package does not exist.
 - Three known false positives, each of which blocks a build that is fine. The
   worst is prose: a file named `requirements-and-design.txt` is read as a
   manifest, and the first word of every line becomes a name to look up — four
