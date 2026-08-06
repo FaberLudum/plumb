@@ -1,0 +1,38 @@
+# Every outbound request must go through the timeout-bounded agent held by
+# PyPiRegistry. ureq 3.3 sets no timeout on a bodyless GET by default, so any
+# route that builds an agent from defaults silently reintroduces an unbounded
+# lookup — the regression no test can catch, because no test can observe which
+# agent issued a request without making one.
+#
+# Two kinds of route are listed. Every free function in `ureq` runs on a
+# use-once agent built from defaults, including the ones that read as careful:
+# `ureq::agent()` looks like asking for an agent rather than taking a shortcut,
+# and is the likeliest accidental bypass. `Agent::new_with_defaults` is the
+# same thing under a name that says so.
+#
+# `Agent::new_with_config` is deliberately absent: it takes a Config the caller
+# had to build, which is how `lookup_agent` sets the timeout. That leaves one
+# unguarded route — building a Config and not setting a timeout on it — and it
+# cannot be closed without forbidding the call this crate depends on. It is a
+# far less likely accident than the others: it takes an explicit Config at the
+# very site where the timeout would otherwise be set, rather than looking like
+# the careful option.
+#
+# Every entry below was verified to fire by substituting it at the call site
+# and running the gate. The previous version of this list also looked complete.
+disallowed-methods = [
+    # Free functions — each runs on a use-once agent built from defaults.
+    { path = "ureq::agent", reason = "builds a default agent with no timeout; use PyPiRegistry's" },
+    { path = "ureq::run", reason = "builds a default agent with no timeout; use PyPiRegistry's" },
+    { path = "ureq::get", reason = "builds a default agent with no timeout; use PyPiRegistry's" },
+    { path = "ureq::head", reason = "builds a default agent with no timeout; use PyPiRegistry's" },
+    { path = "ureq::post", reason = "the binary makes exactly one class of request" },
+    { path = "ureq::put", reason = "the binary makes exactly one class of request" },
+    { path = "ureq::delete", reason = "the binary makes exactly one class of request" },
+    { path = "ureq::patch", reason = "the binary makes exactly one class of request" },
+    { path = "ureq::options", reason = "the binary makes exactly one class of request" },
+    { path = "ureq::connect", reason = "the binary makes exactly one class of request" },
+    { path = "ureq::trace", reason = "the binary makes exactly one class of request" },
+    # Constructor that skips the config the timeout lives in.
+    { path = "ureq::Agent::new_with_defaults", reason = "no timeout; use lookup_agent" },
+]

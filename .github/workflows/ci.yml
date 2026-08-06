@@ -1,0 +1,151 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # A workflow that only runs on `main` and on pull requests cannot be tried
+  # from a branch before it is proposed, and an untested gate is the thing this
+  # project exists to complain about.
+  workflow_dispatch:
+
+# Nothing here writes anything back.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # All three, because the suite shells out to a real `git` and builds real
+    # repositories in temporary directories, and that is where the platforms
+    # differ: path separators, the short and long spellings of a Windows
+    # temporary directory, the `/private` symlink in front of one on macOS, a
+    # non-ASCII path such as `café/requirements.txt` and how each filesystem
+    # normalises it, and what closing the read end of a pipe reports to the
+    # writer. Every one of those has a test. Development happened on Windows,
+    # so Linux and macOS are the platforms whose behaviour nobody has watched.
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # A full run takes a few minutes. This is a bound on a hang, not a target:
+    # without it the default is six hours of a runner spent on a build that has
+    # already stopped making progress.
+    timeout-minutes: 20
+    strategy:
+      # A failure on one platform must not hide a different failure on another;
+      # telling those apart is the entire reason for the matrix.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      # Pinned to the commit rather than to the `v7` tag, which moves. A
+      # project whose one shipped rule is about unverified dependencies should
+      # not take a moving reference to someone else's code on trust. The
+      # comment names which release this is, and it stays true: a tag can be
+      # repointed, a commit cannot be rewritten.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No toolchain version appears in this file. `rust-toolchain.toml` names
+      # the channel and the components, and `rustup toolchain install` with no
+      # toolchain named installs the one that file selects — run here it reports
+      # `it's active because: overridden by rust-toolchain.toml`. Restating
+      # `1.97` in this file would create a second place to update and a silent
+      # drift when only one of them moves.
+      #
+      # `--no-self-update` because updating the toolchain manager is not
+      # something a build should decide to do halfway through itself.
+      - name: Install the toolchain rust-toolchain.toml selects
+        run: rustup toolchain install --no-self-update
+
+      - name: Fail if a different toolchain is what will run
+        shell: bash
+        run: bash .github/scripts/assert-toolchain.sh
+
+      # `cargo fmt` is the one command here without `--locked`: it is an
+      # external subcommand that never resolves dependencies, and it rejects the
+      # flag outright.
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  offline:
+    # No test in this suite may contact the network: every run either passes
+    # `--offline` or answers from a seeded cache. A runner has a route to the
+    # internet, so a test that started depending on a live PyPI lookup would go
+    # on passing here and only fail for whoever runs the suite on a train.
+    #
+    # This job runs the suite in a network namespace with no route out. What it
+    # catches is a test whose result depends on a real request: the lookup
+    # cannot be answered, the gate reports `Unknown`, and any assertion resting
+    # on a real answer fails. What it does not catch is a request whose answer
+    # is discarded — the gate is built to treat an unreachable registry as no
+    # evidence, so such a test would still pass. That is a slow and flaky test
+    # rather than a wrong one, and closing it would mean observing syscalls.
+    name: tests with no route out
+    runs-on: ubuntu-latest
+    # Lower than the matrix jobs, and for a sharper reason: this is the job
+    # that can hang rather than fail, because everything after `unshare` may be
+    # waiting on something that will never arrive.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the toolchain rust-toolchain.toml selects
+        run: rustup toolchain install --no-self-update
+
+      # The same assertion the matrix jobs make, for the same reason. Without
+      # it this job installs a toolchain and then runs the suite on whatever is
+      # in front of cargo — a green tick saying the suite passes offline on a
+      # compiler nobody chose, which is precisely the silent no-op the rest of
+      # this file exists to prevent.
+      - name: Fail if a different toolchain is what will run
+        shell: bash
+        run: bash .github/scripts/assert-toolchain.sh
+
+      # The positive control. Without it, a `curl` that is missing or broken
+      # would make the guard below report "no network" on a runner that has
+      # one, and this job would assert nothing at all while staying green.
+      #
+      # Retried, because this step alone can fail for a reason that has nothing
+      # to do with the code under test. The guard inside the namespace is not
+      # retried: there it has to fail, and fail quickly.
+      - name: Prove this runner can reach PyPI
+        run: >
+          curl --silent --show-error --fail --max-time 30
+          --retry 3 --retry-delay 5 --retry-all-errors
+          --output /dev/null https://pypi.org/simple/ruff/
+
+      - name: Build the tests while there is still a network
+        run: cargo test --workspace --locked --no-run
+
+      - name: Run them with no route out
+        run: |
+          cat > "$RUNNER_TEMP/offline.sh" <<'SH'
+          set -euo pipefail
+          run_as=$1
+          run_path=$2
+          run_home=$3
+
+          # Loopback only. The claim under test is that nothing outside is
+          # reachable, not that the machine has no network stack.
+          ip link set lo up
+
+          # The negative control, inside the namespace the tests will run in.
+          # Same request as the positive control one step earlier, so a pass
+          # here means the isolation is real and not that the URL moved.
+          #
+          # This one runs as root and the tests run as the invoking user, so
+          # the two controls do not resolve `curl` through the same PATH. That
+          # is tolerable because the first control proves the binary works and
+          # this one only has to prove the route is gone, which is a property
+          # of the namespace rather than of the user.
+          if curl --silent --fail --max-time 15 --output /dev/null https://pypi.org/simple/ruff/; then
+            echo "::error::the sandbox still reaches PyPI, so this job proves nothing"
+            exit 1
+          fi
+
+          # `--offline` so that cargo itself cannot be the thing that needs the
+          # network; everything it resolves was fetched by the step above.
+          exec runuser -u "$run_as" -- \
+            env "PATH=$run_path" "HOME=$run_home" \
+            cargo test --workspace --locked --offline
+          SH
+          sudo unshare --net bash "$RUNNER_TEMP/offline.sh" "$(id -un)" "$PATH" "$HOME"

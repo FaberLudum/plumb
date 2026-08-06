@@ -26,6 +26,18 @@ obj/
 .DS_Store
 Thumbs.db
 
-# Local framework output
+# Rust
+/target/
+
+# Local framework output.
+#
+# Plumb no longer writes here — the registry cache lives outside the repository,
+# because a cache file that can be committed can assert that a nonexistent
+# package exists and turn the gate off. This stays so that a leftover file from
+# an earlier version cannot be committed by accident. Plumb reports such a file
+# and never reads it.
 .plumb/cache/
+
+# Plan execution scratch
+.superpowers/
 *.local.json

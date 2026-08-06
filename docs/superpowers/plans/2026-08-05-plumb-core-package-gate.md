@@ -6,11 +6,13 @@
 
 **Architecture:** A Cargo workspace with two crates. `plumb-core` holds pure logic — diff parsing, manifest parsing, dependency set computation, findings and reporting — and is fully unit-testable without a filesystem or a network. `plumb-cli` is a thin binary that wires argument parsing, git invocation and the registry client around the core. Everything that touches the outside world (git, HTTP, cache files) lives behind a small trait so tests never hit the network.
 
-**Tech Stack:** Rust 2021, `clap` for arguments, `serde` and `serde_json` for the JSON report and cache, `toml` for `pyproject.toml`, `ureq` for blocking HTTP, `anyhow` for error handling, `assert_cmd` and `tempfile` for integration tests.
+**Tech Stack:** Rust 1.97, edition 2024, `clap` for arguments, `serde` and `serde_json` for the JSON report and cache, `toml` for `pyproject.toml`, `ureq` for blocking HTTP, `anyhow` for error handling, `assert_cmd` and `tempfile` for integration tests.
 
 ## Global Constraints
 
-- Rust edition 2021. MSRV 1.78, declared as `rust-version` in every crate manifest.
+- Rust edition 2024. MSRV 1.97, declared as `rust-version` in the workspace package table and inherited by every crate manifest.
+- Dependencies track current releases. No version is pinned by hand, ever. `Cargo.lock` is committed and builds use `--locked`. Plumb ships as a binary, so a low MSRV serves no consumer and buys nothing but dependency-resolution friction.
+- Before writing code against any crate, check its current version and its current API. Guessing a version from memory is how this plan first shipped a two-year-old MSRV and a `ureq` 2 error match that no longer compiles.
 - License Apache-2.0. Every source file starts with the two-line SPDX header: `// SPDX-License-Identifier: Apache-2.0` followed by `// Copyright 2026 The Plumb Authors`.
 - Exit codes are fixed: `0` clean, `1` Tier A violation, `2` warnings only. Nothing else.
 - No telemetry. The binary makes exactly one class of outbound request — registry lookups — and nothing else, ever.
@@ -85,7 +87,7 @@ Create `rust-toolchain.toml`:
 
 ```toml
 [toolchain]
-channel = "1.78"
+channel = "1.97"
 components = ["rustfmt", "clippy"]
 ```
 
@@ -94,24 +96,24 @@ Create `Cargo.toml` at the repository root:
 ```toml
 [workspace]
 members = ["crates/plumb-core", "crates/plumb-cli"]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.78"
+edition = "2024"
+rust-version = "1.97"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-clap = { version = "4", features = ["derive"] }
-ureq = { version = "2", features = ["json"] }
-assert_cmd = "2"
-predicates = "3"
-tempfile = "3"
+anyhow = "1.0.104"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.4"
+clap = { version = "4.6.5", features = ["derive"] }
+ureq = "3.3.0"
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"
 ```
 
 Create `crates/plumb-core/Cargo.toml`:
@@ -275,21 +277,252 @@ index 2222222..3333333 100644
     }
 
     #[test]
-    fn ignores_the_triple_plus_header() {
+    fn does_not_emit_the_post_image_header_as_an_added_line() {
         let files = parse_unified_diff(SAMPLE);
         for file in &files {
             for line in &file.added_lines {
-                assert!(!line.starts_with("++"), "header leaked into added lines: {line}");
+                assert!(
+                    !line.starts_with("++ b/"),
+                    "header leaked into added lines: {line}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn attributes_a_header_shaped_added_line_to_the_enclosing_file() {
+        const DIFF: &str = "\
+diff --git a/notes.md b/notes.md
+index 1111111..2222222 100644
+--- a/notes.md
++++ b/notes.md
+@@ -1 +1,3 @@
+ changelog
++++ b/phantom.txt
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "notes.md");
+        assert_eq!(
+            files[0].added_lines,
+            vec!["++ b/phantom.txt", "requestz==2.31.0"]
+        );
+    }
+
+    #[test]
+    fn attributes_added_lines_correctly_after_a_deletion() {
+        const DIFF: &str = "\
+diff --git a/old.py b/old.py
+deleted file mode 100644
+index 3333333..0000000
+--- a/old.py
++++ /dev/null
+@@ -1 +0,0 @@
+-print('gone')
+diff --git a/requirements.txt b/requirements.txt
+index 4444444..5555555 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1 +1,2 @@
+ ruff==0.4.0
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "requirements.txt");
+        assert_eq!(files[0].added_lines, vec!["requestz==2.31.0"]);
+    }
+
+    #[test]
+    fn ignores_header_shaped_lines_inside_a_hunk_body() {
+        const DIFF: &str = "\
+diff --git a/fixtures/sample.patch b/fixtures/sample.patch
+index 1111111..2222222 100644
+--- a/fixtures/sample.patch
++++ b/fixtures/sample.patch
+@@ -1,2 +1,2 @@
+--- old
++++ b/phantom.txt
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "fixtures/sample.patch");
+        assert_eq!(files[0].added_lines, vec!["++ b/phantom.txt"]);
+    }
+
+    #[test]
+    fn records_a_newly_added_file() {
+        const DIFF: &str = "\
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000..6666666
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,2 @@
++ruff==0.4.0
++requestz==2.31.0
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "requirements.txt");
+        assert_eq!(
+            files[0].added_lines,
+            vec!["ruff==0.4.0", "requestz==2.31.0"]
+        );
+    }
+
+    #[test]
+    fn records_a_combined_diff_section_from_a_merge() {
+        const DIFF: &str = "\
+diff --git a/requirements.txt b/requirements.txt
+index 1111111..2222222 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1 +1,2 @@
+ ruff==0.4.0
++httpx==0.27.0
+diff --cc setup.py
+index 3333333,4444444..5555555
+--- a/setup.py
++++ b/setup.py
+@@@ -1,1 -1,1 +1,3 @@@
+  import setuptools
+++import requestz
+ +from_one_parent
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "requirements.txt");
+        assert_eq!(files[0].added_lines, vec!["httpx==0.27.0"]);
+        assert_eq!(files[1].path, "setup.py");
+        assert_eq!(
+            files[1].added_lines,
+            vec!["import requestz", "from_one_parent"]
+        );
     }
 
     #[test]
     fn returns_empty_for_an_empty_diff() {
         assert!(parse_unified_diff("").is_empty());
     }
+
+    #[test]
+    fn keeps_an_added_line_whose_content_starts_with_a_plus() {
+        const DIFF: &str = "\
+diff --git a/src/counter.c b/src/counter.c
+index 1111111..2222222 100644
+--- a/src/counter.c
++++ b/src/counter.c
+@@ -1 +1,2 @@
+ int total = 0;
+++i;
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].added_lines, vec!["+i;"]);
+    }
+
+    #[test]
+    fn keeps_an_added_line_whose_content_starts_with_two_pluses() {
+        const DIFF: &str = "\
+diff --git a/src/counter.c b/src/counter.c
+index 1111111..2222222 100644
+--- a/src/counter.c
++++ b/src/counter.c
+@@ -1 +1,2 @@
+ int total = 0;
++++i;
+";
+        let files = parse_unified_diff(DIFF);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].added_lines, vec!["++i;"]);
+    }
+
+    #[test]
+    fn skips_a_file_the_diff_deletes() {
+        const DIFF: &str = "\
+diff --git a/old.py b/old.py
+deleted file mode 100644
+index 3333333..0000000
+--- a/old.py
++++ /dev/null
+@@ -1 +0,0 @@
+-print('gone')
+";
+        assert!(parse_unified_diff(DIFF).is_empty());
+    }
 }
 ```
+
+The header guard is deliberately absent from the implementation below. The
+`+++ ` branch already consumes post-image headers, which git always emits with
+a trailing space. A second `starts_with("+++")` guard inside the added-line
+branch would catch nothing git produces and would silently drop any real added
+line whose content begins with `++`.
+
+Mind the plus count, because the first version of this note got it wrong.
+Content `+i;` appears in the diff as `++i;`, which the guard never matched —
+that case is safe either way and is pinned by
+`keeps_an_added_line_whose_content_starts_with_a_plus`. The defect needs
+content `++i;`, which appears as `+++i;`; that is what
+`keeps_an_added_line_whose_content_starts_with_two_pluses` pins, and it is the
+test that goes red against the guard.
+
+The added-line branch is a let-chain rather than a nested `if let`. Nesting
+trips clippy's `collapsible_if` under `-D warnings`; let-chains are stable in
+edition 2024 and the semantics are identical.
+
+Header recognition is confined to a file section's header block, and this is
+the third attempt at that rule — the first two chased individual cases and both
+leaked.
+
+A line is only read as a header between a `diff --git ` line and the section's
+first `@@ `. Inside a hunk body no line can be a header, because every hunk
+line carries a prefix: added lines start with `+`, removed with `-`, context
+with a space. So an unprefixed `diff --git ` or `@@ ` at column zero is always
+structural, never content.
+
+What the two earlier attempts missed, in order. Matching `+++ ` anywhere let an
+added line whose content begins with `++ ` render as `+++ foo`, invent a
+`ChangedFile` for a path no commit touched, and swallow every subsequent added
+line of the real file. Requiring a preceding `--- ` narrowed that but did not
+close it: a *removed* line whose content begins with `-- ` renders as `--- …`
+and reopens the gate, so an adjacent removed/added pair inside a committed
+`.patch` fixture reproduces the same phantom file.
+
+The failure mode is the same each time and it is the worst one this parser can
+produce: a false negative on a blocking gate. The real file ends up with no
+added lines, so a hallucinated package added to a manifest goes unreported.
+
+`records_a_newly_added_file` pins the case the rule most depends on. New files
+arrive as `--- /dev/null` followed by `+++ b/…`, and a rule that tightened the
+pre-image match would make every newly added manifest vanish from the gate with
+every other test still green.
+
+The fourth correction came from a re-reviewer who compiled the function and ran
+real git captures against it. Matching `diff --git ` and `@@ ` exactly dropped
+**combined diffs** entirely: plain `git diff` on a conflicted tree emits
+`diff --cc` sections with `@@@` hunk headers. Those files vanished, and their
+added lines were misattributed to whichever file preceded them.
+
+A correction to that correction, from the following review: `git diff HEAD` —
+the command Task 8 actually runs — never emits a combined diff. It compares the
+worktree against HEAD and always produces plain `diff --git` sections. Bare
+`git diff` and `git log -p --cc` do. The handling is still right, because this
+is a public function whose contract is "git diff output", but the urgency
+claimed for it was based on a command that does not behave that way.
+
+Widening the two prefixes alone would record the files but leave an extra
+marker column in the content — `++requestz==2.31.0` parses as a package named
+`+requestz`, turning a false negative into a false positive on a blocking gate.
+So the marker width is read from the hunk header's `@` count instead, which
+handles any arity from one rule rather than from another special case.
+
+`pub mod diff;` belongs in the **test** commit, not the implementation commit.
+Left to step 3, `diff.rs` is not part of the crate during the RED run, so
+`cargo test -p plumb-core diff` reports success over zero tests — a vacuous
+failure that proves nothing.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -308,30 +541,72 @@ pub struct ChangedFile {
     pub added_lines: Vec<String>,
 }
 
+/// Returns the content of `line` when it is an added line, given a marker
+/// column `marker_width` wide.
+///
+/// A combined diff from a merge carries one marker column per parent, so a
+/// line added relative to both parents reads `++foo` and one added relative to
+/// a single parent reads ` +foo`.
+fn added_content(line: &str, marker_width: usize) -> Option<&str> {
+    if !line.is_char_boundary(marker_width) {
+        return None;
+    }
+    let (markers, content) = line.split_at(marker_width);
+    if !markers.contains('+') {
+        return None;
+    }
+    if !markers.chars().all(|c| matches!(c, '+' | '-' | ' ')) {
+        return None;
+    }
+    Some(content)
+}
+
 /// Parses `git diff` output into one entry per changed file.
 ///
-/// Only the post-image path (`+++ b/...`) and added lines are extracted; hunk
-/// offsets and removals are deliberately ignored.
+/// Headers are only recognised inside a file section's header block — between
+/// a `diff --` line and the section's first `@@`. Inside a hunk body every line
+/// carries a marker column, so an unprefixed line at column zero is always
+/// structural and content can never be mistaken for a header.
+///
+/// Combined diffs from a merge — `diff --cc`, emitted by plain `git diff` on a
+/// conflicted tree and by `git log -p --cc` — carry one marker column per
+/// parent and open their hunks with `@@@`. The marker width is read from the
+/// hunk header so their content is sliced correctly.
+///
+/// Only the post-image path and added lines are extracted; hunk offsets,
+/// removals and renames are deliberately ignored. Input is assumed to be git
+/// output: a bare `diff -u` patch, which has no `diff --` opener, yields
+/// nothing.
 pub fn parse_unified_diff(diff: &str) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
+    let mut in_file_header = false;
+    let mut marker_width = 1usize;
 
     for line in diff.lines() {
-        if let Some(path) = line.strip_prefix("+++ ") {
-            let path = path.strip_prefix("b/").unwrap_or(path);
-            if path == "/dev/null" {
-                continue;
+        if line.starts_with("diff --") {
+            in_file_header = true;
+            marker_width = 1;
+        } else if let Some(rest) = line.strip_prefix("@@") {
+            in_file_header = false;
+            marker_width = 1 + rest.chars().take_while(|c| *c == '@').count();
+        } else if in_file_header {
+            // Do not collapse this into a let-chain on the arm above. The
+            // nested form swallows every other header-block line; a let-chain
+            // would let `index …`, `new file mode …` and the `--- ` line fall
+            // through to the added-line branch below.
+            if let Some(path) = line.strip_prefix("+++ ") {
+                let path = path.strip_prefix("b/").unwrap_or(path);
+                if path != "/dev/null" {
+                    files.push(ChangedFile {
+                        path: path.to_string(),
+                        added_lines: Vec::new(),
+                    });
+                }
             }
-            files.push(ChangedFile {
-                path: path.to_string(),
-                added_lines: Vec::new(),
-            });
-        } else if let Some(added) = line.strip_prefix('+') {
-            if line.starts_with("+++") {
-                continue;
-            }
-            if let Some(current) = files.last_mut() {
-                current.added_lines.push(added.to_string());
-            }
+        } else if let Some(added) = added_content(line, marker_width)
+            && let Some(current) = files.last_mut()
+        {
+            current.added_lines.push(added.to_string());
         }
     }
 
@@ -348,7 +623,7 @@ pub mod diff;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core diff`
-Expected: PASS, four tests.
+Expected: PASS, twelve tests.
 
 - [ ] **Step 5: Commit**
 
@@ -371,6 +646,12 @@ git commit -m "feat: parse unified diffs into changed files and added lines"
 
 `show_at_head` returning `None` rather than an error is load-bearing: a manifest added in this change has no HEAD version, and that is the normal case, not a failure.
 
+That same `Ok(None)` also swallows a genuinely broken git, since exit 128 does not distinguish "no such path at HEAD" from "not a repository". It is sound here for two reasons, and both are conditions rather than guarantees: `working_diff` runs first in Task 8's flow and surfaces a broken git as an error, and the residual failure is fail-safe for this gate — an unreadable HEAD manifest makes every dependency look newly added, so the gate over-checks rather than skips. If `show_at_head` ever gains a caller not preceded by `working_diff`, switch to discriminating with `git ls-tree`.
+
+Both functions carry `#[allow(dead_code, reason = "wired into the gate in a later task")]` until Task 8 calls them, because `dead_code` is a hard error under `-D warnings` and nothing calls them yet. `#[expect]` would be self-cleaning but does not work here: the tests exercise both functions, so the expectation goes unfulfilled in the test target. **Task 8 must delete both attributes**, and its own clippy run is what catches the omission.
+
+The `HEAD` argument to `git diff` needs its own test. Editing an unstaged file produces an identical diff with or without it, so the obvious tests pass against an implementation that omits `HEAD` — verified by mutation, not assumed. The case that discriminates is staged work, which is what a pre-commit hook sees: without `HEAD` the diff comes back empty and the gate passes in silence.
+
 - [ ] **Step 1: Write the failing test**
 
 Add to the bottom of `crates/plumb-cli/src/git.rs`:
@@ -382,21 +663,52 @@ mod tests {
     use std::fs;
     use std::process::Command;
 
+    /// Runs a git command in `dir` and asserts it succeeded.
+    ///
+    /// Asserting matters more than it looks. `.output().expect(..)` only checks
+    /// that git *spawned*; a command that runs and exits 128 is accepted
+    /// silently. A global `commit.gpgsign` with no usable key, or a global
+    /// `core.hooksPath`, then leaves the fixture with an unborn HEAD — and
+    /// `show_at_head_returns_none_for_a_new_file` passes against that, because
+    /// `git show HEAD:…` exits 128 and is mapped to `Ok(None)`. The one test
+    /// pinning the absence contract is the one that survives a fixture that
+    /// never ran.
+    ///
+    /// Ambient config is neutralised for the same reason: point
+    /// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at a path that does not
+    /// exist so the fixture cannot inherit this machine's settings.
+    fn run_git(dir: &Path, args: &[&str]) {
+        let no_config = dir.join("no-such-gitconfig");
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", &no_config)
+            .env("GIT_CONFIG_SYSTEM", &no_config)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temp dir");
-        let run = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .current_dir(dir.path())
-                .output()
-                .expect("git runs");
-        };
-        run(&["init", "-b", "main"]);
-        run(&["config", "user.email", "test@example.com"]);
-        run(&["config", "user.name", "Test"]);
+        run_git(dir.path(), &["init", "-b", "main"]);
+        // Per-directory attributes outrank the global attributes file and the
+        // XDG default at `~/.config/git/attributes`. Without this, a developer
+        // whose global attributes mark `*.txt` as `binary` or `-diff` gets a
+        // suppressed hunk from `working_diff` — which honours ambient config,
+        // as production does — while the fixture neutralises that config for
+        // its own commands. Pinning it here removes the one variable the tests
+        // cannot otherwise control.
+        fs::write(dir.path().join(".gitattributes"), "* diff\n").expect("write");
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
         fs::write(dir.path().join("requirements.txt"), "ruff==0.4.0\n").expect("write");
-        run(&["add", "-A"]);
-        run(&["commit", "-m", "initial"]);
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "initial"]);
         dir
     }
 
@@ -409,6 +721,43 @@ mod tests {
         let diff = working_diff(dir.path()).expect("diff succeeds");
 
         assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff}");
+    }
+
+    /// Pins the `HEAD` argument. Without it `git diff` reports only unstaged
+    /// work, so a pre-commit hook would see an empty diff and pass silently.
+    /// The other tests all pass against that mutant; this one does not.
+    #[test]
+    fn working_diff_reports_staged_changes() {
+        let dir = init_repo();
+        fs::write(
+            dir.path().join("requirements.txt"),
+            "ruff==0.4.0\nrequestz==2.31.0\n",
+        )
+        .expect("write");
+        run_git(dir.path(), &["add", "-A"]);
+
+        let diff = working_diff(dir.path()).expect("diff succeeds");
+
+        assert!(diff.contains("+requestz==2.31.0"), "diff was: {diff}");
+    }
+
+    #[test]
+    fn working_diff_tolerates_non_utf8_content() {
+        let dir = init_repo();
+        let path = dir.path().join("latin1.txt");
+        fs::write(&path, [0xE9u8, b'\n']).expect("write");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "add latin1"]);
+        fs::write(&path, [0xE9u8, 0xE9, b'\n']).expect("write");
+
+        let diff = working_diff(dir.path()).expect("diff succeeds despite non-UTF-8 content");
+
+        // Assert on the replacement character, not on the path. A diff whose
+        // hunk is suppressed — which a global `core.attributesFile` marking
+        // `*.txt binary` produces, since `working_diff` honours ambient config
+        // while the fixture does not — still contains the path, so a path
+        // assertion would pass without the lossy decoding being exercised.
+        assert!(diff.contains('\u{FFFD}'), "diff was: {diff}");
     }
 
     #[test]
@@ -452,6 +801,13 @@ use std::path::Path;
 use std::process::Command;
 
 /// Returns `git diff HEAD` for the given repository.
+///
+/// Output is decoded lossily, so it can contain U+FFFD wherever the diff
+/// carried bytes that are not valid UTF-8. See the body for why.
+// `allow` rather than `expect`: the tests below call both functions, so an
+// `expect(dead_code)` would go unfulfilled in the test target. Task 8 deletes
+// this attribute when it wires the functions into the gate.
+#[allow(dead_code, reason = "wired into the gate in a later task")]
 pub fn working_diff(repo: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["diff", "HEAD"])
@@ -466,13 +822,28 @@ pub fn working_diff(repo: &Path) -> Result<String> {
         );
     }
 
-    String::from_utf8(output.stdout).context("git produced non-UTF-8 output")
+    // Lossy on purpose. `git diff` writes hunk bytes verbatim for anything its
+    // NUL heuristic calls text, so one Latin-1 or Shift-JIS source file changed
+    // anywhere in the repository would otherwise fail the whole gate — for a
+    // file the gate would never have looked at, with an error the user cannot
+    // act on. Only manifest paths and added lines are read from this string,
+    // and replacement characters in an unrelated file change none of them.
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Returns the contents of `path` as committed at HEAD.
 ///
+/// `path` must be relative to the repository root and separated with forward
+/// slashes, the form `git diff` emits. A backslash-separated path resolves to
+/// nothing and reads as absence.
+///
 /// `Ok(None)` means the file does not exist at HEAD, which is the normal case
-/// for a file added by the change under inspection.
+/// for a file added by the change under inspection. It also absorbs a broken
+/// git, since exit 128 does not discriminate; that is acceptable only because
+/// `working_diff` runs first and surfaces such a failure, and because the
+/// residual case is fail-safe — an unreadable HEAD manifest makes every
+/// dependency look newly added, so the gate over-checks rather than skips.
+#[allow(dead_code, reason = "wired into the gate in a later task")]
 pub fn show_at_head(repo: &Path, path: &str) -> Result<Option<String>> {
     let output = Command::new("git")
         .arg("show")
@@ -499,7 +870,7 @@ mod git;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-cli git`
-Expected: PASS, three tests.
+Expected: PASS, five tests.
 
 - [ ] **Step 5: Commit**
 
@@ -554,6 +925,12 @@ mod tests {
     fn requirements_strips_extras_and_markers() {
         let text = "celery[redis]==5.3.0\nuvicorn ; python_version >= '3.9'\n";
         assert_eq!(parse_requirements(text), set(&["celery", "uvicorn"]));
+    }
+
+    #[test]
+    fn requirements_rejects_lines_that_cannot_be_package_names() {
+        let text = "<<<<<<< HEAD\nruff==0.4.0\n=======\nhttpx==0.27.0\n>>>>>>> feature\n";
+        assert_eq!(parse_requirements(text), set(&["httpx", "ruff"]));
     }
 
     #[test]
@@ -639,7 +1016,24 @@ fn normalise(name: &str) -> String {
 
 /// Extracts the distribution name from a PEP 508 requirement string.
 fn requirement_name(spec: &str) -> Option<String> {
-    let spec = spec.split('#').next().unwrap_or(spec).trim();
+    // Strip a UTF-8 BOM before trimming: U+FEFF is not `char::is_whitespace`,
+    // so without this the first requirement of a BOM-prefixed file fails the
+    // character check and is silently dropped.
+    let spec = spec.trim_start_matches('\u{feff}');
+    // Comments need no handling of their own. pip treats `#` as a comment only
+    // at line start or after whitespace: after whitespace the terminator search
+    // has already ended the name, and at line start the extracted text begins
+    // with `#`, which the character check rejects. The remaining case,
+    // `ruff#comment`, is malformed for pip, and dropping the whole line is the
+    // conservative reading — an earlier `split('#')` here recovered `ruff` and
+    // sent it to the registry instead, which is the wrong direction for a gate
+    // that blocks on an unresolved name.
+    //
+    // This function is also called on `pyproject.toml` array entries, where
+    // pip's comment rule does not apply at all. The conclusion survives: `#`
+    // appears there only inside direct references such as
+    // `mypkg@https://…#sha256=…`, where `@` ends the name first.
+    let spec = spec.trim();
     if spec.is_empty() || spec.starts_with('-') {
         return None;
     }
@@ -647,11 +1041,20 @@ fn requirement_name(spec: &str) -> Option<String> {
         .find(|c: char| c.is_whitespace() || "[<>=!~;@(".contains(c))
         .unwrap_or(spec.len());
     let name = normalise(&spec[..end]);
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
     }
+    // PEP 508 requires a name to begin and end with an alphanumeric. Checking
+    // the characters alone is not enough: a bare `.` is a legal
+    // requirements.txt line and normalises to `-`, and `numpy_` normalises to
+    // `numpy-`. Both pass a character test, neither is a package, and each
+    // would have become a blocking finding.
+    let anchored = name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name.ends_with(|c: char| c.is_ascii_alphanumeric());
+    if !anchored {
+        return None;
+    }
+    Some(name)
 }
 
 /// Parses a `requirements.txt`-style file into a set of distribution names.
@@ -665,10 +1068,15 @@ pub fn parse_requirements(text: &str) -> BTreeSet<String> {
 pub fn parse_pyproject(text: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
 
-    let Ok(value) = text.parse::<toml::Value>() else {
+    // `toml::Table`, not `toml::Value`: in toml 1.x `FromStr for Value` parses
+    // a single value expression, so a whole document fails and every
+    // pyproject.toml would look malformed — a silent gate bypass
+    // indistinguishable from the real malformed case. `Table` is the
+    // document-level type.
+    let Ok(document) = text.parse::<toml::Table>() else {
         return names;
     };
-    let Some(project) = value.get("project") else {
+    let Some(project) = document.get("project") else {
         return names;
     };
 
@@ -705,7 +1113,27 @@ pub fn parse(path: &str, text: &str) -> Option<BTreeSet<String>> {
     if file_name == "pyproject.toml" {
         return Some(parse_pyproject(text));
     }
-    if file_name.starts_with("requirements") && file_name.ends_with(".txt") {
+    // The character after `requirements` must be a separator. A bare prefix
+    // match pulls in any prose file whose name merely starts that way —
+    // `requirements_notes.txt` — and the pip parser then turns the first word
+    // of every line into a distribution name. Each is an unresolvable lookup,
+    // so English text manufactures blocking findings. No filename rule helps
+    // against a file genuinely named `requirements.txt` that holds prose; only
+    // content sniffing would.
+    //
+    // Only `-` and `.txt` are accepted, which gives up `requirements_dev.txt`
+    // and `requirements.dev.txt`. Each is indistinguishable by name from
+    // `requirements_notes.txt` and `requirements.notes.txt`, and the two
+    // errors are not symmetric: a missed manifest leaves dependencies
+    // unchecked, while parsed prose blocks a build over packages that never
+    // existed. `requirements-dev.txt` is the commonest spelling and still
+    // dispatches. `requirements-and-design.txt` still slips through, and a
+    // test asserts that rather than hiding it — no filename rule separates it
+    // from `requirements-dev.txt`.
+    if let Some(rest) = file_name.strip_prefix("requirements")
+        && rest.ends_with(".txt")
+        && (rest == ".txt" || rest.starts_with('-'))
+    {
         return Some(parse_requirements(text));
     }
 
@@ -722,7 +1150,7 @@ pub mod manifest;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core manifest`
-Expected: PASS, eight tests.
+Expected: PASS, fifteen tests.
 
 - [ ] **Step 5: Commit**
 
@@ -792,6 +1220,33 @@ mod tests {
         assert!(added("requirements.txt", Some(&before), &after).is_empty());
     }
 
+    /// Fails to compile the moment a second `Ecosystem` variant is added.
+    ///
+    /// `added` hard-codes `Ecosystem::PyPi`, which is correct while only
+    /// Python manifests are parsed. Without this test, landing a parser for
+    /// another ecosystem changes nothing here and nothing stops compiling —
+    /// Task 7 would then look an npm name up on PyPI, blocking a build over a
+    /// package that was never meant to be there. Exhaustiveness does not need
+    /// a second variant to exist; it fires the moment one is added, which is
+    /// precisely when this code becomes wrong.
+    #[test]
+    fn ecosystem_is_hard_coded_and_must_be_revisited_when_a_second_one_lands() {
+        match Ecosystem::PyPi {
+            Ecosystem::PyPi => {}
+        }
+    }
+
+    #[test]
+    fn treats_an_empty_before_set_the_same_as_a_missing_manifest() {
+        let before = BTreeSet::new();
+        let after = set(&["ruff", "httpx"]);
+
+        let added = added("pyproject.toml", Some(&before), &after);
+
+        let names: Vec<&str> = added.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["httpx", "ruff"]);
+    }
+
     #[test]
     fn reports_nothing_when_only_the_version_changed() {
         let before = set(&["ruff"]);
@@ -827,6 +1282,22 @@ pub struct AddedDependency {
 ///
 /// `before` is `None` when the manifest did not exist at HEAD, in which case
 /// every name in `after` counts as added.
+///
+/// Results come out in the sorted order of the underlying `BTreeSet`, so the
+/// findings a run reports do not depend on how the manifest was written.
+///
+/// Every result is labelled `Ecosystem::PyPi`. That is correct while
+/// `Ecosystem` has one variant, and silently wrong afterwards: a name looked up
+/// in the wrong registry either blocks a build or passes a hallucinated
+/// package. The test
+/// `ecosystem_is_hard_coded_and_must_be_revisited_when_a_second_one_lands`
+/// stops compiling the moment a second variant is added. Note what that does
+/// and does not catch: it keys on the enum, not on `manifest::parse`, so
+/// teaching `parse` a new manifest format without adding a variant trips
+/// nothing. The fix when a variant lands is for `manifest::parse` to return the
+/// ecosystem alongside the names and for this function to take it as an
+/// argument — not a second filename switch here, which would duplicate a
+/// dispatch rule that is already subtle.
 pub fn added(
     manifest_path: &str,
     before: Option<&BTreeSet<String>>,
@@ -855,7 +1326,7 @@ pub mod deps;
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p plumb-core deps`
-Expected: PASS, four tests.
+Expected: PASS, six tests.
 
 - [ ] **Step 5: Commit**
 
@@ -901,6 +1372,31 @@ mod tests {
         }
     }
 
+    /// Fails to compile when a `Tier` variant is added without deciding what
+    /// it costs.
+    ///
+    /// `exit_code` decides with `any`, so a new variant falls through to 0
+    /// silently — a rule that neither blocks nor warns, which is the one
+    /// outcome nobody would choose deliberately. The exhaustive match turns
+    /// that into a compile error.
+    #[test]
+    fn every_tier_must_state_what_it_costs() {
+        for tier in [Tier::A, Tier::B, Tier::C, Tier::Hygiene] {
+            let expected = match tier {
+                Tier::A => 1,
+                Tier::B => 2,
+                Tier::C | Tier::Hygiene => 0,
+            };
+            assert_eq!(exit_code(&[finding(tier)]), expected, "tier {tier:?}");
+        }
+    }
+
+    #[test]
+    fn measurement_only_findings_never_affect_the_exit_code() {
+        assert_eq!(exit_code(&[finding(Tier::C)]), 0);
+        assert_eq!(exit_code(&[finding(Tier::C), finding(Tier::Hygiene)]), 0);
+    }
+
     #[test]
     fn no_findings_exits_zero() {
         assert_eq!(exit_code(&[]), 0);
@@ -939,14 +1435,18 @@ mod tests {
     use super::*;
     use crate::finding::{Finding, Tier};
 
-    fn sample() -> Vec<Finding> {
-        vec![Finding {
+    fn at_tier(tier: Tier) -> Finding {
+        Finding {
             rule: "package-exists".to_string(),
-            tier: Tier::A,
+            tier,
             message: "package `requestz` does not exist on PyPI".to_string(),
             location: "requirements.txt".to_string(),
             source: "taxonomy §4.1".to_string(),
-        }]
+        }
+    }
+
+    fn sample() -> Vec<Finding> {
+        vec![at_tier(Tier::A)]
     }
 
     #[test]
@@ -974,6 +1474,28 @@ mod tests {
     #[test]
     fn json_output_is_an_empty_array_when_clean() {
         assert_eq!(render_json(&[]).trim(), "[]");
+    }
+
+    /// Pins the wire spelling of every tier, not just the one the sample uses.
+    ///
+    /// The JSON payload is a public contract: CI and Task 8 match on these
+    /// strings. Pinning only `A` leaves a rename of `B` or `C` — to `"warn"`
+    /// and `"note"`, say — passing the whole suite while breaking every
+    /// consumer.
+    #[test]
+    fn json_output_spells_every_tier_as_its_variant_name() {
+        let findings: Vec<Finding> = [Tier::A, Tier::B, Tier::C, Tier::Hygiene]
+            .into_iter()
+            .map(at_tier)
+            .collect();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&render_json(&findings)).expect("valid json");
+
+        assert_eq!(json[0]["tier"], "A");
+        assert_eq!(json[1]["tier"], "B");
+        assert_eq!(json[2]["tier"], "C");
+        assert_eq!(json[3]["tier"], "Hygiene");
     }
 }
 ```
@@ -1226,7 +1748,7 @@ impl Registry for PyPiRegistry {
         let url = format!("https://pypi.org/pypi/{name}/json");
         let outcome = match ureq::get(&url).call() {
             Ok(_) => Existence::Exists,
-            Err(ureq::Error::Status(404, _)) => Existence::Missing,
+            Err(ureq::Error::StatusCode(404)) => Existence::Missing,
             Err(_) => Existence::Unknown,
         };
 
@@ -1593,12 +2115,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.78
+      - uses: dtolnay/rust-toolchain@1.97
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --all --locked
 ```
 
 - [ ] **Step 2: Run the checks locally to see them fail or pass**
@@ -1730,6 +2252,8 @@ git commit -m "ci: add cross-platform workflow, README and contribution policy"
 Named here so the next plan has somewhere to start, and so nobody adds them to this one.
 
 - Import-level package resolution. Mapping `import yaml` to the distribution `PyYAML` is a genuinely hard problem and is deliberately deferred; the manifest is where installation actually happens.
+- **Manifest formats beyond PEP 621 and `requirements*.txt`.** Poetry's `[tool.poetry.dependencies]`, PEP 735 `[dependency-groups]`, `[build-system].requires`, and `requirements/*.txt` layouts are all unread. Two of these are worse than merely unread, and the next plan should fix them before adding formats: a Poetry `pyproject.toml` with no `[project]` table returns `Some({})`, so the gate reports that it examined the manifest and found no dependencies. Every dependency such a project adds passes unexamined, with no signal to the user. `requirements/base.txt` at least returns `None`. Both are silent false negatives on a blocking gate, which is the exact failure this project exists to catch, and the honest fix is a third outcome meaning "manifest recognised but not understood".
+- **Direct URL references.** `mypkg @ https://example.com/mypkg.whl` yields the name `mypkg`, which by construction is not on the index, so Task 7 gets a 404 and blocks a legitimate build. This is the only known false-positive path left after the dispatch fix, and it cannot be expressed through a `BTreeSet<String>` return type. Decide before Task 7 ships as blocking.
 - TypeScript and .NET manifests. The same shape of code, one ecosystem at a time.
 - The remaining Tier A gates: SAST delegation and runtime dependency closure.
 - All of Tier B: volume and coupling tracking, boundary checks, diff-scoped debt analysis.

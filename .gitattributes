@@ -1,0 +1,10 @@
+# Shell scripts reach the working tree with LF line endings on every platform.
+#
+# `.github/scripts/assert-toolchain.sh` is run by the Windows job, and on
+# Windows the default `core.autocrlf=true` would check it out with CRLF. That
+# turns out to be survivable — Git Bash 2.47.1 runs the CRLF copy of this
+# script and produces the correct answer, because MSYS2's bash strips the
+# carriage returns — but that is a patch in one bash rather than a property of
+# bash, and the job it would break is the one that cannot be tried locally.
+# Two lines here is a cheaper way to be sure than finding out on a push.
+*.sh text eol=lf
