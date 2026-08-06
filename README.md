@@ -315,14 +315,23 @@ nothing else is there:
   declaration is missed past its first line. It also does not know about
   strings or comments, so a `pub fn` spelled out inside either can
   false-positive — dogfooding this on Plumb's own source caught it directly:
-  `crates/plumb-core/src/index.rs` has a test whose expected-output string
-  contains the literal text `pub fn run`, `pub struct Outcome`, `pub fn
-  method` and `pub const MARKER`, and all four are listed in `.plumb/index.md`
-  as if they were real public items of that module, alongside the ones that
-  actually are. And Rust's own `pub` is over-inclusive on purpose here: `pub`
-  inside a private (non-`pub`) module is still counted as public surface,
-  because the scanner reads declarations, not effective visibility — so it
-  over-reports rather than staying silent on re-exports it cannot trace.
+  `crates/plumb-core/src/index.rs` has tests whose expected-output strings
+  contain the literal text `pub fn run`, `pub struct Outcome`, `pub fn
+  method`, `pub const MARKER`, `pub const fn new`, `pub async fn go`, `pub
+  unsafe fn raw` and `pub const unsafe fn x`, and every one of them is listed
+  in `.plumb/index.md` as if it were a real public item of that module,
+  alongside the ones that actually are. And Rust's own `pub` is
+  over-inclusive on purpose here: `pub` inside a private (non-`pub`) module
+  is still counted as public surface, because the scanner reads
+  declarations, not effective visibility — so it over-reports rather than
+  staying silent on re-exports it cannot trace. Rust's `const`, `async` and
+  `unsafe` modifiers on a `pub fn` are recognised: `pub const fn`, `pub
+  async fn`, `pub unsafe fn` and any combination of the three extract as
+  kind `fn`, named after the last modifier, not as a fabricated `const`
+  entry named `fn`; a plain `pub const NAME: …` or `pub static NAME: …`
+  keeps `const`/`static` as its kind. Python's `async def` and JavaScript's
+  `export default async function` are recognised the same way, each keeping
+  its non-async kind (`def`, `function`).
 
 What the first rule rests on: Spracklen et al. (USENIX Security 2025) measured
 19.7% of packages referenced by code-generating models as non-existent, across

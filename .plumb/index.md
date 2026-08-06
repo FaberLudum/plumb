@@ -68,11 +68,16 @@ What this repository can already do, and where. Regenerate with
 - struct `Symbol`
 - const `SCAN_MARKER`
 - fn `symbols`
+- fn `has_scannable_extension`
 - fn `render`
 - fn `run`
 - struct `Outcome`
 - fn `method`
 - const `MARKER`
+- fn `new`
+- fn `go`
+- fn `raw`
+- fn `x`
 
 ## crates/plumb-core/src/layer1.rs
 - struct `Bootstrap`
