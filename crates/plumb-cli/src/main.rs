@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
+mod adapters_cmd;
 mod check;
 mod git;
 mod init;
@@ -84,6 +85,12 @@ enum Commands {
         #[arg(long)]
         defaults: bool,
     },
+    /// Regenerate agent instruction files from .plumb/.
+    Adapters {
+        /// Overwrite target files that plumb did not generate.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -108,6 +115,16 @@ fn main() -> ExitCode {
             };
             let stdin = std::io::stdin();
             match init::run(&repo, defaults, stdin.lock(), std::io::stdout()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => failed(&error),
+            }
+        }
+        Commands::Adapters { force } => {
+            let repo = match git::repo_root(Path::new(".")) {
+                Ok(repo) => repo,
+                Err(error) => return failed(&error),
+            };
+            match adapters_cmd::run(&repo, force, std::io::stdout()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => failed(&error),
             }
