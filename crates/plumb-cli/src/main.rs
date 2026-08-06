@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
+mod adapters_cmd;
 mod check;
 mod git;
+mod init;
 mod registry;
 
 use clap::{Parser, Subcommand};
@@ -77,6 +79,18 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Write the .plumb/ working agreement for this repository.
+    Init {
+        /// Accept every default without asking.
+        #[arg(long)]
+        defaults: bool,
+    },
+    /// Regenerate agent instruction files from .plumb/.
+    Adapters {
+        /// Overwrite target files that plumb did not generate.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -93,6 +107,27 @@ fn main() -> ExitCode {
         } => {
             debug_assert!(diff, "clap must not admit a check with no scope");
             check_diff(offline, json)
+        }
+        Commands::Init { defaults } => {
+            let repo = match git::repo_root(Path::new(".")) {
+                Ok(repo) => repo,
+                Err(error) => return failed(&error),
+            };
+            let stdin = std::io::stdin();
+            match init::run(&repo, defaults, stdin.lock(), std::io::stdout()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => failed(&error),
+            }
+        }
+        Commands::Adapters { force } => {
+            let repo = match git::repo_root(Path::new(".")) {
+                Ok(repo) => repo,
+                Err(error) => return failed(&error),
+            };
+            match adapters_cmd::run(&repo, force, std::io::stdout()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => failed(&error),
+            }
         }
     }
 }

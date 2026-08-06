@@ -73,6 +73,17 @@ warnings only. A run that could not happen — not a repository, no git — exit
 outside that contract instead, so a broken gate can never be read as a clean
 one.
 
+Two more commands exist alongside the check: `plumb init` writes a fresh
+project's `.plumb/` working agreement — `architecture.md`, `conventions.md`,
+`invariants.md` and an empty `index.md` — from a short bootstrap Q&A.
+`plumb adapters` renders that working agreement into the instruction files
+each coding harness reads: `CLAUDE.md`, `AGENTS.md`, `.cursorrules` and
+`.github/copilot-instructions.md`, refusing to overwrite a hand-written file
+unless `--force` is given. This repository dogfoods both: its own
+`CLAUDE.md`, `AGENTS.md`, `.cursorrules` and Copilot instructions are
+generated output, not hand-maintained — edit `.plumb/` and run
+`plumb adapters` to update them.
+
 ### What `--diff` compares, and what that rules out
 
 **`--diff` compares the working tree against HEAD** — it runs
