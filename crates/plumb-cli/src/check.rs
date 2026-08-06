@@ -258,16 +258,41 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
             // equal to a rendered `String` no matter how it is read, so it
             // counts as drifted rather than crashing or being skipped.
             match std::fs::read(repo.join(adapter.path)) {
-                Ok(bytes) if bytes != adapter.content.as_bytes() => {
+                Ok(bytes) if !same_ignoring_line_endings(&bytes, adapter.content.as_bytes()) => {
                     findings.push(adapter_drift(adapter.path));
                 }
-                // Matches, or absent — absent is not adopted, not drifted.
+                // Matches (up to line endings), or absent — absent is not
+                // adopted, not drifted.
                 Ok(_) | Err(_) => {}
             }
         }
     }
 
     Ok(findings)
+}
+
+/// Whether two byte strings are equal once every `\r` is dropped.
+///
+/// Git normalises line endings at checkout — `core.autocrlf` on Windows, or
+/// any repository whose `.gitattributes` marks text files, materialises
+/// committed LF content as CRLF on disk — while [`plumb_core::adapters::render`]
+/// always produces LF-only content. A byte-for-byte comparison therefore
+/// found drift on an ordinary clean checkout on Windows: this was caught by
+/// dogfooding on this very repository, where `check --diff` warned on all
+/// four generated files with nothing actually out of step with `.plumb/`. A
+/// gate that warns on every Windows clone is a gate that gets disabled before
+/// it catches anything real — the exact failure mode Tier B exists to avoid.
+///
+/// Filtering `\r` out of both sides, rather than only the disk side, keeps
+/// the comparison symmetric: a repository with `autocrlf=input` normalises
+/// committed CRLF to LF on checkout, so the disk side can just as easily be
+/// the LF one. Staying at the byte level — never decoding to `String` — is
+/// what keeps a non-UTF-8 disk file comparing rather than crashing, which
+/// `a_generated_file_that_drifted_warns`'s sibling tests rely on.
+fn same_ignoring_line_endings(disk: &[u8], rendered: &[u8]) -> bool {
+    disk.iter()
+        .filter(|&&b| b != b'\r')
+        .eq(rendered.iter().filter(|&&b| b != b'\r'))
 }
 
 /// Reads all four `.plumb/` artefacts, if every one of them is present.
