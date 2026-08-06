@@ -356,6 +356,16 @@ mod tests {
     /// is taken. A renamed manifest is checked at its new path, exactly as a
     /// rename *with* an edit already was, which means a rename alone can now
     /// block on a package PyPI does not have.
+    ///
+    /// The mode change is expressed twice because the two platforms read it
+    /// from different places, and each spelling is invisible to the other. On
+    /// Unix `core.filemode` is true and `git diff HEAD` takes the mode from
+    /// the file on disk, so the on-disk bit is what registers and an
+    /// index-only `update-index --chmod` changes nothing it looks at. On
+    /// Windows `filemode` is false, the on-disk bit does not exist, and the
+    /// index entry is the only spelling there is. One expression alone made
+    /// the test pass on exactly one platform: this fixture used only
+    /// `update-index`, and CI failed everywhere but Windows.
     #[test]
     fn changed_paths_reports_deletions_renames_and_mode_changes() {
         let dir = init_repo();
@@ -368,6 +378,14 @@ mod tests {
         fs::remove_file(dir.path().join("gone.txt")).expect("remove");
         run_git(dir.path(), &["mv", "old-name.txt", "new-name.txt"]);
         run_git(dir.path(), &["update-index", "--chmod=+x", "mode.txt"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.path().join("mode.txt");
+            let mut permissions = fs::metadata(&path).expect("stat").permissions();
+            permissions.set_mode(permissions.mode() | 0o111);
+            fs::set_permissions(&path, permissions).expect("chmod");
+        }
 
         let paths = changed_paths(dir.path()).expect("git succeeds");
 
