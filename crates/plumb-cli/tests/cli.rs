@@ -764,6 +764,29 @@ fn init_reads_answers_from_stdin() {
     assert!(architecture.contains("## storage"), "{architecture}");
 }
 
+/// `read_line` returning `Ok(0)` means stdin hit EOF, not "the user pressed
+/// enter on an empty line" — but `prompt` used to treat both the same way
+/// and quietly accept every default. A non-interactive invocation of `init`
+/// without `--defaults` (piped from `/dev/null`, or a CI step with no stdin
+/// at all) must not silently bootstrap the whole working agreement; it
+/// should fail and say why.
+#[test]
+fn init_refuses_eof_on_stdin_without_defaults() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+
+    plumb_in(dir.path())
+        .arg("init")
+        .write_stdin("")
+        .assert()
+        .code(70)
+        .stderr(predicates::str::contains("--defaults"));
+
+    assert!(
+        !in_repo(dir.path(), ".plumb").exists(),
+        ".plumb was created despite the run failing"
+    );
+}
+
 #[test]
 fn adapters_generates_every_instruction_file() {
     let dir = repo_with_requirements("ruff==0.4.0\n");

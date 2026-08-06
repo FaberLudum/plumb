@@ -110,7 +110,19 @@ fn prompt(
     write!(output, "{label} [{default}]: ")?;
     output.flush()?;
     let mut line = String::new();
-    input.read_line(&mut line).context("reading an answer")?;
+    let bytes_read = input.read_line(&mut line).context("reading an answer")?;
+    // `Ok(0)` is EOF, not an empty line with no bytes at all — the latter
+    // still carries the newline `read_line` was told to look for. Without
+    // this check a non-interactive run with no stdin (piped from
+    // `/dev/null`, a CI step with no input at all) silently accepted every
+    // default instead of failing, bootstrapping a working agreement nobody
+    // answered for.
+    if bytes_read == 0 {
+        bail!(
+            "stdin ended before an answer for {label:?} was given; pass --defaults for a \
+             non-interactive bootstrap"
+        );
+    }
     let answer = line.trim();
     Ok(if answer.is_empty() {
         default.to_string()
