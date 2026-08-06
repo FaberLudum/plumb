@@ -993,7 +993,10 @@ fn adapters_refuses_a_file_that_only_mentions_the_marker_in_prose() {
 #[test]
 fn drift_between_plumb_and_generated_files_warns_end_to_end() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
-    plumb_in(dir.path()).args(["init", "--defaults"]).assert().success();
+    plumb_in(dir.path())
+        .args(["init", "--defaults"])
+        .assert()
+        .success();
     plumb_in(dir.path()).arg("adapters").assert().success();
     run_git(&repo(dir.path()), &["add", "-A"]);
     run_git(&repo(dir.path()), &["commit", "-m", "adopt plumb"]);

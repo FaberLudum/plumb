@@ -24,6 +24,15 @@
 //! or was only partly understood still moves no verdict on any package, but it
 //! is a Tier B finding — the run warns, so exit 0 keeps meaning "checked and
 //! clean" rather than "checked, or silently skipped".
+//!
+//! A third gate runs once per invocation, after the loop rather than inside
+//! it: whether `CLAUDE.md`, `AGENTS.md`, `.cursorrules` and
+//! `.github/copilot-instructions.md` still match what `plumb adapters` would
+//! render from `.plumb/` right now. All four `.plumb/` artefacts present is
+//! the bar for checking at all — a partially adopted `.plumb/` is `plumb
+//! init`'s business, not this one's — and a target that does not exist on
+//! disk is not adopted, so it is not drift either. Only a target that exists
+//! and differs is.
 
 use crate::git;
 use crate::registry::{Existence, Registry};
@@ -225,7 +234,60 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         }
     }
 
+    // A third, independent gate: whether the generated instruction files
+    // still match what `plumb adapters` would produce from `.plumb/` today.
+    // Not folded into the per-path loop above, because drift is a property
+    // of the repository's current state, not of any one changed path — a
+    // change that touches nothing in `.plumb/` can still be the run that
+    // first notices a drift introduced earlier and never checked. All four
+    // artefacts present is the bar for checking at all; a partially adopted
+    // `.plumb/` is init's business, not this gate's, so it says nothing
+    // rather than guessing at a project name or rendering from gaps.
+    if let Some(artefacts) = read_full_plumb(repo) {
+        let project_name = plumb_core::layer1::project_name_of(&artefacts.architecture)
+            .unwrap_or_else(|| {
+                repo.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "project".to_string())
+            });
+        for adapter in plumb_core::adapters::render(&project_name, &artefacts) {
+            // `read`, not `read_to_string`: a target that exists but is not
+            // valid UTF-8 must still be compared, and bytes rather than
+            // `String` is what lets that comparison happen without an
+            // encoding decision — a target this process cannot decode is not
+            // equal to a rendered `String` no matter how it is read, so it
+            // counts as drifted rather than crashing or being skipped.
+            match std::fs::read(repo.join(adapter.path)) {
+                Ok(bytes) if bytes != adapter.content.as_bytes() => {
+                    findings.push(adapter_drift(adapter.path));
+                }
+                // Matches, or absent — absent is not adopted, not drifted.
+                Ok(_) | Err(_) => {}
+            }
+        }
+    }
+
     Ok(findings)
+}
+
+/// Reads all four `.plumb/` artefacts, if every one of them is present.
+///
+/// One artefact missing is not an error and not a finding: partial adoption
+/// is what `plumb init` and `plumb adapters` are for, and this gate has
+/// nothing to compare against until all four exist. Reading with
+/// `read_to_string` rather than treating a decode failure as drift is
+/// deliberate — an artefact this process cannot even read is not a claim
+/// about what any generated file should contain, so it disables the gate the
+/// same way absence does rather than manufacturing a comparison from nothing.
+fn read_full_plumb(repo: &Path) -> Option<plumb_core::layer1::Artefacts> {
+    let plumb_dir = repo.join(".plumb");
+    let read = |name: &str| std::fs::read_to_string(plumb_dir.join(name)).ok();
+    Some(plumb_core::layer1::Artefacts {
+        architecture: read("architecture.md")?,
+        conventions: read("conventions.md")?,
+        invariants: read("invariants.md")?,
+        index: read("index.md")?,
+    })
 }
 
 /// A manifest Plumb recognised and did not fully read.
@@ -284,6 +346,22 @@ fn boundary_violation(violation: &boundaries::Violation) -> Finding {
         ),
         location: violation.file.clone(),
         source: "taxonomy §4.5".to_string(),
+    }
+}
+
+/// A generated instruction file that no longer matches its source.
+///
+/// Tier B, and it describes this repository's artefacts rather than the code
+/// under inspection — the same honesty class as taxonomy §10. An agent reads
+/// the generated file; when the file and `.plumb/` disagree, the agent is
+/// working from rules nobody chose.
+fn adapter_drift(path: &str) -> Finding {
+    Finding {
+        rule: "adapter-drift".to_string(),
+        tier: Tier::B,
+        message: format!("{path} does not match .plumb/; run `plumb adapters`"),
+        location: path.to_string(),
+        source: "taxonomy §11".to_string(),
     }
 }
 
@@ -1427,9 +1505,8 @@ mod tests {
     fn generate_adapters(dir: &Path) {
         use plumb_core::adapters::render;
         use plumb_core::layer1::Artefacts;
-        let read = |name: &str| {
-            fs::read_to_string(dir.join(".plumb").join(name)).expect("read artefact")
-        };
+        let read =
+            |name: &str| fs::read_to_string(dir.join(".plumb").join(name)).expect("read artefact");
         let artefacts = Artefacts {
             architecture: read("architecture.md"),
             conventions: read("conventions.md"),
