@@ -164,8 +164,29 @@ pub fn changed_paths(repo: &Path) -> Result<Vec<String>> {
 /// The index scan must be reproducible from a fresh clone, so it cannot depend
 /// on untracked scratch files or build output that `.gitignore` excludes. Only
 /// paths committed and tracked in the index appear in the result.
+#[allow(dead_code)]
 pub fn tracked_files(repo: &Path) -> Result<Vec<String>> {
-    todo!()
+    let output = Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(repo)
+        .output()
+        .context("failed to run git; is it installed and on PATH?")?;
+
+    if !output.status.success() {
+        bail!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    // NUL-terminated, not NUL-separated, so the split leaves a trailing empty
+    // string. Filtering empties also makes an entirely empty listing — a clean
+    // tree — come back as no paths rather than as one nameless one.
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Returns the contents of `path` as committed at HEAD.
