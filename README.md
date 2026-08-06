@@ -90,7 +90,12 @@ each changed file is attributed to a module by path, its imports are
 extracted with a heuristic, line-based matcher covering the Rust, Python and
 JavaScript/TypeScript family of import syntaxes, and an import reaching a
 module outside the file's declared `May depend on:` list warns rather than
-blocks:
+blocks. The comparison is before-versus-after, the same shape as the
+manifest check's: **the gate reports only violations the change
+introduces.** A violation already present at HEAD is legacy, not something
+the change did, so a comment-only edit to a file that has always had an
+undeclared import does not re-warn on it — only a violation the change adds
+is reported:
 
 ```console
 warning: crates/plumb-core/src/lib.rs imports `plumb_cli`, but crates/plumb-core may not depend on crates/plumb-cli [boundary]
@@ -119,12 +124,20 @@ manifest blocks while it is uncommitted and passes the moment it is committed.
 
 The consequence is worth stating plainly, because it is the opposite of what a
 gate is usually assumed to do. **On a fresh clone or a CI checkout the tree is
-clean, so `plumb check --diff` examines nothing and exits `0` whatever the
-commit under test added.** Wiring this into a CI job that clones a branch gives
-a permanently green check that is not checking anything. Checking a commit or a
-commit range needs `plumb check --repo`, which the design spec reserves and
-**which is not implemented yet**. Until it is, the useful place for `--diff` is
-a developer's working copy.
+clean, so the manifest and boundary checks examine nothing and exit `0`
+whatever the commit under test added.** Wiring this into a CI job that clones
+a branch gives those two checks a permanently green result that is not
+checking anything. Checking a commit or a commit range needs
+`plumb check --repo`, which the design spec reserves and **which is not
+implemented yet**. Until it is, the useful place for the manifest and
+boundary checks is a developer's working copy.
+
+The adapter-drift check is the one exception to that promise, by design: it
+does not read `git diff` at all, and runs once per invocation over the
+repository's current state rather than over changed paths — see the second
+Tier B gate described above. So a fresh clone of a repository whose committed
+generated files have already drifted from `.plumb/` still exits `2` on the
+very first, otherwise-untouched run.
 
 The pre-commit story is not honest yet either, and for a reason worth stating
 precisely: **`git commit` commits the index, and this gate never reads the
