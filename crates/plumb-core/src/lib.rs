@@ -6,6 +6,7 @@
 
 pub mod adapters;
 pub mod architecture;
+pub mod boundaries;
 pub mod deps;
 pub mod diff;
 pub mod finding;
