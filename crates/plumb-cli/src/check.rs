@@ -1113,6 +1113,46 @@ mod tests {
         );
         findings.extend(boundary_findings);
 
+        // The drift finding is emitted from a fourth site and needs a full
+        // `.plumb/` plus at least one generated target on disk. Only
+        // `CLAUDE.md` is generated here, rather than all four targets via
+        // `generate_adapters`: every rendered target embeds all four
+        // artefacts in its body, so drifting one artefact after generating
+        // all four would make all four targets differ and this scenario
+        // would no longer prove "exactly one finding, exactly one citation" —
+        // it would still pass, but by coincidence rather than by design.
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        {
+            use plumb_core::adapters::render;
+            use plumb_core::layer1::Artefacts;
+            let read = |name: &str| {
+                fs::read_to_string(dir.path().join(".plumb").join(name)).expect("read artefact")
+            };
+            let artefacts = Artefacts {
+                architecture: read("architecture.md"),
+                conventions: read("conventions.md"),
+                invariants: read("invariants.md"),
+                index: read("index.md"),
+            };
+            let claude_md = render("demo", &artefacts)
+                .into_iter()
+                .find(|adapter| adapter.path == "CLAUDE.md")
+                .expect("render includes CLAUDE.md");
+            fs::write(dir.path().join(claude_md.path), claude_md.content).expect("write adapter");
+        }
+        let conventions = dir.path().join(".plumb").join("conventions.md");
+        let mut text = fs::read_to_string(&conventions).expect("read");
+        text.push_str("\n## New rule\n\nAdded after generation.\n");
+        fs::write(&conventions, text).expect("write");
+        let drift_findings = collect(dir.path(), &registry).expect("check runs");
+        assert_eq!(
+            drift_findings.len(),
+            1,
+            "the drift scenario emitted the wrong number of findings: {drift_findings:#?}"
+        );
+        findings.extend(drift_findings);
+
         for finding in &findings {
             assert!(!finding.rule.is_empty(), "unnamed rule: {finding:#?}");
             assert!(!finding.message.is_empty(), "empty message: {finding:#?}");
@@ -1363,5 +1403,86 @@ mod tests {
 
         assert_eq!(code, 2, "output was: {output}");
         assert!(output.contains("requirements.txt"), "output was: {output}");
+    }
+
+    fn write_full_plumb(dir: &Path) {
+        use plumb_core::layer1::{Bootstrap, greenfield};
+        let artefacts = greenfield(&Bootstrap {
+            project_name: "demo".to_string(),
+            modules: vec!["core".to_string()],
+            error_handling: "errors propagate".to_string(),
+            test_shape: "one behaviour per test".to_string(),
+        });
+        fs::create_dir_all(dir.join(".plumb")).expect("create .plumb");
+        for (name, content) in [
+            ("architecture.md", &artefacts.architecture),
+            ("conventions.md", &artefacts.conventions),
+            ("invariants.md", &artefacts.invariants),
+            ("index.md", &artefacts.index),
+        ] {
+            fs::write(dir.join(".plumb").join(name), content).expect("write artefact");
+        }
+    }
+
+    fn generate_adapters(dir: &Path) {
+        use plumb_core::adapters::render;
+        use plumb_core::layer1::Artefacts;
+        let read = |name: &str| {
+            fs::read_to_string(dir.join(".plumb").join(name)).expect("read artefact")
+        };
+        let artefacts = Artefacts {
+            architecture: read("architecture.md"),
+            conventions: read("conventions.md"),
+            invariants: read("invariants.md"),
+            index: read("index.md"),
+        };
+        for adapter in render("demo", &artefacts) {
+            let path = dir.join(adapter.path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create parent");
+            }
+            fs::write(path, adapter.content).expect("write adapter");
+        }
+    }
+
+    #[test]
+    fn a_generated_file_that_drifted_warns() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        generate_adapters(dir.path());
+        // Drift: the working agreement changes, nobody regenerates.
+        let conventions = dir.path().join(".plumb").join("conventions.md");
+        let mut text = fs::read_to_string(&conventions).expect("read");
+        text.push_str("\n## New rule\n\nAdded after generation.\n");
+        fs::write(&conventions, text).expect("write");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+        let (output, code) = (outcome.report, outcome.code);
+
+        assert_eq!(code, 2, "output was: {output}");
+        assert!(output.contains("adapter-drift"), "output was: {output}");
+        assert!(output.contains("plumb adapters"), "output was: {output}");
+    }
+
+    #[test]
+    fn matching_generated_files_do_not_warn() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        generate_adapters(dir.path());
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
+    #[test]
+    fn an_absent_generated_file_is_not_drift() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        // No adapters generated at all: adoption is optional, absence is not drift.
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
     }
 }

@@ -985,3 +985,26 @@ fn adapters_refuses_a_file_that_only_mentions_the_marker_in_prose() {
         "the file was clobbered"
     );
 }
+
+/// `.plumb/` and the generated instruction files drift apart when someone
+/// edits the artefacts and forgets to regenerate. `check --diff` is meant to
+/// catch that, end to end through `init`, `adapters` and `check` as a real
+/// user would run them.
+#[test]
+fn drift_between_plumb_and_generated_files_warns_end_to_end() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    plumb_in(dir.path()).args(["init", "--defaults"]).assert().success();
+    plumb_in(dir.path()).arg("adapters").assert().success();
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    run_git(&repo(dir.path()), &["commit", "-m", "adopt plumb"]);
+    let invariants = in_repo(dir.path(), ".plumb/invariants.md");
+    let mut text = std::fs::read_to_string(&invariants).expect("read");
+    text.push_str("\n## New invariant\n\nAdded after generation.\n");
+    std::fs::write(&invariants, text).expect("write");
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(2)
+        .stdout(predicates::str::contains("adapter-drift"));
+}
