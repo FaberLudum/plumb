@@ -7,5 +7,6 @@
 pub mod deps;
 pub mod diff;
 pub mod finding;
+pub mod layer1;
 pub mod manifest;
 pub mod report;
