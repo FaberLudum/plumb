@@ -148,8 +148,13 @@ fn python_symbols(text: &str) -> Vec<Symbol> {
             continue;
         }
 
-        // Try to match "def NAME"
-        if let Some(rest) = line.strip_prefix("def ") {
+        // Try to match "def NAME" or "async def NAME" — `async` stripped
+        // first so the kind stays `def` either way.
+        if let Some(rest) = line
+            .strip_prefix("async ")
+            .unwrap_or(line)
+            .strip_prefix("def ")
+        {
             if let Some(n) = extract_python_name(rest).filter(|name| !name.starts_with('_')) {
                 found.push(Symbol {
                     kind: "def".to_string(),
@@ -214,7 +219,17 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
         }
     }
 
-    // export default function NAME
+    // export default function NAME, export default async function NAME
+    if let Some(rest) = trimmed.strip_prefix("export default async function ") {
+        let name = identifier(rest);
+        if !name.is_empty() {
+            return Some(Symbol {
+                kind: "function".to_string(),
+                name,
+            });
+        }
+    }
+
     if let Some(rest) = trimmed.strip_prefix("export default function ") {
         let name = identifier(rest);
         if !name.is_empty() {
@@ -384,6 +399,19 @@ pub const unsafe fn x() {\n";
         assert_eq!(names, vec!["visible", "Widget"]);
     }
 
+    /// `async def` at top level must be extracted the same as `def`, kind
+    /// `def`, and the leading-underscore exclusion still applies to it.
+    #[test]
+    fn python_async_def_is_extracted_as_kind_def() {
+        let text = "async def fetch():\ndef sync_fetch():\nasync def _async_helper():\n";
+        let found = symbols("api/app.py", text);
+        let pairs: Vec<(&str, &str)> = found
+            .iter()
+            .map(|symbol| (symbol.kind.as_str(), symbol.name.as_str()))
+            .collect();
+        assert_eq!(pairs, vec![("def", "fetch"), ("def", "sync_fetch")]);
+    }
+
     #[test]
     fn javascript_exported_declarations_are_extracted() {
         let text = "\
@@ -391,11 +419,12 @@ export function start() {}\n\
 export async function stop() {}\n\
 export const LIMIT = 3;\n\
 export default function main() {}\n\
+export default async function mainAsync() {}\n\
 export { rename } from './other';\n\
 const internal = 1;\n";
         let found = symbols("web/index.ts", text);
         let names: Vec<&str> = found.iter().map(|symbol| symbol.name.as_str()).collect();
-        assert_eq!(names, vec!["start", "stop", "LIMIT", "main"]);
+        assert_eq!(names, vec!["start", "stop", "LIMIT", "main", "mainAsync"]);
     }
 
     #[test]
