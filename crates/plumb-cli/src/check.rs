@@ -1552,6 +1552,29 @@ mod tests {
         assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
     }
 
+    /// Git normalises line endings at checkout (`core.autocrlf` on Windows,
+    /// or any repository whose `.gitattributes` declares text files), and
+    /// `render` produces LF-only content. A checkout of exactly what was
+    /// committed can therefore hold CRLF bytes for content that is, per git,
+    /// unchanged and undrifted — the false positive the dogfood run on this
+    /// repository actually hit on Windows, warning on all four targets on a
+    /// clean tree. The comparison must not mistake a line-ending convention
+    /// for a content difference, or this gate warns on every ordinary
+    /// Windows clone and gets turned off before it catches anything real.
+    #[test]
+    fn a_target_that_differs_only_by_line_ending_does_not_warn() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        generate_adapters(dir.path());
+        let claude_md = dir.path().join("CLAUDE.md");
+        let content = fs::read_to_string(&claude_md).expect("read");
+        fs::write(&claude_md, content.replace('\n', "\r\n")).expect("write CRLF");
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+    }
+
     #[test]
     fn an_absent_generated_file_is_not_drift() {
         let dir = repo_with_requirements("ruff==0.4.0\n");
