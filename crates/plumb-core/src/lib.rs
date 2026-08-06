@@ -5,6 +5,7 @@
 //! the filesystem, or subprocesses; that all lives in `plumb-cli`.
 
 pub mod adapters;
+pub mod architecture;
 pub mod deps;
 pub mod diff;
 pub mod finding;
