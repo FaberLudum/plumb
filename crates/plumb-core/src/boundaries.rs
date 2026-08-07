@@ -15,7 +15,13 @@ pub struct Violation {
     pub import: String,
 }
 
-/// Top-level names imported by `text`, per the extension of `path`.
+/// The import paths of `text`, as written, per the extension of `path`.
+///
+/// Full paths, not top-level names: `use plumb_core::manifest;` yields
+/// `plumb_core::manifest`, not `plumb_core`, and `from pkg.facts import
+/// totals` yields `pkg.facts`, not `pkg`. Resolving a path to a module is
+/// `target_of`'s job, done by matching segments rather than by truncating
+/// here.
 ///
 /// This is a documented heuristic, not a parser: extraction is line-based,
 /// one `text.lines()` pass, matching a small set of surface patterns per
@@ -318,9 +324,13 @@ fn javascript_spec(line: &str) -> Option<&str> {
 }
 
 /// The JS/TS import spec as written, verbatim (`react-dom/client`,
-/// `@scope/pkg/deep`). A relative spec (starting with `.`) is skipped.
+/// `@scope/pkg/deep`). A relative spec (starting with `.`) is skipped, and so
+/// is a `node:`-prefixed spec (`node:fs`, `node:path`): it names a Node
+/// builtin, never a project module, and `target_of` splits on `:` along with
+/// `.` and `/`, so left unskipped its leading segment `node` could otherwise
+/// resolve against a declared module whose leaf happens to be named `node`.
 fn javascript_segment(spec: &str) -> Option<String> {
-    if spec.is_empty() || spec.starts_with('.') {
+    if spec.is_empty() || spec.starts_with('.') || spec.starts_with("node:") {
         None
     } else {
         Some(spec.to_string())
