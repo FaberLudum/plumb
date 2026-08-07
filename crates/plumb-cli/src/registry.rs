@@ -1700,15 +1700,43 @@ mod tests {
                 "pypi's narrower rule must not admit {name:?}"
             );
         }
-        // npm is also case-sensitive lowercase, unlike the characters check
-        // alone would suggest.
-        assert!(!is_valid_npm_name("Left-Pad"), "npm names are lowercase");
         // An ordinary hyphenated name is legal syntax in both ecosystems;
         // neither validator has any business rejecting it.
         assert!(is_valid_pypi_name("left-pad"));
         assert!(is_valid_npm_name("left-pad"));
         assert!(is_valid_pypi_name("ruff"));
         assert!(is_valid_npm_name("ruff"), "ordinary names satisfy both");
+    }
+
+    /// npm still serves legal packages published before it required a
+    /// lowercase name — `registry.npmjs.org/JSONStream` answers 200 today —
+    /// so a validator that admits only lowercase refuses a name npm itself
+    /// accepts. That was the bug: the previous rule read
+    /// `c.is_ascii_lowercase()`, so every legacy uppercase name tripped
+    /// `NpmRegistry::lookup`'s `debug_assert` in a debug build, taking the
+    /// gate down (exit 101) on a package that had done nothing wrong.
+    #[test]
+    fn is_valid_npm_name_admits_npms_real_charset() {
+        for name in ["JSONStream", "@types/node", "lodash.merge", "left_pad"] {
+            assert!(is_valid_npm_name(name), "npm should admit {name:?}");
+        }
+    }
+
+    /// The other half of the same finding: in release, where `debug_assert`
+    /// compiles out, a name outside npm's charset was interpolated into the
+    /// lookup URL unescaped — see [`npm_url`] for what it does and does not
+    /// encode. `react?bogus` is the reviewer's own live example: it reached
+    /// npm as `registry.npmjs.org/react?bogus`, which npm's router reads as
+    /// `/react` plus a query string it ignores, so a name that does not
+    /// exist answered 200. A charset rejection here — checked as its own
+    /// property, independent of [`NpmRegistry::exists`]'s release-path gate
+    /// — is the thing that must stop such a name before it ever becomes a
+    /// URL.
+    #[test]
+    fn is_valid_npm_name_rejects_url_metacharacters_and_illegal_characters() {
+        for name in ["react?bogus", "a#b", "left pad", "café"] {
+            assert!(!is_valid_npm_name(name), "npm should refuse {name:?}");
+        }
     }
 
     /// A definite npm answer is written under the `npm:` prefix, never the
@@ -1746,6 +1774,27 @@ mod tests {
         let registry = NpmRegistry::new(true, Some(dir.path().join("registry.json")));
 
         assert_eq!(registry.exists("left-pad"), Existence::Unknown);
+    }
+
+    /// The release-path half of the same finding, at the unit level: a name
+    /// outside npm's charset must answer `Missing` without ever reaching
+    /// [`NpmRegistry::lookup`] — no request built, nothing cached — and it
+    /// must do so independent of `--offline`. `offline: false` here is
+    /// deliberate, not an oversight: if the charset check did not run before
+    /// `exists_via`'s own logic, this call would fall through to `lookup`
+    /// and attempt a real connection, which no test in this suite may do.
+    /// The charset gate is what has to stop it, not the offline flag.
+    #[test]
+    fn an_invalid_charset_npm_name_is_missing_without_a_request_or_a_cache_write() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NpmRegistry::new(false, Some(cache_path.clone()));
+
+        assert_eq!(registry.exists("react?bogus"), Existence::Missing);
+        assert!(
+            !cache_path.exists(),
+            "an invalid-charset name should never create a cache file"
+        );
     }
 
     #[test]

@@ -527,6 +527,69 @@ fn a_scoped_npm_name_round_trips_the_cache() {
         .stdout(predicates::str::contains("@types/node").and(predicates::str::contains("npm")));
 }
 
+/// The reviewer's own live scenario, now blocked instead of silently passed:
+/// `react?bogus` is not a name npm's own naming rules admit, so it cannot be
+/// a name npm serves. Before this fix `npm_url` interpolated it into the
+/// lookup URL after escaping only `/`, and npm's router read
+/// `registry.npmjs.org/react?bogus` as `/react` plus an ignored query
+/// string — a 200 for a package that does not exist, no finding, exit 0,
+/// and `npm:react?bogus` cached `exists:true` for up to `EXISTS_TTL`.
+///
+/// Testable with zero network and no seeded cache at all: the charset check
+/// in `NpmRegistry::exists` answers `Missing` deterministically before
+/// anything online-shaped runs, so `--offline` here is exercised the same
+/// as every other test in this file and is not doing the blocking itself —
+/// an unseeded, unknown name is `Existence::Unknown` offline, which never
+/// blocks. Only the charset gate can produce the exit code this test pins.
+#[test]
+fn check_exits_one_when_an_added_npm_dependency_has_an_illegal_character() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "package.json"),
+        r#"{"dependencies":{"react?bogus":"^18.0.0"}}"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("react?bogus").and(predicates::str::contains("npm")));
+}
+
+/// npm still serves legal packages published before it required a lowercase
+/// name — `JSONStream` is real and `registry.npmjs.org/JSONStream` answers
+/// 200 today — and a name like it must not be mistaken for an illegal one.
+///
+/// This is the finding-1 regression net at the process level: the previous
+/// `is_valid_npm_name` admitted only lowercase, and `NpmRegistry::exists`'s
+/// own charset gate (added for the finding above) runs before the cache is
+/// consulted. Had that gate kept the old, too-narrow charset, it would have
+/// answered `Missing` for `JSONStream` itself, ignoring the seeded
+/// `exists: true` entry entirely and blocking the build — so this test
+/// fails loudly (exit 1) rather than by a panic if the charset regresses.
+/// It also runs the debug-build test binary end to end without a
+/// `debug_assert` panic (exit 101) on a legal legacy name, which is what
+/// the reviewer demonstrated live against the old validator.
+#[test]
+fn check_exits_zero_for_a_legacy_uppercase_npm_dependency() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "package.json"),
+        r#"{"dependencies":{"JSONStream":"^1.3.5"}}"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(dir.path(), &cache_entry("npm:JSONStream", true, 0));
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no findings"));
+}
+
 /// One change touching both a Python and an npm manifest, each with one bad
 /// name, must report both findings — proof that the router dispatches each
 /// manifest's added dependencies to its own registry within a single run,
