@@ -11,6 +11,7 @@
 
 use crate::git;
 use anyhow::{Context, Result, bail};
+use plumb_core::adapters::opens_with_marker;
 use plumb_core::index::{Symbol, has_scannable_extension, render, symbols};
 use std::io::Write;
 use std::path::Path;
@@ -92,10 +93,24 @@ pub fn run(repo: &Path, mut output: impl Write) -> Result<()> {
         tracked.len()
     )?;
 
-    if GENERATED_FILE_PATHS
-        .iter()
-        .any(|path| repo.join(path).exists())
-    {
+    // Existence alone is not adoption: a hand-written `CLAUDE.md`/`AGENTS.md`
+    // that predates `.plumb/` exists too, and `plumb adapters` would refuse
+    // to touch it (see its overwrite guard). Reminding a user to run a
+    // command that will only refuse is worse than saying nothing, so the
+    // reminder fires only when at least one existing target actually opens
+    // with plumb's own marker — the same `opens_with_marker` check the
+    // overwrite guard and `check --diff`'s drift gate both make.
+    let any_generated = GENERATED_FILE_PATHS.iter().any(|path| {
+        std::fs::read(repo.join(path)).is_ok_and(|bytes| {
+            let first_line = String::from_utf8_lossy(&bytes)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            opens_with_marker(&first_line)
+        })
+    });
+    if any_generated {
         writeln!(
             output,
             "run `plumb adapters` to refresh the instruction files"
