@@ -1087,3 +1087,77 @@ fn a_stale_index_warns_end_to_end() {
         .code(2)
         .stdout(predicates::str::contains("index-stale"));
 }
+
+/// Volume alone, with no `.plumb/architecture.md` present: coupling has
+/// nothing to resolve against, but the report still runs and shows the
+/// commit's line counts.
+#[test]
+fn report_shows_volume_per_commit_without_an_architecture() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(in_repo(dir.path(), "notes.txt"), "one\ntwo\nthree\n").expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    run_git(&repo(dir.path()), &["commit", "-m", "add notes"]);
+
+    plumb_in(dir.path())
+        .args(["report", "--commits", "10"])
+        .assert()
+        .success()
+        .stdout(
+            predicates::str::contains("add notes")
+                .and(predicates::str::contains("+3"))
+                .and(predicates::str::contains("decay signature: 0 of")),
+        );
+}
+
+/// A commit that both grows in volume and adds a new cross-module edge is
+/// the decay pattern from taxonomy §4.5, and the report must name it.
+///
+/// The declared architecture permits nothing for `crates/core` — irrelevant
+/// here: `report` measures edges, it does not judge them. The boundary gate
+/// is a different feature; the edge exists whether or not it is permitted.
+#[test]
+fn report_counts_a_new_cross_module_edge_as_rising_coupling() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    let plumb_dir = in_repo(dir.path(), ".plumb");
+    std::fs::create_dir_all(&plumb_dir).expect("mkdir");
+    std::fs::write(
+        plumb_dir.join("architecture.md"),
+        "## crates/core\n\nMay depend on: cli.\n\n## crates/cli\n\nMay depend on: (none).\n",
+    )
+    .expect("write");
+    let src = in_repo(dir.path(), "crates/core/src");
+    std::fs::create_dir_all(&src).expect("mkdir");
+    std::fs::write(src.join("lib.rs"), "// nothing yet\n").expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    run_git(&repo(dir.path()), &["commit", "-m", "scaffold"]);
+    // The decay-shaped commit: volume up, and a new cross-module edge.
+    std::fs::write(
+        src.join("lib.rs"),
+        "use cli::main;\npub fn one() {}\npub fn two() {}\n",
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    run_git(&repo(dir.path()), &["commit", "-m", "reach across"]);
+
+    plumb_in(dir.path())
+        .args(["report", "--commits", "1"])
+        .assert()
+        .success()
+        .stdout(
+            predicates::str::contains("reach across")
+                .and(predicates::str::contains("decay signature: 1 of 1")),
+        );
+}
+
+#[test]
+fn report_json_is_parseable() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+
+    let output = plumb_in(dir.path())
+        .args(["report", "--commits", "5", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&output.get_output().stdout).into_owned();
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).expect("parses");
+    assert!(value["commits"].is_array(), "{value}");
+}
