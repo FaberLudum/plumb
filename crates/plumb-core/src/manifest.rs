@@ -2072,6 +2072,20 @@ dev = ["pytest"]
         assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
     }
 
+    /// A body that is *not* empty but holds only whitespace is not the
+    /// probe [`an_empty_package_json_body_has_no_gaps`] pins — it is invalid
+    /// JSON to npm itself, exactly as `"not json at all"` is, and a real
+    /// `package.json` reduced to blank lines by a bad merge or a botched
+    /// edit deserves the same [`Gap::Unparseable`] any other unparseable
+    /// file gets, not the silent pass the empty-string probe is exempted
+    /// into.
+    #[test]
+    fn a_whitespace_only_non_empty_package_json_body_is_unparseable() {
+        let manifest = parse_package_json("   \n\t  \n");
+        assert!(manifest.names.is_empty());
+        assert_eq!(manifest.gaps, vec![Gap::Unparseable]);
+    }
+
     #[test]
     fn parse_dispatches_package_json_at_any_depth() {
         assert_eq!(
