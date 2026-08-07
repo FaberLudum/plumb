@@ -177,8 +177,18 @@ fn normalise(name: &str) -> String {
 }
 
 /// The module an import name targets: last path segment match.
+///
+/// INTERIM: extraction now keeps the full import path, but resolution here
+/// still looks at the import's first segment only (split on `::`, `.`, `/`)
+/// — behaviour identical to matching the whole import as before, made
+/// explicit now that the two can differ. The next task replaces this with
+/// segment-based matching across the full import and module paths.
 fn target_of<'a>(architecture: &'a Architecture, import: &str) -> Option<&'a Module> {
-    let wanted = normalise(import);
+    let head = import
+        .split(['.', '/', ':'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(import);
+    let wanted = normalise(head);
     architecture.modules.iter().find(|module| {
         module
             .path
@@ -198,16 +208,21 @@ fn permits(permitted: &str, module: &Module) -> bool {
             .is_some_and(|segment| normalise(segment) == normalise(permitted))
 }
 
-/// Stops NAME at `::`, `;`, whitespace or `{` — whichever comes first.
+/// Stops the path at `;`, whitespace, `{` or `(` — whichever comes first —
+/// and strips a trailing `::` left behind when a brace group followed
+/// (`plumb_core::{a, b}` stops at `{`, leaving `plumb_core::` to trim).
 fn rust_name(rest: &str) -> &str {
     let end = rest
-        .find(|c: char| c == ':' || c == ';' || c.is_whitespace() || c == '{')
+        .find(|c: char| c == ';' || c.is_whitespace() || c == '{' || c == '(')
         .unwrap_or(rest.len());
-    &rest[..end]
+    let name = &rest[..end];
+    name.strip_suffix("::").unwrap_or(name)
 }
 
-/// `use NAME::…;` / `use NAME;` (also `pub use`), `extern crate NAME;`.
-/// `crate`, `self` and `super` name the current crate, not a dependency.
+/// `use NAME[::…];` / `use NAME;` (also `pub use`), `extern crate NAME;`,
+/// kept as the full path written in the source. `crate`, `self` and `super`
+/// name the current crate, not a dependency, so a path is skipped whenever
+/// its *first* segment is one of them.
 fn rust_imports(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in text.lines() {
@@ -218,7 +233,8 @@ fn rust_imports(text: &str) -> Vec<String> {
             .or_else(|| trimmed.strip_prefix("extern crate "));
         if let Some(rest) = rest {
             let name = rust_name(rest);
-            if !name.is_empty() && name != "crate" && name != "self" && name != "super" {
+            let head = name.split("::").next().unwrap_or("");
+            if !name.is_empty() && head != "crate" && head != "self" && head != "super" {
                 names.push(name.to_string());
             }
         }
@@ -226,16 +242,17 @@ fn rust_imports(text: &str) -> Vec<String> {
     names
 }
 
-/// Stops a dotted Python module path at the first `.` or whitespace.
+/// Stops a dotted Python module path at `,`, whitespace or `(` — the dots
+/// inside the path are kept, so the whole dotted path comes back as written.
 fn python_name(rest: &str) -> &str {
     let end = rest
-        .find(|c: char| c == '.' || c.is_whitespace())
+        .find(|c: char| c == ',' || c.is_whitespace() || c == '(')
         .unwrap_or(rest.len());
     &rest[..end]
 }
 
-/// `import NAME[.rest]` and `from NAME[.rest] import …`. `from .` is a
-/// relative import and is skipped.
+/// `import NAME[.rest]` and `from NAME[.rest] import …`, kept as the full
+/// dotted path. `from .` is a relative import and is skipped.
 ///
 /// A bare `import` may name several modules on one line, comma-separated —
 /// `import os, sys` — which `from NAME import …` cannot: there the comma
@@ -281,31 +298,13 @@ fn javascript_spec(line: &str) -> Option<&str> {
     None
 }
 
-/// The module segment(s) a JS/TS import spec names: the first path
-/// segment, or the first two joined for a `@scope/name` package. A
-/// relative spec (starting with `.`) is skipped.
+/// The JS/TS import spec as written, verbatim (`react-dom/client`,
+/// `@scope/pkg/deep`). A relative spec (starting with `.`) is skipped.
 fn javascript_segment(spec: &str) -> Option<String> {
-    if spec.starts_with('.') {
-        return None;
-    }
-    if let Some(scoped) = spec.strip_prefix('@') {
-        let mut segments = scoped.splitn(2, '/');
-        let scope = segments.next().unwrap_or("");
-        let name = segments
-            .next()
-            .and_then(|rest| rest.split('/').next())
-            .unwrap_or("");
-        return if name.is_empty() {
-            Some(format!("@{scope}"))
-        } else {
-            Some(format!("@{scope}/{name}"))
-        };
-    }
-    let segment = spec.split('/').next().unwrap_or("");
-    if segment.is_empty() {
+    if spec.is_empty() || spec.starts_with('.') {
         None
     } else {
-        Some(segment.to_string())
+        Some(spec.to_string())
     }
 }
 
@@ -326,7 +325,11 @@ mod tests {
         let text = "use plumb_core::manifest;\npub use serde::Serialize;\nuse std::path::Path;\n";
         assert_eq!(
             imports("crates/x/src/main.rs", text),
-            vec!["plumb_core::manifest", "serde::Serialize", "std::path::Path"]
+            vec![
+                "plumb_core::manifest",
+                "serde::Serialize",
+                "std::path::Path"
+            ]
         );
     }
 
@@ -347,7 +350,12 @@ mod tests {
         let text = "import requests\nfrom flask import Flask\nfrom . import sibling\nimport os.path\nfrom ai_energy_manager.documents import domain\n";
         assert_eq!(
             imports("api/app.py", text),
-            vec!["requests", "flask", "os.path", "ai_energy_manager.documents"]
+            vec![
+                "requests",
+                "flask",
+                "os.path",
+                "ai_energy_manager.documents"
+            ]
         );
     }
 
