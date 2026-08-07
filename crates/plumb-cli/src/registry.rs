@@ -677,15 +677,30 @@ fn npm_url(name: &str) -> String {
 
 /// Whether `name` is a syntactically ordinary npm package name.
 ///
-/// Lowercase ASCII alphanumerics plus `@`, `/`, `-`, `_` and `.` — npm's own
-/// documented character set, which is wider than PyPI's and includes `/` in
-/// a scoped name's unencoded form (see [`npm_url`] for how that `/` reaches
-/// the wire). [`is_valid_pypi_name`]'s narrower rule must never run against
-/// one of these; this is the ecosystem-specific validator that runs instead.
+/// ASCII alphanumerics, in either case, plus `@`, `/`, `-`, `_` and `.` —
+/// npm's real, documented name charset, wider than PyPI's and including `/`
+/// in a scoped name's unencoded form (see [`npm_url`] for how that `/`
+/// reaches the wire). [`is_valid_pypi_name`]'s narrower rule must never run
+/// against one of these; this is the ecosystem-specific validator that runs
+/// instead.
+///
+/// Both cases, not lowercase only. npm still serves legal packages
+/// published before it required a lowercase name —
+/// `registry.npmjs.org/JSONStream` answers 200 today — and a validator that
+/// admitted only lowercase refused a name npm itself accepts. That was a
+/// real bug in an earlier version of this function: it tripped
+/// [`NpmRegistry::lookup`]'s `debug_assert` in a debug build on every such
+/// name, taking the gate down with a panic (exit 101, outside the exit
+/// contract) over a package that had done nothing wrong.
+///
+/// This is also the gate [`NpmRegistry::exists`] checks before it does
+/// anything else, so once a name has passed it, every character remaining
+/// is already a safe, literal URL path-segment character — [`npm_url`]
+/// only ever has to encode the `/` of a scoped name, never anything this
+/// function would have rejected.
 fn is_valid_npm_name(name: &str) -> bool {
-    name.chars().all(|c| {
-        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.' | '@' | '/')
-    })
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '/'))
 }
 
 /// Resolves names against npm, with the same on-disk cache, offline mode and
@@ -764,16 +779,46 @@ impl NpmRegistry {
 
     /// Answers from the cache, then from npm, then not at all. See
     /// [`PyPiRegistry::exists`].
+    ///
+    /// A name [`is_valid_npm_name`] refuses is answered `Missing`
+    /// immediately — no cache read, no offline fallback, no request — and
+    /// that runs first, ahead of everything [`exists_via`](Self::exists_via)
+    /// does, so it applies the same online or offline. A name npm's own
+    /// naming rules do not admit cannot be a name npm serves: that is an
+    /// objective, syntactic fact about the input, established from the name
+    /// alone, not a guess about the network, which is what keeps blocking on
+    /// it Tier A-safe.
+    ///
+    /// This is the fix for the release-build half of this task's finding.
+    /// [`npm_url`] escapes only a scoped name's `/`; the code this replaced
+    /// built the lookup URL from a name that had never been checked at all
+    /// in release, where `debug_assert` compiles out. A name carrying a URL
+    /// metacharacter — `react?bogus`, live-demonstrated by the reviewer —
+    /// reached npm as `registry.npmjs.org/react?bogus`, which npm's router
+    /// reads as `/react` plus a query string it ignores: a 200 for a
+    /// package that does not exist, no finding, exit 0, and
+    /// `npm:react?bogus` cached `exists:true` for up to [`EXISTS_TTL`].
+    /// Rejecting the name here, before any of that, closes the false
+    /// negative and the cache poisoning in the same place the charset is
+    /// already checked for [`NpmRegistry::lookup`]'s `debug_assert`.
     pub fn exists(&self, name: &str) -> Existence {
+        if !is_valid_npm_name(name) {
+            return Existence::Missing;
+        }
         self.exists_via(name, |name| self.lookup(name))
     }
 
     /// Asks npm about one name.
     fn lookup(&self, name: &str) -> Outcome {
-        // See `PyPiRegistry::lookup`'s comment for why this is asserted here
-        // rather than trusted from a caller. Scoped to npm's own, wider
-        // charset — see `is_valid_npm_name` — so a name PyPI's narrower rule
-        // would refuse is not, by itself, evidence of a bug here.
+        // `NpmRegistry::exists` already refuses a name this check would
+        // reject, before `lookup` is ever reached, so this can no longer
+        // fire in ordinary operation. Kept anyway as a debug-only tripwire
+        // consistent with that same, corrected charset: a future caller of
+        // `lookup` that bypasses `exists` — a refactor, a new code path —
+        // trips it immediately in a debug build instead of silently sending
+        // an unchecked name to the wire. Scoped to npm's own, wider charset
+        // — see `is_valid_npm_name` — so a name PyPI's narrower rule would
+        // refuse is not, by itself, evidence of a bug here.
         debug_assert!(
             is_valid_npm_name(name),
             "npm name reached the registry unvalidated: {name:?}"
