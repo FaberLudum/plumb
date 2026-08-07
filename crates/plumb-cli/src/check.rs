@@ -1293,6 +1293,67 @@ mod tests {
         );
     }
 
+    /// The suppression set used to be keyed by `(import, to_module)` — the
+    /// full import path, not the resolved edge — so any edit to the spelling
+    /// of an already-legacy import changed the key and resurrected its
+    /// suppressed warning, even when the edit was pure formatting and the
+    /// crossing itself did not change. Splitting a brace group into two
+    /// plain `use` lines is exactly that: the crossing `crates/core ->
+    /// crates/cli` was already a violation at HEAD, and this change touches
+    /// only how it is spelled plus an unrelated comment.
+    #[test]
+    fn splitting_a_legacy_brace_import_does_not_re_warn() {
+        let dir = repo_with(&[("crates/core/src/lib.rs", "use cli::{main, other};\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        write(
+            dir.path(),
+            "crates/core/src/lib.rs",
+            "use cli::main;\nuse cli::other;\n// unrelated comment\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(
+            outcome.code, 0,
+            "a legacy violation re-warned after only its spelling changed: {}",
+            outcome.report
+        );
+    }
+
+    /// The Python sibling of the brace-split case: deepening an already-
+    /// violating import to a more specific path under the same target module
+    /// must not resurrect the suppressed warning either, because the
+    /// resolved edge (`src/pkg/documents -> src/pkg/facts`) is unchanged.
+    #[test]
+    fn deepening_a_legacy_import_to_the_same_edge_does_not_re_warn() {
+        let dir = repo_with(&[(
+            "src/pkg/documents/store.py",
+            "from pkg.facts import totals\n",
+        )]);
+        write_architecture(
+            dir.path(),
+            "## src/pkg/documents\n\nMay depend on: (none).\n\n\
+             ## src/pkg/facts\n\nMay depend on: documents.\n\n\
+             ## src/pkg\n\nMay depend on: (none).\n",
+        );
+        write(
+            dir.path(),
+            "src/pkg/documents/store.py",
+            "from pkg.facts.helpers import round_kwh\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(
+            outcome.code, 0,
+            "a legacy violation re-warned after deepening to the same edge: {}",
+            outcome.report
+        );
+    }
+
     /// `git::show_at_head` is strict about UTF-8 and aborts the whole run
     /// with exit 70 for the manifest path — see its doc comment. That is
     /// disproportionate here: a HEAD version of a scanned file this process
