@@ -542,6 +542,92 @@ mod tests {
         assert!(found.is_empty(), "{found:?}");
     }
 
+    fn monolith() -> architecture::Architecture {
+        architecture::parse(
+            "## src/pkg/documents\n\nMay depend on: (none).\n\n\
+             ## src/pkg/facts\n\nMay depend on: documents.\n\n\
+             ## src/pkg\n\nMay depend on: (none).\n",
+        )
+    }
+
+    #[test]
+    fn a_subpackage_import_resolves_to_the_deepest_matching_module() {
+        let found = violations(
+            &monolith(),
+            "src/pkg/documents/store.py",
+            "from pkg.facts import totals\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "src/pkg/facts");
+        assert_eq!(found[0].import, "pkg.facts");
+    }
+
+    #[test]
+    fn a_permitted_subpackage_dependency_is_not_a_violation() {
+        let found = violations(
+            &monolith(),
+            "src/pkg/facts/totals.py",
+            "from pkg.documents import domain\n",
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn an_intra_subpackage_import_is_a_self_import() {
+        let found = violations(
+            &monolith(),
+            "src/pkg/facts/totals.py",
+            "from pkg.facts.helpers import round_kwh\n",
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_longer_match_beats_a_shorter_one() {
+        // `pkg.documents` must reach src/pkg/documents (score 2), not stop at
+        // src/pkg (score 1), even though src/pkg is also declared.
+        let found = violations(
+            &monolith(),
+            "src/pkg/facts/totals.py",
+            "import pkg.documents.domain\n",
+        );
+        assert!(
+            found.is_empty(),
+            "resolved to src/pkg instead of the deeper module: {found:?}"
+        );
+    }
+
+    #[test]
+    fn crate_level_rust_resolution_is_unchanged() {
+        let architecture = architecture::parse(
+            "## crates/plumb-core\n\nMay depend on: (none).\n\n## crates/plumb-cli\n\nMay depend on: plumb-core.\n",
+        );
+        let found = violations(
+            &architecture,
+            "crates/plumb-cli/src/main.rs",
+            "use plumb_core::manifest;\n",
+        );
+        assert!(found.is_empty(), "{found:?}");
+        let found = violations(
+            &architecture,
+            "crates/plumb-core/src/lib.rs",
+            "use plumb_cli::check;\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_first_declared_module() {
+        let architecture = architecture::parse(
+            "## apps/api\n\nMay depend on: (none).\n\n## services/api\n\nMay depend on: (none).\n",
+        );
+        let found = violations(&architecture, "services/api/x.py", "import api.routes\n");
+        // `api` matches both at score 1; first declared wins, so the target is
+        // apps/api and the import from services/api is a violation against it.
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "apps/api");
+    }
+
     #[test]
     fn every_known_extension_is_dispatched_by_imports() {
         for ext in ["rs", "py", "ts", "tsx", "js", "jsx", "mjs", "cjs"] {
