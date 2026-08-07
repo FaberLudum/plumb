@@ -205,9 +205,33 @@ pub fn tracked_files(repo: &Path) -> Result<Vec<String>> {
 /// Unlike [`changed_paths`] this stays strict about UTF-8: a manifest really
 /// should be UTF-8, and here the error names a file the user can fix.
 pub fn show_at_head(repo: &Path, path: &str) -> Result<Option<String>> {
+    show_at(repo, "HEAD", path)
+}
+
+/// Returns the contents of `path` as it exists at `reference`.
+///
+/// A generalisation of [`show_at_head`], which delegates here with
+/// `reference` fixed at `"HEAD"`. `path` must be relative to the repository
+/// root and forward-slash separated, the form `git diff` emits. A
+/// backslash-separated path resolves to nothing and so reads as absence.
+///
+/// `Ok(None)` means the file does not exist at `reference`, which is the
+/// normal case for a file the change under inspection introduces (`HEAD`) or
+/// for a file that had not been created yet as of an older commit.
+///
+/// A failing `git show` is read as absence rather than as an error, on the
+/// same reasoning as [`show_at_head`]: by the time a caller has a `reference`
+/// to ask about — from [`recent_commits`], or HEAD after [`changed_paths`]
+/// already ran — git and the repository are already known to work, so the
+/// only realistic cause of failure left is the path genuinely not being
+/// there.
+///
+/// Unlike [`changed_paths`] this stays strict about UTF-8: a manifest really
+/// should be UTF-8, and here the error names a file the user can fix.
+pub fn show_at(repo: &Path, reference: &str, path: &str) -> Result<Option<String>> {
     let output = Command::new("git")
         .arg("show")
-        .arg(format!("HEAD:{path}"))
+        .arg(format!("{reference}:{path}"))
         .current_dir(repo)
         .output()
         .context("failed to run git; is it installed and on PATH?")?;
@@ -218,6 +242,105 @@ pub fn show_at_head(repo: &Path, path: &str) -> Result<Option<String>> {
 
     let contents = String::from_utf8(output.stdout).context("git produced non-UTF-8 output")?;
     Ok(Some(contents))
+}
+
+/// One commit as returned by [`recent_commits`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit {
+    pub hash: String,
+    pub subject: String,
+}
+
+/// The last `limit` commits reachable first-parent from HEAD, newest first.
+///
+/// First-parent, not full history: a pull request merged with a merge commit
+/// then counts once, as the merge's own diff, rather than once per inner
+/// commit it carried. That matches how [`numstat`] reads a commit — also
+/// against its first parent — so the two agree on what one entry in this
+/// history means.
+pub fn recent_commits(repo: &Path, limit: usize) -> Result<Vec<Commit>> {
+    let output = Command::new("git")
+        .args([
+            "log",
+            "--first-parent",
+            "-z",
+            "--format=%H%x1f%s",
+            "-n",
+            &limit.to_string(),
+        ])
+        .current_dir(repo)
+        .output()
+        .context("failed to run git; is it installed and on PATH?")?;
+
+    if !output.status.success() {
+        bail!(
+            "git log failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    // NUL-separated records, lossily decoded: a subject is display-only, so a
+    // non-UTF-8 byte in a commit message should not fail the whole listing —
+    // it should just show up as U+FFFD.
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            let (hash, subject) = record.split_once('\u{1f}')?;
+            Some(Commit {
+                hash: hash.to_string(),
+                subject: subject.to_string(),
+            })
+        })
+        .collect())
+}
+
+/// Per-file `(added, removed, path)` for one commit against its first parent.
+///
+/// Binary files report `-` for both counts in `git show --numstat`; those
+/// rows carry no line count to report and are omitted rather than parsed.
+///
+/// Paths are kept verbatim rather than read with `-z`: `--numstat` quotes an
+/// exotic path (non-ASCII, a space, ...) into a C-style escaped form, and this
+/// stays a documented limitation of this metrics view rather than reason to
+/// add a second parser for one field that is not the counts this function
+/// exists to report.
+pub fn numstat(repo: &Path, hash: &str) -> Result<Vec<(u64, u64, String)>> {
+    let output = Command::new("git")
+        .args(["show", "--first-parent", "--numstat", "--format="])
+        .arg(hash)
+        .current_dir(repo)
+        .output()
+        .context("failed to run git; is it installed and on PATH?")?;
+
+    if !output.status.success() {
+        bail!(
+            "git show failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut rows = Vec::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let mut fields = line.splitn(3, '\t');
+        let added = fields.next().unwrap_or_default();
+        let removed = fields.next().unwrap_or_default();
+        let path = fields.next().unwrap_or_default();
+
+        if added == "-" || removed == "-" {
+            continue;
+        }
+
+        let added: u64 = added.parse().with_context(|| {
+            format!("git numstat produced a non-numeric added count: {added:?}")
+        })?;
+        let removed: u64 = removed.parse().with_context(|| {
+            format!("git numstat produced a non-numeric removed count: {removed:?}")
+        })?;
+        rows.push((added, removed, path.to_string()));
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -254,6 +377,17 @@ mod tests {
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// Writes `body` to `name` under `dir`, creating parent directories as
+    /// needed. A small convenience so the history-helper tests below can
+    /// describe a commit's content in one line.
+    fn write(dir: &Path, name: &str, body: &str) {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent");
+        }
+        fs::write(path, body).expect("write");
     }
 
     fn init_repo() -> tempfile::TempDir {
@@ -666,5 +800,75 @@ mod tests {
         let head = show_at_head(dir.path(), "pyproject.toml").expect("show succeeds");
 
         assert_eq!(head, None);
+    }
+
+    #[test]
+    fn recent_commits_walks_newest_first_with_subjects() {
+        let dir = init_repo();
+        write(dir.path(), "a.txt", "one\n");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "second commit"]);
+
+        let commits = recent_commits(dir.path(), 10).expect("git succeeds");
+
+        assert_eq!(commits.len(), 2, "{commits:?}");
+        assert_eq!(commits[0].subject, "second commit");
+        assert_eq!(commits[1].subject, "initial");
+        assert_eq!(commits[0].hash.len(), 40);
+    }
+
+    #[test]
+    fn recent_commits_honours_the_limit() {
+        let dir = init_repo();
+        for n in 0..3 {
+            write(dir.path(), "a.txt", &format!("{n}\n"));
+            run_git(dir.path(), &["add", "-A"]);
+            run_git(dir.path(), &["commit", "-m", "grow"]);
+        }
+
+        let commits = recent_commits(dir.path(), 2).expect("git succeeds");
+
+        assert_eq!(commits.len(), 2, "{commits:?}");
+    }
+
+    #[test]
+    fn numstat_reports_added_and_removed_per_file() {
+        let dir = init_repo();
+        write(dir.path(), "grow.txt", "a\nb\nc\n");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "grow"]);
+        let commits = recent_commits(dir.path(), 1).expect("git succeeds");
+
+        let rows = numstat(dir.path(), &commits[0].hash).expect("git succeeds");
+
+        assert_eq!(rows, vec![(3, 0, "grow.txt".to_string())]);
+    }
+
+    #[test]
+    fn numstat_omits_binary_files() {
+        let dir = init_repo();
+        fs::write(dir.path().join("blob.bin"), [0u8, 159, 146, 150]).expect("write");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "binary"]);
+        let commits = recent_commits(dir.path(), 1).expect("git succeeds");
+
+        let rows = numstat(dir.path(), &commits[0].hash).expect("git succeeds");
+
+        assert!(rows.is_empty(), "{rows:?}");
+    }
+
+    #[test]
+    fn show_at_reads_a_file_at_an_arbitrary_commit() {
+        let dir = init_repo();
+        write(dir.path(), "requirements.txt", "ruff==0.5.0\n");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "bump"]);
+        let commits = recent_commits(dir.path(), 2).expect("git succeeds");
+
+        let old = show_at(dir.path(), &commits[1].hash, "requirements.txt").expect("git succeeds");
+        let missing = show_at(dir.path(), &commits[1].hash, "nope.txt").expect("git succeeds");
+
+        assert_eq!(old.as_deref(), Some("ruff==0.4.0\n"));
+        assert_eq!(missing, None);
     }
 }

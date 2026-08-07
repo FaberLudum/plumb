@@ -7,6 +7,7 @@ mod git;
 mod index_cmd;
 mod init;
 mod registry;
+mod report_cmd;
 
 use clap::{Parser, Subcommand};
 use std::path::Path;
@@ -94,6 +95,17 @@ enum Commands {
     },
     /// Regenerate .plumb/index.md from the tracked source files.
     Index,
+    /// Print a longitudinal report over recent commits: volume, coupling
+    /// and deletion, Tier C instrumentation with no finding and no
+    /// exit-code effect.
+    Report {
+        /// How many commits, first-parent from HEAD, to report on.
+        #[arg(long, default_value_t = 30)]
+        commits: usize,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -138,6 +150,16 @@ fn main() -> ExitCode {
                 Err(error) => return failed(&error),
             };
             match index_cmd::run(&repo, std::io::stdout()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => failed(&error),
+            }
+        }
+        Commands::Report { commits, json } => {
+            let repo = match git::repo_root(Path::new(".")) {
+                Ok(repo) => repo,
+                Err(error) => return failed(&error),
+            };
+            match report_cmd::run(&repo, commits, json, std::io::stdout()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => failed(&error),
             }

@@ -75,6 +75,40 @@ pub fn violations(architecture: &Architecture, path: &str, text: &str) -> Vec<Vi
     found
 }
 
+/// The distinct cross-module `(from_module, to_module)` pairs one file's
+/// imports resolve to.
+///
+/// `violations` without the permission check: every pair this finds is a
+/// coupling edge whether or not the architecture's `May depend on:` list
+/// allows it — a caller measuring coupling (`plumb report`) cares about the
+/// edge existing, not about whether it was permitted. A file under no
+/// declared module contributes nothing, the same as `violations`, and an
+/// import targeting the file's own module is never a pair.
+///
+/// Distinct and in first-occurrence order: a file importing the same
+/// external module twice (two `use` lines resolving to the same target)
+/// must not count as two edges, and the order a pair first appears in is
+/// what stays stable across a re-run of the same text.
+pub fn edges(architecture: &Architecture, path: &str, text: &str) -> Vec<(String, String)> {
+    let Some(from) = module_of(architecture, path) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, String)> = Vec::new();
+    for import in imports(path, text) {
+        let Some(target) = target_of(architecture, &import) else {
+            continue;
+        };
+        if target.path == from.path {
+            continue;
+        }
+        let pair = (from.path.clone(), target.path.clone());
+        if !found.contains(&pair) {
+            found.push(pair);
+        }
+    }
+    found
+}
+
 /// Whether `path` is worth reading at all for the boundary gate: a known
 /// source extension, attributed to a module the architecture declares.
 ///
@@ -456,6 +490,42 @@ mod tests {
     /// `imports` does nothing with would let a scannable file through with
     /// no findings ever possible, and the reverse would skip reading a file
     /// `imports` could actually have extracted something from.
+    /// `edges` is `violations` without the permission check: every
+    /// cross-module pair a file's imports resolve to, distinct, regardless
+    /// of whether the architecture's `May depend on:` list allows it.
+    /// Order is first-occurrence: the second `plumb_cli` import contributes
+    /// no second pair, but does not reorder the one already found.
+    #[test]
+    fn edges_reports_distinct_cross_module_pairs_in_first_occurrence_order() {
+        let found = edges(
+            &two_crates(),
+            "crates/plumb-core/src/lib.rs",
+            "use plumb_cli::check;\nuse plumb_cli::git;\nuse serde::Serialize;\n",
+        );
+        assert_eq!(
+            found,
+            vec![(
+                "crates/plumb-core".to_string(),
+                "crates/plumb-cli".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn edges_is_empty_for_a_file_under_no_module() {
+        assert!(edges(&two_crates(), "tools/gen.rs", "use plumb_cli::check;\n").is_empty());
+    }
+
+    #[test]
+    fn edges_skips_self_imports() {
+        let found = edges(
+            &two_crates(),
+            "crates/plumb-core/src/lib.rs",
+            "use plumb_core::manifest;\n",
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
     #[test]
     fn every_known_extension_is_dispatched_by_imports() {
         for ext in ["rs", "py", "ts", "tsx", "js", "jsx", "mjs", "cjs"] {
