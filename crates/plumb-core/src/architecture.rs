@@ -184,6 +184,26 @@ sub-package within this codebase.
         assert!(architecture.modules[0].may_depend_on.is_empty());
     }
 
+    /// A field label (`Responsibility:`, another `May depend on:`, …) can
+    /// follow a wrapped list with no blank line in between — the two
+    /// entries live in the same paragraph in the source. The joiner must
+    /// still stop there instead of swallowing the label's prose as
+    /// dependency entries.
+    #[test]
+    fn a_wrapped_list_stops_before_a_field_label_with_no_blank_line() {
+        let text = "\
+## m
+
+May depend on: a,
+b,
+Responsibility: prose that must not be swallowed.
+
+## other
+";
+        let architecture = parse(text);
+        assert_eq!(architecture.modules[0].may_depend_on, vec!["a", "b"]);
+    }
+
     /// Wrapping must stop at the first blank line: prose that follows a
     /// wrapped list on its own paragraph must not be swallowed into the
     /// dependency list.
