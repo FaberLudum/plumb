@@ -495,6 +495,19 @@ fn check_exits_zero_when_an_added_npm_dependency_exists() {
 /// this test is about the cache key, not the URL, which the offline network
 /// panic probe covers separately.
 ///
+/// Seeded `exists: false` rather than `true`, and this is the direction that
+/// actually proves something under `--offline`. A *miss* on the cache key —
+/// the scoped name never matching what `write_cache` wrote, which is exactly
+/// the failure mode a mangled `@` or `/` would produce — resolves to
+/// `Existence::Unknown` offline, and `Unknown` never blocks; a run seeded
+/// `exists: true` would therefore report "no findings" whether the key
+/// matched or not, which is vacuous. Seeding `Missing` closes that gap:
+/// `Existence::Missing` is only reachable by reading this exact seeded
+/// entry back, so only a correct key construction — `@` preserved, the full
+/// scoped name used whole — can produce the blocking finding this test
+/// asserts. A wrong key construction here fails loudly with exit 0 and no
+/// finding, not silently with the right answer for the wrong reason.
+///
 /// Staged for the same reason as the two tests above.
 #[test]
 fn a_scoped_npm_name_round_trips_the_cache() {
@@ -505,13 +518,13 @@ fn a_scoped_npm_name_round_trips_the_cache() {
     )
     .expect("write");
     run_git(&repo(dir.path()), &["add", "-A"]);
-    write_cache(dir.path(), &cache_entry("npm:@types/node", true, 0));
+    write_cache(dir.path(), &cache_entry("npm:@types/node", false, 0));
 
     plumb_in(dir.path())
         .args(["check", "--diff", "--offline"])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("no findings"));
+        .code(1)
+        .stdout(predicates::str::contains("@types/node").and(predicates::str::contains("npm")));
 }
 
 /// One change touching both a Python and an npm manifest, each with one bad
