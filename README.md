@@ -384,7 +384,13 @@ nothing else is there:
     finer-grained sub-packages multiplies how many short, common leaf names
     (`utils`, `core`, `models`) a declared module can carry, and each is
     exactly as exposed as a top-level module name always was to colliding
-    with an unrelated third-party package of the same name.
+    with an unrelated third-party package of the same name. This is not the
+    whole exposure, though: at `k ≥ 2` a declared module path that happens to
+    *mirror* a third-party package's own path can collide, too — a module
+    heading `## services/google/cloud` scores 2 against `from google.cloud
+    import storage`, exactly as if the project depended on `google.cloud`,
+    which the old top-segment rule could never do since it only ever
+    compared one segment.
 
   What is still true regardless: Rust stays crate-level only. A Rust import
   never spells the `src` directory (`use plumb_core::manifest`, not
