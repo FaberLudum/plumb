@@ -1287,6 +1287,35 @@ mod tests {
         assert_eq!(registry.exists("requestz"), Existence::Unknown);
     }
 
+    /// The legacy-bare-key fallback exists to let a pre-npm cache file keep
+    /// answering — see `pypi_cache_key`'s doc comment — and that is the only
+    /// thing it may ever do. It must not become a second, unfiltered way to
+    /// read the same map: a PyPI query for the literal name `"npm:foo"`
+    /// finds no `pypi:npm:foo` entry, falls through to the bare-key lookup,
+    /// and — before this fix — matched npm's own `npm:foo` entry outright,
+    /// answering a PyPI question with an npm answer.
+    ///
+    /// This is reachable only if a caller ever asks about a name containing
+    /// `:`, which `plumb-core`'s `requirement_name` filters out today (only
+    /// ASCII alphanumeric and `-` survive PEP 503 normalisation) — but that
+    /// guarantee lives in a different crate and is not asserted here, so
+    /// this registry must not depend on it: a local invariant needs a local
+    /// guard.
+    #[test]
+    fn the_legacy_fallback_does_not_read_another_ecosystems_prefixed_key() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(&cache_path, cache_json(&[("npm:foo", true, 0)])).expect("write cache");
+
+        let registry = PyPiRegistry::new(true, Some(cache_path));
+
+        assert_eq!(
+            registry.exists("npm:foo"),
+            Existence::Unknown,
+            "a pypi query answered from npm's namespace"
+        );
+    }
+
     #[test]
     fn a_definite_answer_is_stored_with_the_time_it_was_checked() {
         let dir = tempfile::tempdir().expect("temp dir");
