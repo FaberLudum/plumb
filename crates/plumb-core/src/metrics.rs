@@ -18,7 +18,11 @@ pub struct CommitStats {
 ///
 /// Returns `None` when added is 0, never panics on division.
 pub fn deletion_ratio(stats: &CommitStats) -> Option<f64> {
-    todo!()
+    if stats.added == 0 {
+        None
+    } else {
+        Some(stats.removed as f64 / stats.added as f64)
+    }
 }
 
 /// Decay signature: volume delta > 0 AND coupling delta is `Some(d)` with d > 0.
@@ -26,7 +30,9 @@ pub fn deletion_ratio(stats: &CommitStats) -> Option<f64> {
 /// This is the pattern from taxonomy §4.5 (volume and coupling rising together),
 /// surfaced but never judged: no finding, no exit-code effect.
 pub fn has_decay_signature(stats: &CommitStats) -> bool {
-    todo!()
+    let volume_positive = stats.added > stats.removed;
+    let coupling_positive = stats.coupling_delta.is_some_and(|d| d > 0);
+    volume_positive && coupling_positive
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -40,21 +46,107 @@ pub struct Summary {
 
 /// Summarize the stats: count totals, compute mean deletion ratio, name decay commits.
 pub fn summarize(stats: &[CommitStats]) -> Summary {
-    todo!()
+    let ratios: Vec<f64> = stats.iter().filter_map(deletion_ratio).collect();
+
+    let mean_deletion_ratio = if ratios.is_empty() {
+        None
+    } else {
+        Some(ratios.iter().sum::<f64>() / ratios.len() as f64)
+    };
+
+    let decay_commits = stats
+        .iter()
+        .filter(|s| has_decay_signature(s))
+        .map(|s| s.hash.clone())
+        .collect();
+
+    Summary {
+        commits: stats.len(),
+        added: stats.iter().map(|s| s.added).sum(),
+        removed: stats.iter().map(|s| s.removed).sum(),
+        mean_deletion_ratio,
+        decay_commits,
+    }
 }
 
 /// Render a text report of the stats and summary.
 ///
 /// One row per commit, followed by a summary block.
 pub fn render_text(stats: &[CommitStats]) -> String {
-    todo!()
+    let mut output = String::new();
+
+    for stat in stats {
+        let hash_short = &stat.hash[..7.min(stat.hash.len())];
+        let ratio_str = deletion_ratio(stat)
+            .map(|r| format!("{:.2}", r))
+            .unwrap_or_else(|| "-".to_string());
+        let coupling_str = stat
+            .coupling_delta
+            .map(|d| format!("{:+}", d))
+            .unwrap_or_else(|| "-".to_string());
+
+        output.push_str(&format!(
+            "{}  +{:<6} -{:<6} ratio {}  coupling {}\n",
+            hash_short, stat.added, stat.removed, ratio_str, coupling_str
+        ));
+    }
+
+    let summary = summarize(stats);
+    output.push('\n');
+    output.push_str(&format!(
+        "commits: {}, added: {}, removed: {}\n",
+        summary.commits, summary.added, summary.removed
+    ));
+    if let Some(ratio) = summary.mean_deletion_ratio {
+        output.push_str(&format!("mean deletion ratio: {:.2}\n", ratio));
+    }
+    output.push_str(&format!(
+        "decay signature: {} of {}\n",
+        summary.decay_commits.len(),
+        summary.commits
+    ));
+
+    output
 }
 
 /// Render a JSON report of the stats and summary.
 ///
 /// Shape: `{"commits": [...], "summary": {...}}` with deletion_ratio injected.
 pub fn render_json(stats: &[CommitStats]) -> String {
-    todo!()
+    #[derive(serde::Serialize)]
+    struct CommitWithRatio {
+        hash: String,
+        subject: String,
+        added: u64,
+        removed: u64,
+        deletion_ratio: Option<f64>,
+        coupling_delta: Option<i64>,
+    }
+
+    let commits_with_ratio: Vec<CommitWithRatio> = stats
+        .iter()
+        .map(|s| CommitWithRatio {
+            hash: s.hash.clone(),
+            subject: s.subject.clone(),
+            added: s.added,
+            removed: s.removed,
+            deletion_ratio: deletion_ratio(s),
+            coupling_delta: s.coupling_delta,
+        })
+        .collect();
+
+    #[derive(serde::Serialize)]
+    struct Report {
+        commits: Vec<CommitWithRatio>,
+        summary: Summary,
+    }
+
+    let report = Report {
+        commits: commits_with_ratio,
+        summary: summarize(stats),
+    };
+
+    serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
 }
 
 #[cfg(test)]
@@ -127,8 +219,14 @@ mod tests {
         let stats = vec![commit("aaaaaaa", 0, 5, None)];
         let json = render_json(&stats);
         let value: serde_json::Value = serde_json::from_str(&json).expect("parses");
-        assert_eq!(value["commits"][0]["deletion_ratio"], serde_json::Value::Null);
-        assert_eq!(value["commits"][0]["coupling_delta"], serde_json::Value::Null);
+        assert_eq!(
+            value["commits"][0]["deletion_ratio"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            value["commits"][0]["coupling_delta"],
+            serde_json::Value::Null
+        );
         assert_eq!(value["summary"]["commits"], 1);
     }
 
