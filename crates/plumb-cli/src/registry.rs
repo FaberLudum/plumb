@@ -473,11 +473,18 @@ impl PyPiRegistry {
     /// and quietly substituting old answers for it would change what the gate
     /// reports without anyone having asked.
     fn exists_via(&self, name: &str, lookup: impl Fn(&str) -> Outcome) -> Existence {
-        // TODO(task 2 implementation commit): read `pypi_cache_key(name)`
-        // first, falling back to the legacy bare `name` — left as the old
-        // bare-only lookup for now, so the new prefix tests are the red half
-        // of this task's TDD cycle.
-        let cached = self.cache.borrow().known.get(name).copied();
+        // The prefixed key first, then the legacy bare one — a file written
+        // before npm existed has no prefix at all, and every entry in it was
+        // a PyPI answer, so it still answers here rather than being silently
+        // discarded the day this key format changed.
+        let cached = {
+            let cache = self.cache.borrow();
+            cache
+                .known
+                .get(&pypi_cache_key(name))
+                .or_else(|| cache.known.get(name))
+                .copied()
+        };
         if let Some(entry) = cached
             && entry.is_fresh(now_unix())
         {
@@ -553,20 +560,10 @@ impl PyPiRegistry {
             exists: outcome == Existence::Exists,
             checked: now_unix(),
         };
-        // TODO(task 2 implementation commit): write under
-        // `pypi_cache_key(name)` and merge via `persist_entry` instead of
-        // this bare-key, whole-snapshot write.
-        self.cache
-            .borrow_mut()
-            .known
-            .insert(name.to_string(), entry);
+        let key = pypi_cache_key(name);
+        self.cache.borrow_mut().known.insert(key.clone(), entry);
         if let Some(cache_path) = self.cache_path.as_deref() {
-            let _ = serde_json::to_string(&*self.cache.borrow()).map(|text| {
-                if let Some(parent) = cache_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                std::fs::write(cache_path, text)
-            });
+            persist_entry(cache_path, &key, entry);
         }
     }
 }
@@ -673,8 +670,9 @@ fn npm_url(name: &str) -> String {
 /// the wire). [`is_valid_pypi_name`]'s narrower rule must never run against
 /// one of these; this is the ecosystem-specific validator that runs instead.
 fn is_valid_npm_name(name: &str) -> bool {
-    name.chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.' | '@' | '/'))
+    name.chars().all(|c| {
+        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.' | '@' | '/')
+    })
 }
 
 /// Resolves names against npm, with the same on-disk cache, offline mode and
@@ -719,24 +717,72 @@ impl NpmRegistry {
         self.honoured_stale.borrow().len()
     }
 
-    /// Answers from the cache, then from npm, then not at all. See
-    /// [`PyPiRegistry::exists`].
-    ///
-    /// `todo!()` for this task's red commit: the tests that exercise it are
-    /// meant to fail here, not merely fail an assertion, because there is no
-    /// npm behaviour yet to produce a wrong answer with. The implementation
-    /// commit replaces this with the real `exists_via`/`lookup`/`record`
-    /// trio, mirroring [`PyPiRegistry`]'s.
-    pub fn exists(&self, name: &str) -> Existence {
-        let _ = (name, &self.cache, &self.offline, &self.agent, &self.unreachable, &self.honoured_stale, &self.cache_path);
-        todo!("NpmRegistry::exists: implemented in this task's second commit")
+    /// See [`PyPiRegistry::exists_via`]; identical but for the cache key,
+    /// which has no legacy bare-key fallback — see [`npm_cache_key`].
+    fn exists_via(&self, name: &str, lookup: impl Fn(&str) -> Outcome) -> Existence {
+        let cached = self.cache.borrow().known.get(&npm_cache_key(name)).copied();
+        if let Some(entry) = cached
+            && entry.is_fresh(now_unix())
+        {
+            return entry.existence();
+        }
+
+        if self.offline {
+            let answer = honour_offline(cached);
+            if answer != Existence::Unknown {
+                self.honoured_stale.borrow_mut().insert(name.to_string());
+            }
+            return answer;
+        }
+
+        if self.unreachable.get() {
+            return Existence::Unknown;
+        }
+
+        let outcome = lookup(name);
+        if outcome == Outcome::Unreachable {
+            self.unreachable.set(true);
+        }
+
+        let existence = outcome.existence();
+        self.record(name, existence);
+        existence
     }
 
-    /// Records a definite answer. `todo!()` alongside [`NpmRegistry::exists`]
-    /// — see its comment.
+    /// Answers from the cache, then from npm, then not at all. See
+    /// [`PyPiRegistry::exists`].
+    pub fn exists(&self, name: &str) -> Existence {
+        self.exists_via(name, |name| self.lookup(name))
+    }
+
+    /// Asks npm about one name.
+    fn lookup(&self, name: &str) -> Outcome {
+        // See `PyPiRegistry::lookup`'s comment for why this is asserted here
+        // rather than trusted from a caller. Scoped to npm's own, wider
+        // charset — see `is_valid_npm_name` — so a name PyPI's narrower rule
+        // would refuse is not, by itself, evidence of a bug here.
+        debug_assert!(
+            is_valid_npm_name(name),
+            "npm name reached the registry unvalidated: {name:?}"
+        );
+        classify(self.agent.get(&npm_url(name)).call().map(|_| ()))
+    }
+
+    /// Records a definite answer and writes it into the shared cache file.
+    /// See [`PyPiRegistry::record`].
     fn record(&self, name: &str, outcome: Existence) {
-        let _ = (name, outcome);
-        todo!("NpmRegistry::record: implemented in this task's second commit")
+        if outcome == Existence::Unknown {
+            return;
+        }
+        let entry = Entry {
+            exists: outcome == Existence::Exists,
+            checked: now_unix(),
+        };
+        let key = npm_cache_key(name);
+        self.cache.borrow_mut().known.insert(key.clone(), entry);
+        if let Some(cache_path) = self.cache_path.as_deref() {
+            persist_entry(cache_path, &key, entry);
+        }
     }
 }
 
@@ -1597,14 +1643,15 @@ mod tests {
         );
     }
 
-    /// The character sets are meant to be different, and each validator must
-    /// refuse what only the other ecosystem allows: an npm name may carry
-    /// `@`, `/`, `_`, `.` and mixed-with-lowercase digits that PyPI's rule
-    /// (ASCII alphanumeric and `-` only) would reject, and PyPI's rule must
-    /// not be relaxed to admit them just because npm needs to.
+    /// The character sets are meant to be different, and PyPI's rule must
+    /// refuse what only npm allows: `@`, `/`, `_` and `.`, none of which
+    /// ASCII-alphanumeric-and-`-` admits. `left-pad` is deliberately not in
+    /// this list — every character in it is also legal PyPI syntax, so it
+    /// belongs in the "ordinary names satisfy both" check below instead, not
+    /// among the names PyPI's rule is supposed to reject.
     #[test]
     fn npm_and_pypi_name_validation_disagree_on_npms_own_characters() {
-        for name in ["@types/node", "left-pad", "lodash.merge", "left_pad"] {
+        for name in ["@types/node", "lodash.merge", "left_pad"] {
             assert!(is_valid_npm_name(name), "npm should admit {name:?}");
             assert!(
                 !is_valid_pypi_name(name),
@@ -1614,6 +1661,10 @@ mod tests {
         // npm is also case-sensitive lowercase, unlike the characters check
         // alone would suggest.
         assert!(!is_valid_npm_name("Left-Pad"), "npm names are lowercase");
+        // An ordinary hyphenated name is legal syntax in both ecosystems;
+        // neither validator has any business rejecting it.
+        assert!(is_valid_pypi_name("left-pad"));
+        assert!(is_valid_npm_name("left-pad"));
         assert!(is_valid_pypi_name("ruff"));
         assert!(is_valid_npm_name("ruff"), "ordinary names satisfy both");
     }
