@@ -734,7 +734,15 @@ pub fn parse_package_json(text: &str) -> Manifest {
     // failed to parse. Without this the probe would attach a gap to every
     // changed package.json in every repository, the JSON-specific failure
     // the TOML probe never had to guard against.
-    if text.trim().is_empty() {
+    //
+    // The check is against the raw string, not `text.trim()`. The probe
+    // always sends the literal empty string (see `check.rs`'s use of
+    // `manifest::parse(&path, "")`), so trimming buys it nothing; what it
+    // did buy was exempting a real, non-empty file that holds only
+    // whitespace — a `package.json` reduced to blank lines by a bad merge or
+    // a botched edit — from `Gap::Unparseable`, even though whitespace is
+    // exactly as invalid to a JSON parser as any other non-JSON text.
+    if text.is_empty() {
         return Manifest {
             names,
             gaps,
