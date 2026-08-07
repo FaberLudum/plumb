@@ -548,7 +548,13 @@ mod tests {
         fn exists(&self, name: &str, _ecosystem: Ecosystem) -> Existence {
             self.asked.borrow_mut().push(name.to_string());
             match name {
-                "requestz" => Existence::Missing,
+                // `left-pad-typo` is npm's answer here, `requestz` PyPI's —
+                // this stub still ignores `_ecosystem`, per the struct's own
+                // doc comment, so the two names simply have to be distinct
+                // from each other and from `ruff`/`httpx` for
+                // `only_the_names_a_change_adds_reach_the_registry` and its
+                // siblings to keep meaning what they already mean.
+                "requestz" | "left-pad-typo" => Existence::Missing,
                 "ruff" | "httpx" => Existence::Exists,
                 _ => Existence::Unknown,
             }
@@ -1497,6 +1503,15 @@ mod tests {
                 "pyproject.toml",
                 "[project]\ndependencies = [\"ruff\"]\n",
                 "[project]\ndependencies = [\"ruff\", \"requestz\"]\n",
+            ),
+            // The npm sibling of the pyproject row above: same emission
+            // site (`package_does_not_exist`), reached through
+            // `Ecosystem::Npm` instead of `Ecosystem::PyPi` so the citation
+            // check also covers the npm-named message.
+            (
+                "package.json",
+                r#"{"dependencies":{"react":"^18.0.0"}}"#,
+                r#"{"dependencies":{"react":"^18.0.0","left-pad-typo":"^1.0.0"}}"#,
             ),
             // The coverage finding: a Poetry-shaped manifest is recognised and
             // not read, which is an emission site of its own.
