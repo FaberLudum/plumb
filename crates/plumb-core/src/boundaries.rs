@@ -456,6 +456,42 @@ mod tests {
     /// `imports` does nothing with would let a scannable file through with
     /// no findings ever possible, and the reverse would skip reading a file
     /// `imports` could actually have extracted something from.
+    /// `edges` is `violations` without the permission check: every
+    /// cross-module pair a file's imports resolve to, distinct, regardless
+    /// of whether the architecture's `May depend on:` list allows it.
+    /// Order is first-occurrence: the second `plumb_cli` import contributes
+    /// no second pair, but does not reorder the one already found.
+    #[test]
+    fn edges_reports_distinct_cross_module_pairs_in_first_occurrence_order() {
+        let found = edges(
+            &two_crates(),
+            "crates/plumb-core/src/lib.rs",
+            "use plumb_cli::check;\nuse plumb_cli::git;\nuse serde::Serialize;\n",
+        );
+        assert_eq!(
+            found,
+            vec![(
+                "crates/plumb-core".to_string(),
+                "crates/plumb-cli".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn edges_is_empty_for_a_file_under_no_module() {
+        assert!(edges(&two_crates(), "tools/gen.rs", "use plumb_cli::check;\n").is_empty());
+    }
+
+    #[test]
+    fn edges_skips_self_imports() {
+        let found = edges(
+            &two_crates(),
+            "crates/plumb-core/src/lib.rs",
+            "use plumb_core::manifest;\n",
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
     #[test]
     fn every_known_extension_is_dispatched_by_imports() {
         for ext in ["rs", "py", "ts", "tsx", "js", "jsx", "mjs", "cjs"] {
