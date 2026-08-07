@@ -15,7 +15,8 @@ pub struct Architecture {
 
 pub fn parse(text: &str) -> Architecture {
     let mut modules: Vec<Module> = Vec::new();
-    for line in text.lines() {
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
         let trimmed = line.trim_end();
         if let Some(heading) = trimmed.strip_prefix("## ") {
             let path = heading.trim().trim_end_matches('/').to_string();
@@ -28,10 +29,55 @@ pub fn parse(text: &str) -> Architecture {
         } else if let Some(rest) = trimmed.trim_start().strip_prefix("May depend on:")
             && let Some(current) = modules.last_mut()
         {
-            current.may_depend_on = parse_dependencies(rest);
+            let mut joined = rest.to_string();
+            while let Some(next_line) = lines.peek() {
+                let next_trimmed = next_line.trim_end();
+                if next_trimmed.is_empty()
+                    || next_trimmed.starts_with("## ")
+                    || next_trimmed.trim_start().starts_with("May depend on:")
+                    || looks_like_field_label(next_trimmed)
+                {
+                    break;
+                }
+                joined.push(' ');
+                joined.push_str(next_trimmed.trim());
+                lines.next();
+            }
+            current.may_depend_on = parse_dependencies(&joined);
         }
     }
     Architecture { modules }
+}
+
+/// Whether `line` has the shape of a section field label, such as
+/// "Responsibility:" or "May depend on:" itself: it starts with an ASCII
+/// uppercase letter, contains a colon, and everything before that first
+/// colon is only ASCII letters and spaces.
+///
+/// A wrapped `May depend on:` list is not always followed by a blank line —
+/// the next field can start on the very next line, in the same paragraph as
+/// the source sees it. Without this check the joiner would keep consuming
+/// past the list and swallow the following label's prose as garbage
+/// dependency entries, corrupting the declared contract exactly the way the
+/// original truncation defect did. Ordinary prose continuation lines start
+/// with a capitalised sentence at most, and essentially never contain a
+/// colon that early, so this narrow shape is deliberately conservative:
+/// it must not stop consumption on real wrapped-list prose.
+fn looks_like_field_label(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let starts_uppercase = trimmed
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_uppercase());
+    if !starts_uppercase {
+        return false;
+    }
+    match trimmed.find(':') {
+        Some(colon) => trimmed[..colon]
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == ' '),
+        None => false,
+    }
 }
 
 /// The text after "May depend on:", cleaned into a list.
@@ -119,5 +165,98 @@ Responsibility: the evidence base.
     fn top_level_heading_is_not_a_module() {
         let architecture = parse("# Architecture — X\n\n## m\n");
         assert_eq!(architecture.modules.len(), 1);
+    }
+
+    /// A real `May depend on:` list that wraps onto a following line used to
+    /// be silently truncated: only the first physical line was read, so the
+    /// entries after the line break vanished and the boundary gate warned on
+    /// edges the architecture explicitly permitted.
+    #[test]
+    fn a_wrapped_may_depend_on_list_yields_every_entry() {
+        let text = "\
+## alembic
+
+May depend on: ai, conversations, documents, facts, identity,
+interventions, persistence, tenancy, ai_energy_manager.
+
+## ai
+";
+        let architecture = parse(text);
+        assert_eq!(
+            architecture.modules[0].may_depend_on,
+            vec![
+                "ai",
+                "conversations",
+                "documents",
+                "facts",
+                "identity",
+                "interventions",
+                "persistence",
+                "tenancy",
+                "ai_energy_manager"
+            ]
+        );
+    }
+
+    /// The `(none) — prose` case can also wrap onto a second line; the
+    /// joined text still starts with `(none)`, so it must still parse to
+    /// the empty list rather than picking up words from the prose as
+    /// dependency entries.
+    #[test]
+    fn a_wrapped_none_with_prose_stays_empty() {
+        let text = "\
+## persistence
+
+May depend on: (none) — persistence imports no other
+sub-package within this codebase.
+
+## other
+";
+        let architecture = parse(text);
+        assert!(architecture.modules[0].may_depend_on.is_empty());
+    }
+
+    /// A field label (`Responsibility:`, another `May depend on:`, …) can
+    /// follow a wrapped list with no blank line in between — the two
+    /// entries live in the same paragraph in the source. The joiner must
+    /// still stop there instead of swallowing the label's prose as
+    /// dependency entries.
+    #[test]
+    fn a_wrapped_list_stops_before_a_field_label_with_no_blank_line() {
+        let text = "\
+## m
+
+May depend on: a,
+b,
+Responsibility: prose that must not be swallowed.
+
+## other
+";
+        let architecture = parse(text);
+        assert_eq!(architecture.modules[0].may_depend_on, vec!["a", "b"]);
+    }
+
+    /// Wrapping must stop at the first blank line: prose that follows a
+    /// wrapped list on its own paragraph must not be swallowed into the
+    /// dependency list.
+    #[test]
+    fn a_wrapped_list_stops_at_the_next_blank_line() {
+        let text = "\
+## m
+
+May depend on: a, b,
+c, d.
+
+Responsibility: prose that must not be swallowed.
+
+## other
+";
+        let architecture = parse(text);
+        assert_eq!(architecture.modules.len(), 2);
+        assert_eq!(
+            architecture.modules[0].may_depend_on,
+            vec!["a", "b", "c", "d"]
+        );
+        assert!(architecture.modules[1].may_depend_on.is_empty());
     }
 }
