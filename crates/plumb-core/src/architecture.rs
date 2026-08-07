@@ -35,6 +35,7 @@ pub fn parse(text: &str) -> Architecture {
                 if next_trimmed.is_empty()
                     || next_trimmed.starts_with("## ")
                     || next_trimmed.trim_start().starts_with("May depend on:")
+                    || looks_like_field_label(next_trimmed)
                 {
                     break;
                 }
@@ -46,6 +47,37 @@ pub fn parse(text: &str) -> Architecture {
         }
     }
     Architecture { modules }
+}
+
+/// Whether `line` has the shape of a section field label, such as
+/// "Responsibility:" or "May depend on:" itself: it starts with an ASCII
+/// uppercase letter, contains a colon, and everything before that first
+/// colon is only ASCII letters and spaces.
+///
+/// A wrapped `May depend on:` list is not always followed by a blank line —
+/// the next field can start on the very next line, in the same paragraph as
+/// the source sees it. Without this check the joiner would keep consuming
+/// past the list and swallow the following label's prose as garbage
+/// dependency entries, corrupting the declared contract exactly the way the
+/// original truncation defect did. Ordinary prose continuation lines start
+/// with a capitalised sentence at most, and essentially never contain a
+/// colon that early, so this narrow shape is deliberately conservative:
+/// it must not stop consumption on real wrapped-list prose.
+fn looks_like_field_label(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let starts_uppercase = trimmed
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_uppercase());
+    if !starts_uppercase {
+        return false;
+    }
+    match trimmed.find(':') {
+        Some(colon) => trimmed[..colon]
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == ' '),
+        None => false,
+    }
 }
 
 /// The text after "May depend on:", cleaned into a list.
