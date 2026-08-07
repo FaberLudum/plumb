@@ -176,26 +176,45 @@ fn normalise(name: &str) -> String {
     name.replace('-', "_")
 }
 
-/// The module an import name targets: last path segment match.
+/// The module an import name targets: longest trailing-module /
+/// leading-import segment match.
 ///
-/// INTERIM: extraction now keeps the full import path, but resolution here
-/// still looks at the import's first segment only (split on `::`, `.`, `/`)
-/// — behaviour identical to matching the whole import as before, made
-/// explicit now that the two can differ. The next task replaces this with
-/// segment-based matching across the full import and module paths.
+/// An import splits on `::`, `.` and `/` into segments `I`; a module path
+/// splits on `/` into segments `M`, both normalised (`-` → `_`). A module
+/// matches with score `k` when its last `k` segments equal `I`'s first `k`
+/// segments; the import resolves to the module with the highest `k` over
+/// all declared modules. A score of 1 is exactly the old last-segment rule,
+/// so every previously-resolving import still resolves the same way — a
+/// sub-package heading simply wins now by scoring higher when the import
+/// names it more specifically (`pkg.facts` scores 2 against `src/pkg/facts`
+/// and only 1 against `src/pkg`, so the deeper module wins).
+///
+/// Ties go to the first-declared module: `Iterator::max_by_key` keeps the
+/// *last* maximum on a tie, which is the wrong direction here, so this
+/// walks the modules in declaration order and only replaces the current
+/// best on a strictly higher score.
 fn target_of<'a>(architecture: &'a Architecture, import: &str) -> Option<&'a Module> {
-    let head = import
+    let import_segments: Vec<String> = import
         .split(['.', '/', ':'])
-        .find(|segment| !segment.is_empty())
-        .unwrap_or(import);
-    let wanted = normalise(head);
-    architecture.modules.iter().find(|module| {
-        module
-            .path
-            .rsplit('/')
-            .next()
-            .is_some_and(|segment| normalise(segment) == wanted)
-    })
+        .filter(|segment| !segment.is_empty())
+        .map(normalise)
+        .collect();
+    if import_segments.is_empty() {
+        return None;
+    }
+    let mut best: Option<(&Module, usize)> = None;
+    for module in &architecture.modules {
+        let module_segments: Vec<String> = module.path.split('/').map(normalise).collect();
+        let max_k = import_segments.len().min(module_segments.len());
+        let score = (1..=max_k)
+            .rev()
+            .find(|&k| module_segments[module_segments.len() - k..] == import_segments[..k]);
+        let Some(score) = score else { continue };
+        if best.is_none_or(|(_, best_score)| score > best_score) {
+            best = Some((module, score));
+        }
+    }
+    best.map(|(module, _)| module)
 }
 
 /// Whether `permitted` (an entry of May-depend-on) names `module`.
