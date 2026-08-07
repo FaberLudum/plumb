@@ -295,8 +295,8 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
             },
         };
 
-        for dependency in deps::added(&path, before.as_ref(), &after.names) {
-            if registry.exists(&dependency.name) == Existence::Missing {
+        for dependency in deps::added(&path, before.as_ref(), &after.names, after.ecosystem) {
+            if registry.exists(&dependency.name, dependency.ecosystem) == Existence::Missing {
                 findings.push(package_does_not_exist(&dependency));
             }
         }
@@ -446,12 +446,18 @@ fn manifest_not_fully_read(path: &str, detail: &str) -> Finding {
 /// Tier A: taxonomy §4.1 is peer-reviewed and the detection is objective — the
 /// name is in the registry or it is not.
 fn package_does_not_exist(dependency: &AddedDependency) -> Finding {
-    // Exhaustive on purpose, and it stops compiling the moment a second
-    // ecosystem lands — which is the moment this message becomes a lie and
-    // this whole function starts naming the wrong registry. It is the same
-    // guard `deps::added` keeps over the ecosystem it hard-codes.
+    // Exhaustive on purpose, and it stops compiling the moment a third
+    // ecosystem variant is added — which is the moment this message would
+    // otherwise start naming the wrong registry for it. `dependency.ecosystem`
+    // is not guessed here: it is `Manifest::ecosystem`, a mandatory field
+    // `manifest::parse` sets from the file it dispatched on, carried through
+    // unchanged by `deps::added` onto every `AddedDependency` it returns. This
+    // match is the second of two places in the crates that must stay
+    // exhaustive over `Ecosystem` for that reason; `RegistryRouter::exists`'s
+    // dispatch in `registry.rs` is the other.
     let registry_name = match dependency.ecosystem {
         Ecosystem::PyPi => "PyPI",
+        Ecosystem::Npm => "npm",
     };
 
     Finding {
@@ -531,16 +537,29 @@ mod tests {
     /// The log is what pins the set difference: a gate that looked up every
     /// name in the manifest rather than the added ones would still produce the
     /// right findings here, and only the log tells the two apart.
+    ///
+    /// Records the bare name, not the ecosystem, deliberately: every scenario
+    /// in this file's tests is a PyPI manifest, so folding the ecosystem into
+    /// the log would rewrite every existing `asked()` assertion to prove
+    /// nothing new. `registry.rs`'s own tests are what pin dispatch by
+    /// ecosystem — see `the_router_dispatches_by_ecosystem_and_the_two_do_not_cross_answer`
+    /// there — this stub only has to satisfy the trait's new signature.
     #[derive(Default)]
     struct StubRegistry {
         asked: RefCell<Vec<String>>,
     }
 
     impl Registry for StubRegistry {
-        fn exists(&self, name: &str) -> Existence {
+        fn exists(&self, name: &str, _ecosystem: Ecosystem) -> Existence {
             self.asked.borrow_mut().push(name.to_string());
             match name {
-                "requestz" => Existence::Missing,
+                // `left-pad-typo` is npm's answer here, `requestz` PyPI's —
+                // this stub still ignores `_ecosystem`, per the struct's own
+                // doc comment, so the two names simply have to be distinct
+                // from each other and from `ruff`/`httpx` for
+                // `only_the_names_a_change_adds_reach_the_registry` and its
+                // siblings to keep meaning what they already mean.
+                "requestz" | "left-pad-typo" => Existence::Missing,
                 "ruff" | "httpx" => Existence::Exists,
                 _ => Existence::Unknown,
             }
@@ -1490,6 +1509,15 @@ mod tests {
                 "[project]\ndependencies = [\"ruff\"]\n",
                 "[project]\ndependencies = [\"ruff\", \"requestz\"]\n",
             ),
+            // The npm sibling of the pyproject row above: same emission
+            // site (`package_does_not_exist`), reached through
+            // `Ecosystem::Npm` instead of `Ecosystem::PyPi` so the citation
+            // check also covers the npm-named message.
+            (
+                "package.json",
+                r#"{"dependencies":{"react":"^18.0.0"}}"#,
+                r#"{"dependencies":{"react":"^18.0.0","left-pad-typo":"^1.0.0"}}"#,
+            ),
             // The coverage finding: a Poetry-shaped manifest is recognised and
             // not read, which is an emission site of its own.
             (
@@ -1652,6 +1680,8 @@ mod tests {
             "requirements-dev.txt",
             "pyproject.toml",
             "packages/api/pyproject.toml",
+            "package.json",
+            "packages/api/package.json",
         ] {
             let probed = manifest::parse(path, "")
                 .unwrap_or_else(|| panic!("{path} was not recognised from its name"));
@@ -1661,7 +1691,15 @@ mod tests {
                 probed.gaps
             );
         }
-        for path in ["src/app.py", "README.md", "requirements_notes.txt"] {
+        for path in [
+            "src/app.py",
+            "README.md",
+            "requirements_notes.txt",
+            // A vendored package.json is not this project's manifest, at any
+            // depth — see manifest::parse's doc comment.
+            "node_modules/left-pad/package.json",
+            "packages/api/node_modules/left-pad/package.json",
+        ] {
             assert!(
                 manifest::parse(path, "ruff==0.4.0\n").is_none(),
                 "{path} was treated as a manifest"

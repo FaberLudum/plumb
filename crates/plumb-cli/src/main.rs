@@ -180,10 +180,11 @@ fn check_diff(offline: bool, json: bool) -> ExitCode {
     let cache = registry::cache_path(&repo);
     report_on_the_cache(&repo, cache.as_deref());
 
-    // One registry for the whole run. It holds the cache and the latch that
-    // stops a dead network being retried once per dependency, and both exist
-    // to keep the gate fast enough that nobody turns it off.
-    let registry = registry::PyPiRegistry::new(offline, cache);
+    // One router for the whole run, holding one PyPI and one npm registry.
+    // Each concrete registry holds the cache and the latch that stops a dead
+    // network being retried once per dependency, and both exist to keep the
+    // gate fast enough that nobody turns it off.
+    let registry = registry::RegistryRouter::new(offline, cache);
 
     match check::run(&repo, &registry, json) {
         Ok(outcome) => {
@@ -233,12 +234,14 @@ fn write_report(output: &str) {
 /// Offline, an `Exists` is honoured at any age — see
 /// [`registry::PyPiRegistry::stale_packages`]. That trade is defensible only
 /// because the run reports it, so this is part of the gate's output, not a
-/// nicety.
+/// nicety. [`registry::RegistryRouter::stale_packages`] sums both
+/// ecosystems' counts, so this message stays truthful about the total
+/// without having to say which registry a given stale answer came from.
 ///
 /// On stderr, and with no effect on the exit code. Stale data here can only
 /// have produced a non-blocking answer, so it is not a finding; and stdout
 /// carries a report that `--json` promises is parseable.
-fn report_stale_packages(registry: &registry::PyPiRegistry) {
+fn report_stale_packages(registry: &registry::RegistryRouter) {
     let stale = registry.stale_packages();
     if stale == 0 {
         return;

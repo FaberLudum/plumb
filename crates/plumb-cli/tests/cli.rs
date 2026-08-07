@@ -90,17 +90,38 @@ fn cache_file(dir: &Path) -> std::path::PathBuf {
     dir.join("plumb-cache.json")
 }
 
-/// Seeds the cache the binary reads, so a run can reach a definite answer
-/// without a request. `age` is how many seconds ago the entry was checked.
+/// Seeds the cache the binary reads under a bare, unprefixed key, so a run
+/// can reach a definite answer without a request. `age` is how many seconds
+/// ago the entry was checked.
+///
+/// The key carries no `pypi:`/`npm:` prefix. That is fine for a PyPI-only
+/// scenario: `PyPiRegistry::exists_via` (`registry.rs`) reads a bare key as
+/// legacy data when no prefixed entry is present, so every existing PyPI
+/// test in this file keeps working unmodified. npm has no such fallback —
+/// see `npm_cache_key`'s doc comment in `registry.rs` — so an npm scenario
+/// must seed under an `npm:`-prefixed key with [`cache_entry`] and
+/// [`write_cache`] directly, the way
+/// `check_exits_one_when_an_added_npm_dependency_does_not_exist` does.
 ///
 /// `dir` is the fixture tempdir, so the file lands beside the checkout rather
 /// than inside it — see [`repo_with_requirements`].
 fn seed_cache(dir: &Path, name: &str, exists: bool, age: u64) {
+    write_cache(dir, &cache_entry(name, exists, age));
+}
+
+/// One cache entry's rendered JSON body, keyed exactly as given — a bare
+/// name for [`seed_cache`]'s legacy-PyPI shape, or an explicitly prefixed
+/// `pypi:`/`npm:` key for a scenario that needs one.
+///
+/// The building block behind [`seed_cache`] and every scenario that seeds
+/// more than one entry into the same cache file: [`write_cache`] takes a
+/// whole cache body and overwrites the file rather than merging into it, so
+/// a change touching both a `requirements.txt` and a `package.json` in one
+/// run has to join two of these with a comma before writing them, rather
+/// than calling `seed_cache` twice.
+fn cache_entry(key: &str, exists: bool, age: u64) -> String {
     let checked = now_unix().saturating_sub(age);
-    write_cache(
-        dir,
-        &format!(r#""{name}":{{"exists":{exists},"checked":{checked}}}"#),
-    );
+    format!(r#""{key}":{{"exists":{exists},"checked":{checked}}}"#)
 }
 
 /// Writes a whole cache body from pre-rendered entries.
@@ -403,6 +424,217 @@ fn check_exits_one_when_an_added_dependency_does_not_exist() {
         .assert()
         .code(1)
         .stdout(predicates::str::contains("requestz"));
+}
+
+/// The npm mirror of the test above: a change adding a nonexistent name to
+/// `package.json`'s `dependencies` must block, and the message must name npm
+/// rather than PyPI. This is the first end-to-end proof that `check --diff`
+/// reaches `NpmRegistry` through the router at all, rather than only the
+/// unit-level routing pinned in `registry.rs` and `check.rs`.
+///
+/// The cache is seeded under the `npm:`-prefixed key — no legacy bare-key
+/// fallback exists for npm (see `npm_cache_key`'s doc comment in
+/// `registry.rs`), so seeding `left-pad-typo` bare would leave this entry
+/// unread and the run would try to reach the network, which `--offline`
+/// would then refuse rather than the seeded answer resolving it.
+///
+/// `package.json` is new here, and `git diff --name-only HEAD` does not
+/// report an untracked file — see `an_untracked_manifest_is_not_seen_until_it_is_staged`
+/// in `check.rs`. Staging it is what makes the change visible at all; this
+/// caught itself once already, as a green "exists" test below that had
+/// staged nothing and so had checked nothing.
+#[test]
+fn check_exits_one_when_an_added_npm_dependency_does_not_exist() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "package.json"),
+        r#"{"dependencies":{"left-pad-typo":"^1.0.0"}}"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(dir.path(), &cache_entry("npm:left-pad-typo", false, 0));
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("left-pad-typo").and(predicates::str::contains("npm")));
+}
+
+/// The other half: an existing name, seeded `exists: true` under the same
+/// `npm:` prefix, must not block.
+///
+/// Staged for the same reason as the test above. Left unstaged, this test
+/// passed for the wrong reason: an untracked `package.json` is invisible to
+/// `git diff --name-only HEAD`, so the manifest was never opened and "no
+/// findings" was guaranteed independently of whether the router or the
+/// cache worked at all.
+#[test]
+fn check_exits_zero_when_an_added_npm_dependency_exists() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "package.json"),
+        r#"{"dependencies":{"react":"^18.0.0"}}"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(dir.path(), &cache_entry("npm:react", true, 0));
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no findings"));
+}
+
+/// A scoped name (`@scope/name`) round-trips the cache: the router builds
+/// the `npm:@types/node` key without mangling the `@` or the `/`, the seeded
+/// answer is read back correctly, and nothing panics on a name shaped like a
+/// path segment. Offline throughout, so `NpmRegistry::lookup`'s URL-encoding
+/// of the `/` as `%2F` (`npm_url` in `registry.rs`) is never reached here —
+/// this test is about the cache key, not the URL, which the offline network
+/// panic probe covers separately.
+///
+/// Seeded `exists: false` rather than `true`, and this is the direction that
+/// actually proves something under `--offline`. A *miss* on the cache key —
+/// the scoped name never matching what `write_cache` wrote, which is exactly
+/// the failure mode a mangled `@` or `/` would produce — resolves to
+/// `Existence::Unknown` offline, and `Unknown` never blocks; a run seeded
+/// `exists: true` would therefore report "no findings" whether the key
+/// matched or not, which is vacuous. Seeding `Missing` closes that gap:
+/// `Existence::Missing` is only reachable by reading this exact seeded
+/// entry back, so only a correct key construction — `@` preserved, the full
+/// scoped name used whole — can produce the blocking finding this test
+/// asserts. A wrong key construction here fails loudly with exit 0 and no
+/// finding, not silently with the right answer for the wrong reason.
+///
+/// Staged for the same reason as the two tests above.
+#[test]
+fn a_scoped_npm_name_round_trips_the_cache() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "package.json"),
+        r#"{"dependencies":{"@types/node":"^20.0.0"}}"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(dir.path(), &cache_entry("npm:@types/node", false, 0));
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("@types/node").and(predicates::str::contains("npm")));
+}
+
+/// The reviewer's own live scenario, now blocked instead of silently passed:
+/// `react?bogus` is not a name npm's own naming rules admit, so it cannot be
+/// a name npm serves. Before this fix `npm_url` interpolated it into the
+/// lookup URL after escaping only `/`, and npm's router read
+/// `registry.npmjs.org/react?bogus` as `/react` plus an ignored query
+/// string — a 200 for a package that does not exist, no finding, exit 0,
+/// and `npm:react?bogus` cached `exists:true` for up to `EXISTS_TTL`.
+///
+/// Testable with zero network and no seeded cache at all: the charset check
+/// in `NpmRegistry::exists` answers `Missing` deterministically before
+/// anything online-shaped runs, so `--offline` here is exercised the same
+/// as every other test in this file and is not doing the blocking itself —
+/// an unseeded, unknown name is `Existence::Unknown` offline, which never
+/// blocks. Only the charset gate can produce the exit code this test pins.
+#[test]
+fn check_exits_one_when_an_added_npm_dependency_has_an_illegal_character() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "package.json"),
+        r#"{"dependencies":{"react?bogus":"^18.0.0"}}"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("react?bogus").and(predicates::str::contains("npm")));
+}
+
+/// npm still serves legal packages published before it required a lowercase
+/// name — `JSONStream` is real and `registry.npmjs.org/JSONStream` answers
+/// 200 today — and a name like it must not be mistaken for an illegal one.
+///
+/// This is the finding-1 regression net at the process level: the previous
+/// `is_valid_npm_name` admitted only lowercase, and `NpmRegistry::exists`'s
+/// own charset gate (added for the finding above) runs before the cache is
+/// consulted. Had that gate kept the old, too-narrow charset, it would have
+/// answered `Missing` for `JSONStream` itself, ignoring the seeded
+/// `exists: true` entry entirely and blocking the build — so this test
+/// fails loudly (exit 1) rather than by a panic if the charset regresses.
+/// It also runs the debug-build test binary end to end without a
+/// `debug_assert` panic (exit 101) on a legal legacy name, which is what
+/// the reviewer demonstrated live against the old validator.
+#[test]
+fn check_exits_zero_for_a_legacy_uppercase_npm_dependency() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "package.json"),
+        r#"{"dependencies":{"JSONStream":"^1.3.5"}}"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(dir.path(), &cache_entry("npm:JSONStream", true, 0));
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no findings"));
+}
+
+/// One change touching both a Python and an npm manifest, each with one bad
+/// name, must report both findings — proof that the router dispatches each
+/// manifest's added dependencies to its own registry within a single run,
+/// rather than one registry winning for the whole invocation.
+///
+/// Only `package.json` needs staging: `requirements.txt` already exists at
+/// HEAD (from `repo_with_requirements`), so its edit is a tracked-file diff
+/// and is visible without it. Staging both via `-A` is harmless — a tracked
+/// file's working-tree content is what `check --diff` reads regardless of
+/// whether it is also staged, per `a_staged_addition_is_invisible_once_the_working_tree_matches_head`'s
+/// finding in `check.rs`: staging only changes what `git diff --name-only
+/// HEAD` *lists*, and the working tree here matches what was staged.
+#[test]
+fn a_change_touching_both_pypi_and_npm_manifests_reports_both() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "requirements.txt"),
+        "ruff==0.4.0\nrequestz==2.31.0\n",
+    )
+    .expect("write");
+    std::fs::write(
+        in_repo(dir.path(), "package.json"),
+        r#"{"dependencies":{"left-pad-typo":"^1.0.0"}}"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(
+        dir.path(),
+        &[
+            cache_entry("pypi:requestz", false, 0),
+            cache_entry("npm:left-pad-typo", false, 0),
+        ]
+        .join(","),
+    );
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(1)
+        .stdout(
+            predicates::str::contains("requestz")
+                .and(predicates::str::contains("PyPI"))
+                .and(predicates::str::contains("left-pad-typo"))
+                .and(predicates::str::contains("npm")),
+        );
 }
 
 /// The whole binary, from a working diff carrying an undeclared cross-module
