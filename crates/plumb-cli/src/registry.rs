@@ -1842,6 +1842,40 @@ mod tests {
         );
     }
 
+    /// The exact shape of the reviewer's live poisoned-cache scenario, pinned
+    /// as a unit test rather than left correct-by-inspection: before this
+    /// fix, `react?bogus` reached npm as `registry.npmjs.org/react?bogus`,
+    /// npm's router answered 200 for the truncated `/react`, and the run
+    /// cached `npm:react?bogus` as `exists:true` — an entry a *later* run,
+    /// on a machine that had never touched the network for this name,
+    /// would trust for up to `EXISTS_TTL`.
+    ///
+    /// This test starts from that already-poisoned state — the entry is
+    /// written straight to disk, standing in for one left behind by an
+    /// unpatched binary — and proves the charset gate in
+    /// `NpmRegistry::exists` runs ahead of the cache read, not just ahead of
+    /// the network: an illegal name answers `Missing` even when a fresh,
+    /// favourable entry for that exact name is sitting right there, and the
+    /// entry is never rewritten either, so a poisoned cache file cannot be
+    /// laundered clean by a later run just by asking about it again.
+    #[test]
+    fn a_poisoned_cache_entry_for_an_illegal_name_is_never_consulted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let poisoned = cache_json(&[("npm:react?bogus", true, 0)]);
+        std::fs::write(&cache_path, &poisoned).expect("write poisoned cache");
+
+        let registry = NpmRegistry::new(true, Some(cache_path.clone()));
+        assert_eq!(registry.exists("react?bogus"), Existence::Missing);
+
+        let after = std::fs::read_to_string(&cache_path).expect("read cache");
+        assert_eq!(
+            after, poisoned,
+            "the poisoned entry must be left exactly as found — neither \
+             honoured nor rewritten"
+        );
+    }
+
     #[test]
     fn an_npm_cached_answer_is_returned_without_a_request() {
         let dir = tempfile::tempdir().expect("temp dir");
