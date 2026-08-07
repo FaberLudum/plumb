@@ -205,19 +205,7 @@ pub fn tracked_files(repo: &Path) -> Result<Vec<String>> {
 /// Unlike [`changed_paths`] this stays strict about UTF-8: a manifest really
 /// should be UTF-8, and here the error names a file the user can fix.
 pub fn show_at_head(repo: &Path, path: &str) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .arg("show")
-        .arg(format!("HEAD:{path}"))
-        .current_dir(repo)
-        .output()
-        .context("failed to run git; is it installed and on PATH?")?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    let contents = String::from_utf8(output.stdout).context("git produced non-UTF-8 output")?;
-    Ok(Some(contents))
+    show_at(repo, "HEAD", path)
 }
 
 /// Returns the contents of `path` as it exists at `reference`.
@@ -242,8 +230,19 @@ pub fn show_at_head(repo: &Path, path: &str) -> Result<Option<String>> {
 /// should be UTF-8, and here the error names a file the user can fix.
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the report command, a later task
 pub fn show_at(repo: &Path, reference: &str, path: &str) -> Result<Option<String>> {
-    let _ = (repo, reference, path);
-    todo!("generalise show_at_head's body over an arbitrary reference")
+    let output = Command::new("git")
+        .arg("show")
+        .arg(format!("{reference}:{path}"))
+        .current_dir(repo)
+        .output()
+        .context("failed to run git; is it installed and on PATH?")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let contents = String::from_utf8(output.stdout).context("git produced non-UTF-8 output")?;
+    Ok(Some(contents))
 }
 
 /// One commit as returned by [`recent_commits`].
@@ -262,8 +261,40 @@ pub struct Commit {
 /// history means.
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the report command, a later task
 pub fn recent_commits(repo: &Path, limit: usize) -> Result<Vec<Commit>> {
-    let _ = (repo, limit);
-    todo!("git log --first-parent -z --format=%H%x1f%s -n <limit>")
+    let output = Command::new("git")
+        .args([
+            "log",
+            "--first-parent",
+            "-z",
+            "--format=%H%x1f%s",
+            "-n",
+            &limit.to_string(),
+        ])
+        .current_dir(repo)
+        .output()
+        .context("failed to run git; is it installed and on PATH?")?;
+
+    if !output.status.success() {
+        bail!(
+            "git log failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    // NUL-separated records, lossily decoded: a subject is display-only, so a
+    // non-UTF-8 byte in a commit message should not fail the whole listing —
+    // it should just show up as U+FFFD.
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            let (hash, subject) = record.split_once('\u{1f}')?;
+            Some(Commit {
+                hash: hash.to_string(),
+                subject: subject.to_string(),
+            })
+        })
+        .collect())
 }
 
 /// Per-file `(added, removed, path)` for one commit against its first parent.
@@ -278,8 +309,41 @@ pub fn recent_commits(repo: &Path, limit: usize) -> Result<Vec<Commit>> {
 /// exists to report.
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the report command, a later task
 pub fn numstat(repo: &Path, hash: &str) -> Result<Vec<(u64, u64, String)>> {
-    let _ = (repo, hash);
-    todo!("git show --first-parent --numstat --format= <hash>")
+    let output = Command::new("git")
+        .args(["show", "--first-parent", "--numstat", "--format="])
+        .arg(hash)
+        .current_dir(repo)
+        .output()
+        .context("failed to run git; is it installed and on PATH?")?;
+
+    if !output.status.success() {
+        bail!(
+            "git show failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut rows = Vec::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let mut fields = line.splitn(3, '\t');
+        let added = fields.next().unwrap_or_default();
+        let removed = fields.next().unwrap_or_default();
+        let path = fields.next().unwrap_or_default();
+
+        if added == "-" || removed == "-" {
+            continue;
+        }
+
+        let added: u64 = added.parse().with_context(|| {
+            format!("git numstat produced a non-numeric added count: {added:?}")
+        })?;
+        let removed: u64 = removed.parse().with_context(|| {
+            format!("git numstat produced a non-numeric removed count: {removed:?}")
+        })?;
+        rows.push((added, removed, path.to_string()));
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
