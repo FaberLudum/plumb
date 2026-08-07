@@ -19,13 +19,13 @@ blocking gate.
 | S4 | Liu, Widyasari, Zhao, Irsan, Chen, Lo, *Debt Behind the AI Boom: A Large-Scale Empirical Study of AI-Generated Code in the Wild*, arXiv 2603.28592 (2026-03-30, rev. 2026-04-26) | Preprint | VERIFIED |
 | S5 | Zhu, Tsantalis, Rigby, *AI-Generated Smells: An Analysis of Code and Architecture in LLM and Agent-Driven Development*, arXiv 2605.02741 (2026-05-04) | Preprint | VERIFIED |
 | S6 | Mao, Zhao, Tang, Wang, Zhang, *A Large-Scale Comprehensive Measurement of AI-Generated Code in Real-World Repositories*, arXiv 2603.27130 (2026-03-28, rev. 2026-07-01) | Preprint | VERIFIED (title, authors, design; detailed figures from the body not yet checked) |
+| S7 | Pearce, Ahmad, Tan, Dolan-Gavitt, Karri, *Asleep at the Keyboard? Assessing the Security of GitHub Copilot's Code Contributions*, IEEE S&P 2022 — arXiv 2108.09293 | Peer-reviewed | VERIFIED 2026-08-07 (title, authors, venue, 89 scenarios, 1,689 programs, "approximately 40%" vulnerable per the abstract; the 39.33%/40.73% split is a body figure, still from the sweep) |
+| S8 | Perry, Srivastava, Kumar, Boneh, *Do Users Write More Insecure Code with AI Assistants?*, ACM CCS 2023 — arXiv 2211.03622 | Peer-reviewed | VERIFIED 2026-08-07 (title, authors, venue; "significantly less secure code" and the belief/actual-security gap both verbatim in the abstract; the 4-of-5-tasks count is a body figure, still from the sweep) |
 
 ## Reported, not yet verified
 
 | Ref | Source | Type | Used for |
 |---|---|---|---|
-| S7 | Pearce et al., *Asleep at the Keyboard? Assessing the Security of GitHub Copilot's Code Contributions*, IEEE S&P 2022 | Peer-reviewed | Security, 39.33% / 40.73% |
-| S8 | Perry et al., *Do Users Write More Insecure Code with AI Assistants?*, ACM CCS 2023 | Peer-reviewed | Security, 4 of 5 tasks |
 | S9 | Veracode, *2025 GenAI Code Security Report* | Vendor report | Security, 45% |
 | S10 | GitClear, *AI Copilot Code Quality* 2025 and 2026 (Harding & Kloster) | Vendor report | Duplication and churn (contested) |
 | S11 | DORA, *State of DevOps* 2024 and 2025 | Industry report | Delivery stability |
@@ -51,8 +51,9 @@ blocking gate.
 
 ## Verification priority
 
-Promote these first, because they carry blocking gates: **S7, S8** (security,
-Tier A). Then S14 if the 9.9% figure is to be used for H1.
+S7 and S8 were promoted on 2026-08-07 — the Tier A security gate's sources
+are now first-hand at the abstract level. Next, if ever needed: S14 if the
+9.9% figure is to be used for H1.
 
 S9-S13 are vendor reports, used only as contextual signal and never as the
 foundation of a rule. They need no promotion.
