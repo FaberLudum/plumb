@@ -1925,4 +1925,31 @@ mod tests {
 
         assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
     }
+
+    /// A hand-written `CLAUDE.md` — no marker line, never produced by `plumb
+    /// adapters` — is non-adoption, not drift. Before this fix the drift
+    /// gate compared it against a fresh render regardless, warned forever,
+    /// and named `plumb adapters` as the remedy — the very command whose own
+    /// overwrite guard refuses to touch a file it did not generate. Observed
+    /// live on a real repository with a hand-written `CLAUDE.md`/`AGENTS.md`
+    /// and a fresh `.plumb/`.
+    #[test]
+    fn a_hand_written_instruction_file_without_the_marker_is_not_drift() {
+        let dir = repo_with_requirements("ruff==0.4.0\n");
+        write_full_plumb(dir.path());
+        write(
+            dir.path(),
+            "CLAUDE.md",
+            "# Project notes\n\nThis file predates plumb and is maintained by hand.\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(outcome.code, 0, "output was: {}", outcome.report);
+        assert!(
+            !outcome.report.contains("adapter-drift"),
+            "a hand-written file with no marker was reported as drift: {}",
+            outcome.report
+        );
+    }
 }
