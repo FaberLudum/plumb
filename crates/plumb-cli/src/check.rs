@@ -1273,9 +1273,9 @@ mod tests {
     /// The other half: a change that adds a genuinely new undeclared import
     /// on top of a pre-existing one reports only the new one. Line moves
     /// must not resurrect a suppressed warning either, which is why the
-    /// comparison is by `(import, to_module)` pair rather than by line
-    /// number — not separately pinned here because nothing in this gate's
-    /// extraction is line-position-sensitive to begin with.
+    /// comparison is by the resolved `(from_module, to_module)` edge rather
+    /// than by line number — not separately pinned here because nothing in
+    /// this gate's extraction is line-position-sensitive to begin with.
     #[test]
     fn a_new_import_is_reported_while_a_pre_existing_one_is_not() {
         let dir = repo_with(&[("crates/core/src/lib.rs", "use cli::main;\n")]);
