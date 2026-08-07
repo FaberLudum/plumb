@@ -296,7 +296,7 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
         };
 
         for dependency in deps::added(&path, before.as_ref(), &after.names, after.ecosystem) {
-            if registry.exists(&dependency.name) == Existence::Missing {
+            if registry.exists(&dependency.name, dependency.ecosystem) == Existence::Missing {
                 findings.push(package_does_not_exist(&dependency));
             }
         }
@@ -532,13 +532,20 @@ mod tests {
     /// The log is what pins the set difference: a gate that looked up every
     /// name in the manifest rather than the added ones would still produce the
     /// right findings here, and only the log tells the two apart.
+    ///
+    /// Records the bare name, not the ecosystem, deliberately: every scenario
+    /// in this file's tests is a PyPI manifest, so folding the ecosystem into
+    /// the log would rewrite every existing `asked()` assertion to prove
+    /// nothing new. `registry.rs`'s own tests are what pin dispatch by
+    /// ecosystem — see `the_router_dispatches_by_ecosystem_and_the_two_do_not_cross_answer`
+    /// there — this stub only has to satisfy the trait's new signature.
     #[derive(Default)]
     struct StubRegistry {
         asked: RefCell<Vec<String>>,
     }
 
     impl Registry for StubRegistry {
-        fn exists(&self, name: &str) -> Existence {
+        fn exists(&self, name: &str, _ecosystem: Ecosystem) -> Existence {
             self.asked.borrow_mut().push(name.to_string());
             match name {
                 "requestz" => Existence::Missing,

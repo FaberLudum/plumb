@@ -7,6 +7,7 @@
 //! exactly one class of request: a lookup of one distribution name. Nothing
 //! else is ever sent.
 
+use plumb_core::manifest::Ecosystem;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -216,12 +217,19 @@ pub enum Existence {
     Unknown,
 }
 
-/// A source of truth for whether a package name resolves.
+/// A source of truth for whether a package name resolves in a given
+/// ecosystem.
 ///
-/// Object safe on purpose: callers hold `&dyn Registry` so tests can inject a
-/// stub instead of reaching the network.
+/// Object safe on purpose: `check.rs` holds `&dyn Registry` for the whole run
+/// so tests can inject a stub instead of reaching the network.
+///
+/// Only [`RegistryRouter`] implements this trait. [`PyPiRegistry`] and
+/// [`NpmRegistry`] each expose an ecosystem-less inherent `exists(name)`
+/// instead: each already knows which registry it asks, so the parameter
+/// would be dead weight on both of them. The router is the one thing that
+/// needs it, to decide which of the two to ask — see its doc comment.
 pub trait Registry {
-    fn exists(&self, name: &str) -> Existence;
+    fn exists(&self, name: &str, ecosystem: Ecosystem) -> Existence;
 }
 
 /// Seconds since the Unix epoch, or 0 if the clock is set before it.
@@ -263,13 +271,97 @@ impl Entry {
     }
 }
 
-/// Remembered answers, keyed by distribution name.
+/// Remembered answers, keyed by [`pypi_cache_key`] or [`npm_cache_key`].
+///
+/// One map holds both ecosystems' answers, because [`PyPiRegistry`] and
+/// [`NpmRegistry`] share one on-disk file — see [`persist_entry`] for how
+/// they write to it without erasing each other's entries.
 ///
 /// The pre-timestamp schema stored a bare bool. It does not deserialize into
 /// this, so an old file is discarded and rebuilt — see [`PyPiRegistry::new`].
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Cache {
     known: BTreeMap<String, Entry>,
+}
+
+/// The map key an answer about `name` is stored under for PyPI.
+///
+/// Prefixed so one cache file can hold npm's answers too without either
+/// ecosystem's names colliding with the other's — see [`npm_cache_key`]. A
+/// bare key with no prefix is what every entry looked like before npm
+/// existed, so [`PyPiRegistry::exists_via`] still reads one when a prefixed
+/// entry is not there: a cache file from before this change stays valid
+/// without anyone migrating it. New answers are written only under the
+/// prefixed form, so the legacy shape never spreads to new entries.
+fn pypi_cache_key(name: &str) -> String {
+    format!("pypi:{name}")
+}
+
+/// The map key an answer about `name` is stored under for npm.
+///
+/// No legacy bare form: a bare key predates npm's existence entirely, so it
+/// can only ever have meant PyPI — see [`pypi_cache_key`].
+fn npm_cache_key(name: &str) -> String {
+    format!("npm:{name}")
+}
+
+/// Reads the cache at `cache_path`, if there is a readable one.
+///
+/// Shared by [`PyPiRegistry::new`], [`NpmRegistry::new`] and
+/// [`persist_entry`]'s read-modify-write. A missing, unreadable or malformed
+/// file all read as empty rather than an error — the cache is an
+/// optimisation, and refusing to start over a corrupt one would turn a
+/// scratch file into a hard failure of the gate. A file written by the
+/// pre-timestamp schema takes the same path: it fails to deserialize, so it
+/// is discarded and rebuilt rather than trusted with no way to tell how old
+/// its answers are.
+fn load_cache(cache_path: Option<&Path>) -> Cache {
+    cache_path
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Cache>(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Merges one answer into the cache file on disk.
+///
+/// Read-modify-write rather than a blind overwrite of a whole in-memory
+/// snapshot, because [`PyPiRegistry`] and [`NpmRegistry`] write to the same
+/// file. A snapshot taken at construction and written back wholesale would
+/// let whichever registry persists second erase whatever the other
+/// persisted in between, within the very same run — a Python and an npm
+/// manifest both changing is the ordinary case this has to survive, not an
+/// edge case. Reading fresh immediately before writing one entry keeps that
+/// window as small as it can be without adding a second process's worth of
+/// locking to a single-threaded, single-process CLI run.
+///
+/// A failed write costs the next run a round trip and nothing else, so there
+/// is no outcome worth interrupting the gate for.
+fn persist_entry(cache_path: &Path, key: &str, entry: Entry) {
+    let mut cache = load_cache(Some(cache_path));
+    cache.known.insert(key.to_string(), entry);
+    let Ok(text) = serde_json::to_string(&cache) else {
+        return;
+    };
+    if let Some(parent) = cache_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(cache_path, text);
+}
+
+/// What an expired entry is worth when the registry will not be consulted.
+///
+/// Shared by [`PyPiRegistry::exists_via`] and [`NpmRegistry::exists_via`]:
+/// the asymmetry is about what `Exists` and `Missing` cost, not about either
+/// registry, so there is nothing ecosystem-specific left to say here that
+/// [`PyPiRegistry`]'s own doc comment does not already say in full — offline
+/// there is no way to refresh, so the choice is between the old answer and
+/// no answer, and a stale `Exists` only fails open while a stale `Missing`
+/// would block a build on evidence nobody can check.
+fn honour_offline(cached: Option<Entry>) -> Existence {
+    match cached {
+        Some(entry) if entry.exists => Existence::Exists,
+        _ => Existence::Unknown,
+    }
 }
 
 /// Resolves names against PyPI, with an on-disk cache and an offline mode.
@@ -322,11 +414,7 @@ impl PyPiRegistry {
     /// run keeps its answers in memory only: every lookup still happens, and
     /// nothing is read from or written to disk.
     pub fn new(offline: bool, cache_path: Option<PathBuf>) -> Self {
-        let cache = cache_path
-            .as_deref()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|text| serde_json::from_str::<Cache>(&text).ok())
-            .unwrap_or_default();
+        let cache = load_cache(cache_path.as_deref());
 
         Self {
             offline,
@@ -348,7 +436,7 @@ impl PyPiRegistry {
     ///
     /// Only the offline path can produce one: online an expired entry is
     /// re-queried, and a latched run refuses it rather than honouring it. See
-    /// [`PyPiRegistry::honour_offline`] for why offline honours it at all, and
+    /// [`honour_offline`] for why offline honours it at all, and
     /// [`EXISTS_TTL`] for why that concession needs saying out loud.
     ///
     /// Read once after a run rather than pushed through [`Registry`]: the
@@ -365,7 +453,7 @@ impl PyPiRegistry {
     ///
     /// Order matters. A fresh cache entry answers first, so a warm cache still
     /// answers on a dead network. Offline stops there, keeping whatever an
-    /// expired entry is still worth — see [`PyPiRegistry::honour_offline`].
+    /// expired entry is still worth — see [`honour_offline`].
     /// Then the latch: once a lookup has failed for a transport reason, every
     /// later name in this run reports `Unknown` without a request, because
     /// they would all pay [`LOOKUP_TIMEOUT`] to learn the same thing. Thirty
@@ -385,6 +473,10 @@ impl PyPiRegistry {
     /// and quietly substituting old answers for it would change what the gate
     /// reports without anyone having asked.
     fn exists_via(&self, name: &str, lookup: impl Fn(&str) -> Outcome) -> Existence {
+        // TODO(task 2 implementation commit): read `pypi_cache_key(name)`
+        // first, falling back to the legacy bare `name` — left as the old
+        // bare-only lookup for now, so the new prefix tests are the red half
+        // of this task's TDD cycle.
         let cached = self.cache.borrow().known.get(name).copied();
         if let Some(entry) = cached
             && entry.is_fresh(now_unix())
@@ -393,7 +485,7 @@ impl PyPiRegistry {
         }
 
         if self.offline {
-            let answer = Self::honour_offline(cached);
+            let answer = honour_offline(cached);
             // Reaching here means the entry was not fresh, so any answer at
             // all is an answer taken from data past its lifetime. Counting the
             // `Unknown`s too would report staleness for a cache miss, which is
@@ -420,33 +512,16 @@ impl PyPiRegistry {
         existence
     }
 
-    /// What an expired entry is worth when the registry will not be consulted.
+    /// Answers from the cache, then from PyPI, then not at all.
     ///
-    /// Offline there is no way to refresh, so the choice is between the old
-    /// answer and no answer, and the lifetimes' own asymmetry decides it. A
-    /// stale `Exists` only fails open: honouring it costs nothing and keeps
-    /// the run informative, so a newly hallucinated name still stands out as
-    /// `Unknown` against a backdrop of confirmed ones. A stale `Missing` would
-    /// block a build on evidence nobody can check, so it is refused.
+    /// Anything that is not a definite success or 404 — a timeout, a proxy, a
+    /// firewall, a 5xx — is [`Existence::Unknown`], and `Unknown` is never
+    /// cached: it is a fact about this run's network, not about the package.
     ///
-    /// Expiring uniformly instead would answer `Unknown` to everything, which
-    /// is not a safer gate but no gate at all.
-    ///
-    /// This is a read, never a refresh — see [`PyPiRegistry::exists_via`] for
-    /// why the timestamp must not move.
-    ///
-    /// Age is not consulted at all, so [`EXISTS_TTL`] does not bound this
-    /// path. A machine offline for years will still report `Exists` for what
-    /// it last confirmed. Deliberate: expiring it could only turn a
-    /// non-blocking answer into a different non-blocking answer, which buys no
-    /// safety and loses the one signal an offline run still has. What makes
-    /// that defensible is that the run says so: every answer honoured here is
-    /// counted by [`PyPiRegistry::stale_packages`] and reported.
-    fn honour_offline(cached: Option<Entry>) -> Existence {
-        match cached {
-            Some(entry) if entry.exists => Existence::Exists,
-            _ => Existence::Unknown,
-        }
+    /// See [`PyPiRegistry::exists_via`] for the order this resolves in, and
+    /// for the latch that stops a dead network being retried once per name.
+    pub fn exists(&self, name: &str) -> Existence {
+        self.exists_via(name, |name| self.lookup(name))
     }
 
     /// Asks PyPI about one name.
@@ -455,15 +530,18 @@ impl PyPiRegistry {
         // alphanumeric at both ends, so the name cannot alter the URL's shape.
         // Asserting it here keeps that guarantee local to the code that builds
         // the URL, rather than resting on a crate this file never references.
+        // Scoped to PyPI's own charset: an npm name may carry `@`, `/`, `_`
+        // and `.`, none of which this assertion admits, so it must never run
+        // against one — see [`is_valid_npm_name`] for npm's own validator.
         debug_assert!(
-            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            is_valid_pypi_name(name),
             "name reached the registry unvalidated: {name:?}"
         );
         let url = format!("https://pypi.org/pypi/{name}/json");
         classify(self.agent.get(&url).call().map(|_| ()))
     }
 
-    /// Records a definite answer and writes the cache back.
+    /// Records a definite answer and writes it into the shared cache file.
     ///
     /// [`Existence::Unknown`] is dropped: it describes this run's network, not
     /// the package, and caching it would make one outage permanent.
@@ -475,29 +553,33 @@ impl PyPiRegistry {
             exists: outcome == Existence::Exists,
             checked: now_unix(),
         };
+        // TODO(task 2 implementation commit): write under
+        // `pypi_cache_key(name)` and merge via `persist_entry` instead of
+        // this bare-key, whole-snapshot write.
         self.cache
             .borrow_mut()
             .known
             .insert(name.to_string(), entry);
-        self.persist();
-    }
-
-    /// Writes the cache back, ignoring every failure.
-    ///
-    /// A failed write costs the next run a round trip and nothing else, so
-    /// there is no outcome worth interrupting the gate for.
-    fn persist(&self) {
-        let Some(cache_path) = self.cache_path.as_deref() else {
-            return;
-        };
-        let Ok(text) = serde_json::to_string(&*self.cache.borrow()) else {
-            return;
-        };
-        if let Some(parent) = cache_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if let Some(cache_path) = self.cache_path.as_deref() {
+            let _ = serde_json::to_string(&*self.cache.borrow()).map(|text| {
+                if let Some(parent) = cache_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(cache_path, text)
+            });
         }
-        let _ = std::fs::write(cache_path, text);
     }
+}
+
+/// Whether `name` is safe to interpolate into a PyPI lookup URL unescaped.
+///
+/// ASCII alphanumeric and `-` only, anchored alphanumeric at both ends — PEP
+/// 503's own character set after normalisation. A pure predicate rather than
+/// inline in [`PyPiRegistry::lookup`] so the character set can be pinned
+/// without a request, the same reasoning [`npm_url`] and
+/// [`is_valid_npm_name`] follow for npm.
+fn is_valid_pypi_name(name: &str) -> bool {
+    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// The agent every lookup runs on.
@@ -571,17 +653,137 @@ fn classify(result: Result<(), ureq::Error>) -> Outcome {
     }
 }
 
-impl Registry for PyPiRegistry {
-    /// Answers from the cache, then from PyPI, then not at all.
+/// Builds the npm registry URL for `name`.
+///
+/// A scoped name's `/` is encoded as `%2F` — npm's own documented way to
+/// address `@scope/name` as a single path segment rather than two — and
+/// nothing else is touched, so an unscoped name passes through unchanged.
+/// Pure and separate from [`NpmRegistry::lookup`] so the mapping can be
+/// pinned without a request; the endpoint shape itself was confirmed with a
+/// manual `curl` outside the test suite, quoted in this task's report.
+fn npm_url(name: &str) -> String {
+    format!("https://registry.npmjs.org/{}", name.replace('/', "%2F"))
+}
+
+/// Whether `name` is a syntactically ordinary npm package name.
+///
+/// Lowercase ASCII alphanumerics plus `@`, `/`, `-`, `_` and `.` — npm's own
+/// documented character set, which is wider than PyPI's and includes `/` in
+/// a scoped name's unencoded form (see [`npm_url`] for how that `/` reaches
+/// the wire). [`is_valid_pypi_name`]'s narrower rule must never run against
+/// one of these; this is the ecosystem-specific validator that runs instead.
+fn is_valid_npm_name(name: &str) -> bool {
+    name.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.' | '@' | '/'))
+}
+
+/// Resolves names against npm, with the same on-disk cache, offline mode and
+/// unreachable-network latch as [`PyPiRegistry`] — see that type's doc
+/// comment and its fields' comments for the reasoning behind all of them,
+/// none of which differs here. What differs is narrow and is all this type
+/// states of its own: the endpoint ([`npm_url`]), the cache key prefix
+/// ([`npm_cache_key`], with no legacy bare-key fallback — a bare key predates
+/// npm entirely), and the character set a name must satisfy before it
+/// reaches the URL ([`is_valid_npm_name`]).
+///
+/// A second struct rather than a shared generic one, on the plan's own
+/// instruction: a little duplication beats a premature abstraction, and the
+/// third ecosystem is what should pay for factoring this out, not the
+/// second.
+pub struct NpmRegistry {
+    offline: bool,
+    cache_path: Option<PathBuf>,
+    cache: RefCell<Cache>,
+    agent: ureq::Agent,
+    unreachable: Cell<bool>,
+    honoured_stale: RefCell<BTreeSet<String>>,
+}
+
+impl NpmRegistry {
+    /// See [`PyPiRegistry::new`]; identical, against the shared cache file.
+    pub fn new(offline: bool, cache_path: Option<PathBuf>) -> Self {
+        let cache = load_cache(cache_path.as_deref());
+
+        Self {
+            offline,
+            cache_path,
+            cache: RefCell::new(cache),
+            agent: lookup_agent(),
+            unreachable: Cell::new(false),
+            honoured_stale: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    /// See [`PyPiRegistry::stale_packages`].
+    pub fn stale_packages(&self) -> usize {
+        self.honoured_stale.borrow().len()
+    }
+
+    /// Answers from the cache, then from npm, then not at all. See
+    /// [`PyPiRegistry::exists`].
     ///
-    /// Anything that is not a definite success or 404 — a timeout, a proxy, a
-    /// firewall, a 5xx — is [`Existence::Unknown`], and `Unknown` is never
-    /// cached: it is a fact about this run's network, not about the package.
-    ///
-    /// See [`PyPiRegistry::exists_via`] for the order this resolves in, and
-    /// for the latch that stops a dead network being retried once per name.
-    fn exists(&self, name: &str) -> Existence {
-        self.exists_via(name, |name| self.lookup(name))
+    /// `todo!()` for this task's red commit: the tests that exercise it are
+    /// meant to fail here, not merely fail an assertion, because there is no
+    /// npm behaviour yet to produce a wrong answer with. The implementation
+    /// commit replaces this with the real `exists_via`/`lookup`/`record`
+    /// trio, mirroring [`PyPiRegistry`]'s.
+    pub fn exists(&self, name: &str) -> Existence {
+        let _ = (name, &self.cache, &self.offline, &self.agent, &self.unreachable, &self.honoured_stale, &self.cache_path);
+        todo!("NpmRegistry::exists: implemented in this task's second commit")
+    }
+
+    /// Records a definite answer. `todo!()` alongside [`NpmRegistry::exists`]
+    /// — see its comment.
+    fn record(&self, name: &str, outcome: Existence) {
+        let _ = (name, outcome);
+        todo!("NpmRegistry::record: implemented in this task's second commit")
+    }
+}
+
+/// Dispatches a lookup to the registry for its ecosystem.
+///
+/// One [`PyPiRegistry`] and one [`NpmRegistry`], both constructed against the
+/// same `cache_path` — see the cache key prefix functions for how the two
+/// share one file without colliding. `check.rs` holds this behind `&dyn
+/// Registry` for the whole run, exactly as it held a bare `PyPiRegistry`
+/// before npm existed: one router, not one per manifest, because the cache
+/// and the unreachable-network latch inside each concrete registry are
+/// per-process state that a fresh registry per lookup would throw away.
+///
+/// Holds the concrete types rather than `Box<dyn Registry>`, so
+/// [`RegistryRouter::stale_packages`] can read both registries'
+/// `stale_packages()` — a method [`Registry`] deliberately does not carry,
+/// per [`PyPiRegistry::stale_packages`]'s own doc comment. A router of trait
+/// objects could dispatch lookups but could not report this.
+pub struct RegistryRouter {
+    pypi: PyPiRegistry,
+    npm: NpmRegistry,
+}
+
+impl RegistryRouter {
+    pub fn new(offline: bool, cache_path: Option<PathBuf>) -> Self {
+        Self {
+            pypi: PyPiRegistry::new(offline, cache_path.clone()),
+            npm: NpmRegistry::new(offline, cache_path),
+        }
+    }
+
+    /// Distinct packages either registry answered from cache entries past
+    /// their lifetime, summed across both. See
+    /// [`PyPiRegistry::stale_packages`] for what "stale" means and why
+    /// offline honours it at all; the message this feeds only has to be
+    /// truthful about the count, not about which ecosystem it came from.
+    pub fn stale_packages(&self) -> usize {
+        self.pypi.stale_packages() + self.npm.stale_packages()
+    }
+}
+
+impl Registry for RegistryRouter {
+    fn exists(&self, name: &str, ecosystem: Ecosystem) -> Existence {
+        match ecosystem {
+            Ecosystem::PyPi => self.pypi.exists(name),
+            Ecosystem::Npm => self.npm.exists(name),
+        }
     }
 }
 
@@ -1358,13 +1560,245 @@ mod tests {
     /// for every caller at once.
     #[test]
     fn the_registry_trait_is_object_safe() {
+        // `PyPiRegistry` and `NpmRegistry` no longer implement `Registry`
+        // themselves — see the trait's doc comment — so it is
+        // `RegistryRouter`, the type `check.rs` actually holds as `&dyn
+        // Registry` in production, that this must be proven against.
         let dir = tempfile::tempdir().expect("temp dir");
         let cache_path = dir.path().join("registry.json");
-        std::fs::write(&cache_path, cache_json(&[("ruff", true, 0)])).expect("write cache");
+        std::fs::write(&cache_path, cache_json(&[("pypi:ruff", true, 0)])).expect("write cache");
 
-        let registry = PyPiRegistry::new(true, Some(cache_path));
-        let erased: &dyn Registry = &registry;
+        let router = RegistryRouter::new(true, Some(cache_path));
+        let erased: &dyn Registry = &router;
 
-        assert_eq!(erased.exists("ruff"), Existence::Exists);
+        assert_eq!(erased.exists("ruff", Ecosystem::PyPi), Existence::Exists);
+    }
+
+    // -- npm and the router -------------------------------------------------
+    //
+    // `NpmRegistry` mirrors `PyPiRegistry` exactly, so its own tests below
+    // are a narrower slice rather than a full duplicate of the ~30 tests
+    // above: the shared machinery (TTLs, the latch, `classify`, the lookup
+    // timeout) is already pinned once, against `PyPiRegistry`, and pinning
+    // it again here would only prove the copy was faithful. What is actually
+    // specific to npm — the URL, the character set, the cache key prefix and
+    // its lack of a legacy fallback, and the router's dispatch — is what
+    // these cover.
+
+    /// Pure and network-free, as the plan requires: `react` is unscoped and
+    /// passes through untouched, `@types/node` is scoped and its `/` becomes
+    /// `%2F` — npm's own documented way to address it as one path segment.
+    #[test]
+    fn npm_url_encodes_only_a_scoped_names_slash() {
+        assert_eq!(npm_url("react"), "https://registry.npmjs.org/react");
+        assert_eq!(
+            npm_url("@types/node"),
+            "https://registry.npmjs.org/@types%2Fnode"
+        );
+    }
+
+    /// The character sets are meant to be different, and each validator must
+    /// refuse what only the other ecosystem allows: an npm name may carry
+    /// `@`, `/`, `_`, `.` and mixed-with-lowercase digits that PyPI's rule
+    /// (ASCII alphanumeric and `-` only) would reject, and PyPI's rule must
+    /// not be relaxed to admit them just because npm needs to.
+    #[test]
+    fn npm_and_pypi_name_validation_disagree_on_npms_own_characters() {
+        for name in ["@types/node", "left-pad", "lodash.merge", "left_pad"] {
+            assert!(is_valid_npm_name(name), "npm should admit {name:?}");
+            assert!(
+                !is_valid_pypi_name(name),
+                "pypi's narrower rule must not admit {name:?}"
+            );
+        }
+        // npm is also case-sensitive lowercase, unlike the characters check
+        // alone would suggest.
+        assert!(!is_valid_npm_name("Left-Pad"), "npm names are lowercase");
+        assert!(is_valid_pypi_name("ruff"));
+        assert!(is_valid_npm_name("ruff"), "ordinary names satisfy both");
+    }
+
+    /// A definite npm answer is written under the `npm:` prefix, never the
+    /// bare name — the bare form means PyPI, and only PyPI, in this shared
+    /// file.
+    #[test]
+    fn an_npm_answer_is_stored_under_the_npm_prefixed_key() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NpmRegistry::new(true, Some(cache_path.clone()));
+
+        registry.record("left-pad", Existence::Missing);
+
+        let written = std::fs::read_to_string(&cache_path).expect("read cache");
+        assert!(written.contains("\"npm:left-pad\""), "written: {written}");
+    }
+
+    /// The other half of the legacy story: a bare key predates npm entirely,
+    /// so — unlike `PyPiRegistry`, which falls back to it — npm must not
+    /// answer from one.
+    #[test]
+    fn npm_does_not_fall_back_to_a_legacy_bare_key() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(&cache_path, cache_json(&[("react", true, 0)])).expect("write cache");
+
+        let registry = NpmRegistry::new(true, Some(cache_path));
+
+        assert_eq!(registry.exists("react"), Existence::Unknown);
+    }
+
+    #[test]
+    fn npm_offline_mode_never_makes_a_request_and_reports_unknown() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let registry = NpmRegistry::new(true, Some(dir.path().join("registry.json")));
+
+        assert_eq!(registry.exists("left-pad"), Existence::Unknown);
+    }
+
+    #[test]
+    fn an_npm_cached_answer_is_returned_without_a_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("npm:react", true, 0), ("npm:left-pad-typo", false, 0)]),
+        )
+        .expect("write cache");
+
+        let registry = NpmRegistry::new(true, Some(cache_path));
+
+        assert_eq!(registry.exists("react"), Existence::Exists);
+        assert_eq!(registry.exists("left-pad-typo"), Existence::Missing);
+    }
+
+    /// The round trip a real run makes across two invocations of the binary.
+    #[test]
+    fn a_persisted_npm_cache_is_read_back_by_a_later_registry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("nested").join("registry.json");
+
+        let first = NpmRegistry::new(true, Some(cache_path.clone()));
+        first.record("react", Existence::Exists);
+        first.record("left-pad-typo", Existence::Missing);
+
+        let second = NpmRegistry::new(true, Some(cache_path));
+
+        assert_eq!(second.exists("react"), Existence::Exists);
+        assert_eq!(second.exists("left-pad-typo"), Existence::Missing);
+    }
+
+    /// [`Existence::Unknown`] must not be recorded, for npm exactly as for
+    /// PyPI — it describes this run's network, not the package.
+    #[test]
+    fn an_unknown_npm_answer_is_not_written_to_the_cache() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NpmRegistry::new(true, Some(cache_path.clone()));
+
+        registry.record("nowhere", Existence::Unknown);
+
+        assert!(
+            !cache_path.exists(),
+            "an unknown answer created a cache file"
+        );
+    }
+
+    /// A scoped name round-trips through the cache, `/` and all — the cache
+    /// key is the raw name, not the URL-encoded one, so this proves the two
+    /// are kept separate rather than one leaking into the other.
+    #[test]
+    fn a_scoped_npm_name_round_trips_through_the_cache() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NpmRegistry::new(true, Some(cache_path.clone()));
+
+        registry.record("@types/node", Existence::Exists);
+
+        let written = std::fs::read_to_string(&cache_path).expect("read cache");
+        assert!(
+            written.contains("\"npm:@types/node\""),
+            "written: {written}"
+        );
+        let reloaded = NpmRegistry::new(true, Some(cache_path));
+        assert_eq!(reloaded.exists("@types/node"), Existence::Exists);
+    }
+
+    /// The property the whole shared-file design exists for: an entry
+    /// written by one ecosystem must not answer a lookup in the other, and
+    /// the router must send each name to the registry that owns it.
+    #[test]
+    fn the_router_dispatches_by_ecosystem_and_the_two_do_not_cross_answer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("pypi:ruff", true, 0), ("npm:left-pad", true, 0)]),
+        )
+        .expect("write cache");
+
+        let router = RegistryRouter::new(true, Some(cache_path));
+
+        assert_eq!(router.exists("ruff", Ecosystem::PyPi), Existence::Exists);
+        assert_eq!(router.exists("left-pad", Ecosystem::Npm), Existence::Exists);
+        // Same names, wrong ecosystem: neither registry's cache has an entry
+        // under the other's key, so both must come back Unknown rather than
+        // reusing the sibling's answer.
+        assert_eq!(router.exists("ruff", Ecosystem::Npm), Existence::Unknown);
+        assert_eq!(
+            router.exists("left-pad", Ecosystem::PyPi),
+            Existence::Unknown
+        );
+    }
+
+    /// `RegistryRouter::stale_packages` sums both registries' counts, so a
+    /// run that honoured one stale answer in each ecosystem reports two, not
+    /// one and not zero.
+    #[test]
+    fn the_router_sums_stale_packages_from_both_registries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let age = well_past_every_lifetime();
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("pypi:ruff", true, age), ("npm:left-pad", true, age)]),
+        )
+        .expect("write cache");
+        let router = RegistryRouter::new(true, Some(cache_path));
+
+        assert_eq!(router.stale_packages(), 0, "nothing has been asked yet");
+
+        assert_eq!(router.exists("ruff", Ecosystem::PyPi), Existence::Exists);
+        assert_eq!(router.exists("left-pad", Ecosystem::Npm), Existence::Exists);
+
+        assert_eq!(router.stale_packages(), 2);
+    }
+
+    /// Two manifests in one change, one per ecosystem, must not make either
+    /// registry's write erase the other's — the property [`persist_entry`]'s
+    /// read-modify-write exists for. Reaches the private fields directly
+    /// (this test module is a descendant of `registry`, so it may) to record
+    /// through each concrete registry the way two different manifests in the
+    /// same run would, one after the other, sharing one router and one file.
+    ///
+    /// A version that persisted a blind snapshot of `self.cache` — what this
+    /// file did before either registry needed to share — fails this: the
+    /// second `record` call's registry loaded its snapshot before the first
+    /// call wrote anything, so writing that snapshot back would overwrite the
+    /// first answer with nothing there at all.
+    #[test]
+    fn a_write_from_one_registry_does_not_erase_the_others() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let router = RegistryRouter::new(false, Some(cache_path.clone()));
+
+        router.pypi.record("ruff", Existence::Exists);
+        router.npm.record("left-pad", Existence::Exists);
+
+        let reloaded = RegistryRouter::new(true, Some(cache_path));
+        assert_eq!(reloaded.exists("ruff", Ecosystem::PyPi), Existence::Exists);
+        assert_eq!(
+            reloaded.exists("left-pad", Ecosystem::Npm),
+            Existence::Exists
+        );
     }
 }
