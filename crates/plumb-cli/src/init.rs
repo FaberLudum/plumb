@@ -213,4 +213,34 @@ mod tests {
             "no real source anywhere should fall back to the empty-repository default: {modules:?}"
         );
     }
+
+    /// Observed on a real repository: the derived `architecture.md` carried
+    /// `## .venv` and `## .worktrees`, dot-directories nobody would call a
+    /// module. `SKIPPED_DIRS` is a fixed list of known tool directories and
+    /// was never going to enumerate every dot-directory a project's tooling
+    /// creates (`.venv`, `.worktrees`, `.tox`, `.mypy_cache`, and so on), so
+    /// any top-level directory whose name starts with `.` must be skipped on
+    /// its own, at the top level and inside `contains_source`'s recursion —
+    /// a nested `.venv` full of Python must not make its parent a module
+    /// either, the same shape of false positive
+    /// `a_source_file_inside_a_nested_skipped_directory_does_not_make_its_parent_a_module`
+    /// pins for `SKIPPED_DIRS`.
+    #[test]
+    fn a_dot_directory_is_never_detected_as_a_module() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let venv = dir.path().join(".venv").join("lib");
+        std::fs::create_dir_all(&venv).expect("create dirs");
+        std::fs::write(venv.join("x.py"), "def helper():\n    pass\n").expect("write");
+        let api = dir.path().join("api");
+        std::fs::create_dir_all(&api).expect("create dirs");
+        std::fs::write(api.join("app.py"), "def main():\n    pass\n").expect("write");
+
+        let modules = detect_modules(dir.path());
+
+        assert_eq!(
+            modules,
+            vec!["api".to_string()],
+            "a dot-directory was detected as a module: {modules:?}"
+        );
+    }
 }
