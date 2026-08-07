@@ -442,6 +442,49 @@ fn an_undeclared_import_warns_end_to_end() {
         );
 }
 
+/// The calibration scenario, reproduced end to end: a single top-level Python
+/// package (`pkg`) split into sub-packages (`documents`, `facts`), each
+/// declared as its own module under a shared parent directory. Before the
+/// sub-package resolver landed, `from pkg.documents import domain` resolved
+/// to the whole `pkg` top segment and both `documents` and `facts` collapsed
+/// into one module — invisible to the boundary gate, and the reason
+/// `plumb report`'s coupling delta read `0` across 25 commits on the real
+/// repository this was calibrated against (see README). With the resolver
+/// matching import segments against module path trailing segments, the
+/// import resolves to the deeper, more specific `src/pkg/documents` module,
+/// which `src/pkg/facts`'s architecture entry does not permit.
+#[test]
+fn a_cross_subpackage_import_warns_when_declared() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    let plumb_dir = in_repo(dir.path(), ".plumb");
+    std::fs::create_dir_all(&plumb_dir).expect("mkdir");
+    std::fs::write(
+        plumb_dir.join("architecture.md"),
+        "## src/pkg/documents\n\nMay depend on: (none).\n\n## src/pkg/facts\n\nMay depend on: (none).\n",
+    )
+    .expect("write");
+    let facts = in_repo(dir.path(), "src/pkg/facts");
+    std::fs::create_dir_all(&facts).expect("mkdir");
+    std::fs::write(facts.join("totals.py"), "VALUE = 1\n").expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    run_git(&repo(dir.path()), &["commit", "-m", "scaffold"]);
+    std::fs::write(
+        facts.join("totals.py"),
+        "from pkg.documents import domain\nVALUE = 1\n",
+    )
+    .expect("write");
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicates::str::contains("boundary")
+                .and(predicates::str::contains("src/pkg/facts"))
+                .and(predicates::str::contains("src/pkg/documents")),
+        );
+}
+
 /// `git diff` prints paths relative to the repository root, so the gate has to
 /// resolve the root rather than trust the working directory. Without that this
 /// run reads no manifest, finds nothing, and exits 0 — passing silently, which

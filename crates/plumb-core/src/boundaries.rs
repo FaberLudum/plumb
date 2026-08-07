@@ -15,7 +15,13 @@ pub struct Violation {
     pub import: String,
 }
 
-/// Top-level names imported by `text`, per the extension of `path`.
+/// The import paths of `text`, as written, per the extension of `path`.
+///
+/// Full paths, not top-level names: `use plumb_core::manifest;` yields
+/// `plumb_core::manifest`, not `plumb_core`, and `from pkg.facts import
+/// totals` yields `pkg.facts`, not `pkg`. Resolving a path to a module is
+/// `target_of`'s job, done by matching segments rather than by truncating
+/// here.
 ///
 /// This is a documented heuristic, not a parser: extraction is line-based,
 /// one `text.lines()` pass, matching a small set of surface patterns per
@@ -176,16 +182,45 @@ fn normalise(name: &str) -> String {
     name.replace('-', "_")
 }
 
-/// The module an import name targets: last path segment match.
+/// The module an import name targets: longest trailing-module /
+/// leading-import segment match.
+///
+/// An import splits on `::`, `.` and `/` into segments `I`; a module path
+/// splits on `/` into segments `M`, both normalised (`-` → `_`). A module
+/// matches with score `k` when its last `k` segments equal `I`'s first `k`
+/// segments; the import resolves to the module with the highest `k` over
+/// all declared modules. A score of 1 is exactly the old last-segment rule,
+/// so every previously-resolving import still resolves the same way — a
+/// sub-package heading simply wins now by scoring higher when the import
+/// names it more specifically (`pkg.facts` scores 2 against `src/pkg/facts`
+/// and only 1 against `src/pkg`, so the deeper module wins).
+///
+/// Ties go to the first-declared module: `Iterator::max_by_key` keeps the
+/// *last* maximum on a tie, which is the wrong direction here, so this
+/// walks the modules in declaration order and only replaces the current
+/// best on a strictly higher score.
 fn target_of<'a>(architecture: &'a Architecture, import: &str) -> Option<&'a Module> {
-    let wanted = normalise(import);
-    architecture.modules.iter().find(|module| {
-        module
-            .path
-            .rsplit('/')
-            .next()
-            .is_some_and(|segment| normalise(segment) == wanted)
-    })
+    let import_segments: Vec<String> = import
+        .split(['.', '/', ':'])
+        .filter(|segment| !segment.is_empty())
+        .map(normalise)
+        .collect();
+    if import_segments.is_empty() {
+        return None;
+    }
+    let mut best: Option<(&Module, usize)> = None;
+    for module in &architecture.modules {
+        let module_segments: Vec<String> = module.path.split('/').map(normalise).collect();
+        let max_k = import_segments.len().min(module_segments.len());
+        let score = (1..=max_k)
+            .rev()
+            .find(|&k| module_segments[module_segments.len() - k..] == import_segments[..k]);
+        let Some(score) = score else { continue };
+        if best.is_none_or(|(_, best_score)| score > best_score) {
+            best = Some((module, score));
+        }
+    }
+    best.map(|(module, _)| module)
 }
 
 /// Whether `permitted` (an entry of May-depend-on) names `module`.
@@ -198,16 +233,21 @@ fn permits(permitted: &str, module: &Module) -> bool {
             .is_some_and(|segment| normalise(segment) == normalise(permitted))
 }
 
-/// Stops NAME at `::`, `;`, whitespace or `{` — whichever comes first.
+/// Stops the path at `;`, whitespace, `{` or `(` — whichever comes first —
+/// and strips a trailing `::` left behind when a brace group followed
+/// (`plumb_core::{a, b}` stops at `{`, leaving `plumb_core::` to trim).
 fn rust_name(rest: &str) -> &str {
     let end = rest
-        .find(|c: char| c == ':' || c == ';' || c.is_whitespace() || c == '{')
+        .find(|c: char| c == ';' || c.is_whitespace() || c == '{' || c == '(')
         .unwrap_or(rest.len());
-    &rest[..end]
+    let name = &rest[..end];
+    name.strip_suffix("::").unwrap_or(name)
 }
 
-/// `use NAME::…;` / `use NAME;` (also `pub use`), `extern crate NAME;`.
-/// `crate`, `self` and `super` name the current crate, not a dependency.
+/// `use NAME[::…];` / `use NAME;` (also `pub use`), `extern crate NAME;`,
+/// kept as the full path written in the source. `crate`, `self` and `super`
+/// name the current crate, not a dependency, so a path is skipped whenever
+/// its *first* segment is one of them.
 fn rust_imports(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in text.lines() {
@@ -218,7 +258,8 @@ fn rust_imports(text: &str) -> Vec<String> {
             .or_else(|| trimmed.strip_prefix("extern crate "));
         if let Some(rest) = rest {
             let name = rust_name(rest);
-            if !name.is_empty() && name != "crate" && name != "self" && name != "super" {
+            let head = name.split("::").next().unwrap_or("");
+            if !name.is_empty() && head != "crate" && head != "self" && head != "super" {
                 names.push(name.to_string());
             }
         }
@@ -226,16 +267,17 @@ fn rust_imports(text: &str) -> Vec<String> {
     names
 }
 
-/// Stops a dotted Python module path at the first `.` or whitespace.
+/// Stops a dotted Python module path at `,`, whitespace or `(` — the dots
+/// inside the path are kept, so the whole dotted path comes back as written.
 fn python_name(rest: &str) -> &str {
     let end = rest
-        .find(|c: char| c == '.' || c.is_whitespace())
+        .find(|c: char| c == ',' || c.is_whitespace() || c == '(')
         .unwrap_or(rest.len());
     &rest[..end]
 }
 
-/// `import NAME[.rest]` and `from NAME[.rest] import …`. `from .` is a
-/// relative import and is skipped.
+/// `import NAME[.rest]` and `from NAME[.rest] import …`, kept as the full
+/// dotted path. `from .` is a relative import and is skipped.
 ///
 /// A bare `import` may name several modules on one line, comma-separated —
 /// `import os, sys` — which `from NAME import …` cannot: there the comma
@@ -281,31 +323,17 @@ fn javascript_spec(line: &str) -> Option<&str> {
     None
 }
 
-/// The module segment(s) a JS/TS import spec names: the first path
-/// segment, or the first two joined for a `@scope/name` package. A
-/// relative spec (starting with `.`) is skipped.
+/// The JS/TS import spec as written, verbatim (`react-dom/client`,
+/// `@scope/pkg/deep`). A relative spec (starting with `.`) is skipped, and so
+/// is a `node:`-prefixed spec (`node:fs`, `node:path`): it names a Node
+/// builtin, never a project module, and `target_of` splits on `:` along with
+/// `.` and `/`, so left unskipped its leading segment `node` could otherwise
+/// resolve against a declared module whose leaf happens to be named `node`.
 fn javascript_segment(spec: &str) -> Option<String> {
-    if spec.starts_with('.') {
-        return None;
-    }
-    if let Some(scoped) = spec.strip_prefix('@') {
-        let mut segments = scoped.splitn(2, '/');
-        let scope = segments.next().unwrap_or("");
-        let name = segments
-            .next()
-            .and_then(|rest| rest.split('/').next())
-            .unwrap_or("");
-        return if name.is_empty() {
-            Some(format!("@{scope}"))
-        } else {
-            Some(format!("@{scope}/{name}"))
-        };
-    }
-    let segment = spec.split('/').next().unwrap_or("");
-    if segment.is_empty() {
+    if spec.is_empty() || spec.starts_with('.') || spec.starts_with("node:") {
         None
     } else {
-        Some(segment.to_string())
+        Some(spec.to_string())
     }
 }
 
@@ -322,12 +350,22 @@ mod tests {
     use crate::architecture;
 
     #[test]
-    fn rust_use_lines_yield_the_crate_name() {
+    fn rust_use_lines_yield_the_full_path() {
         let text = "use plumb_core::manifest;\npub use serde::Serialize;\nuse std::path::Path;\n";
         assert_eq!(
             imports("crates/x/src/main.rs", text),
-            vec!["plumb_core", "serde", "std"]
+            vec![
+                "plumb_core::manifest",
+                "serde::Serialize",
+                "std::path::Path"
+            ]
         );
+    }
+
+    #[test]
+    fn a_rust_brace_group_yields_the_path_before_the_brace() {
+        let text = "use plumb_core::{manifest, finding};\n";
+        assert_eq!(imports("crates/x/src/main.rs", text), vec!["plumb_core"]);
     }
 
     #[test]
@@ -337,10 +375,17 @@ mod tests {
     }
 
     #[test]
-    fn python_imports_yield_the_top_name() {
-        let text =
-            "import requests\nfrom flask import Flask\nfrom . import sibling\nimport os.path\n";
-        assert_eq!(imports("api/app.py", text), vec!["requests", "flask", "os"]);
+    fn python_imports_yield_the_dotted_path() {
+        let text = "import requests\nfrom flask import Flask\nfrom . import sibling\nimport os.path\nfrom ai_energy_manager.documents import domain\n";
+        assert_eq!(
+            imports("api/app.py", text),
+            vec![
+                "requests",
+                "flask",
+                "os.path",
+                "ai_energy_manager.documents"
+            ]
+        );
     }
 
     /// `import os, sys` used to extract `os,` — the comma glued onto the
@@ -353,17 +398,28 @@ mod tests {
     }
 
     #[test]
-    fn javascript_imports_yield_the_first_segment_and_skip_relative() {
+    fn javascript_imports_yield_the_full_spec_and_skip_relative() {
         let text = "import x from 'react-dom/client';\nconst y = require(\"lodash\");\nimport z from './local';\nimport s from '@scope/pkg/deep';\n";
         assert_eq!(
             imports("web/index.ts", text),
-            vec!["react-dom", "lodash", "@scope/pkg"]
+            vec!["react-dom/client", "lodash", "@scope/pkg/deep"]
         );
     }
 
     #[test]
     fn an_unknown_extension_has_no_imports() {
         assert!(imports("README.md", "use x::y;\n").is_empty());
+    }
+
+    /// A `node:`-prefixed spec names a Node builtin (`node:fs`, `node:path`),
+    /// never a project module. Left unskipped, splitting on `:` in
+    /// `target_of` hands the resolver a leading segment `node` that can
+    /// collide with a declared module whose leaf happens to be named `node`,
+    /// exactly the false-positive class the relative-spec skip already
+    /// exists for.
+    #[test]
+    fn a_node_builtin_spec_is_skipped() {
+        assert!(imports("web/index.ts", "import fs from 'node:fs';\n").is_empty());
     }
 
     /// No `.` anywhere in the path used to hand the whole trailing string —
@@ -383,7 +439,7 @@ mod tests {
         let text = "use plumb_core::manifest;\n";
         assert_eq!(
             imports("crates/x/src/LIB.RS", text),
-            vec!["plumb_core"],
+            vec!["plumb_core::manifest"],
             "an uppercase extension was not recognised"
         );
     }
@@ -414,7 +470,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].from_module, "crates/plumb-core");
         assert_eq!(found[0].to_module, "crates/plumb-cli");
-        assert_eq!(found[0].import, "plumb_cli");
+        assert_eq!(found[0].import, "plumb_cli::check");
         assert_eq!(found[0].file, "crates/plumb-core/src/lib.rs");
     }
 
@@ -524,6 +580,92 @@ mod tests {
             "use plumb_core::manifest;\n",
         );
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    fn monolith() -> architecture::Architecture {
+        architecture::parse(
+            "## src/pkg/documents\n\nMay depend on: (none).\n\n\
+             ## src/pkg/facts\n\nMay depend on: documents.\n\n\
+             ## src/pkg\n\nMay depend on: (none).\n",
+        )
+    }
+
+    #[test]
+    fn a_subpackage_import_resolves_to_the_deepest_matching_module() {
+        let found = violations(
+            &monolith(),
+            "src/pkg/documents/store.py",
+            "from pkg.facts import totals\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "src/pkg/facts");
+        assert_eq!(found[0].import, "pkg.facts");
+    }
+
+    #[test]
+    fn a_permitted_subpackage_dependency_is_not_a_violation() {
+        let found = violations(
+            &monolith(),
+            "src/pkg/facts/totals.py",
+            "from pkg.documents import domain\n",
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn an_intra_subpackage_import_is_a_self_import() {
+        let found = violations(
+            &monolith(),
+            "src/pkg/facts/totals.py",
+            "from pkg.facts.helpers import round_kwh\n",
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_longer_match_beats_a_shorter_one() {
+        // `pkg.documents` must reach src/pkg/documents (score 2), not stop at
+        // src/pkg (score 1), even though src/pkg is also declared.
+        let found = violations(
+            &monolith(),
+            "src/pkg/facts/totals.py",
+            "import pkg.documents.domain\n",
+        );
+        assert!(
+            found.is_empty(),
+            "resolved to src/pkg instead of the deeper module: {found:?}"
+        );
+    }
+
+    #[test]
+    fn crate_level_rust_resolution_is_unchanged() {
+        let architecture = architecture::parse(
+            "## crates/plumb-core\n\nMay depend on: (none).\n\n## crates/plumb-cli\n\nMay depend on: plumb-core.\n",
+        );
+        let found = violations(
+            &architecture,
+            "crates/plumb-cli/src/main.rs",
+            "use plumb_core::manifest;\n",
+        );
+        assert!(found.is_empty(), "{found:?}");
+        let found = violations(
+            &architecture,
+            "crates/plumb-core/src/lib.rs",
+            "use plumb_cli::check;\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_first_declared_module() {
+        let architecture = architecture::parse(
+            "## apps/api\n\nMay depend on: (none).\n\n## services/api\n\nMay depend on: (none).\n",
+        );
+        let found = violations(&architecture, "services/api/x.py", "import api.routes\n");
+        // `api` matches both at score 1; first declared wins, so the target is
+        // apps/api and the import from services/api is a violation against it.
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "apps/api");
     }
 
     #[test]

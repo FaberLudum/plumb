@@ -161,14 +161,17 @@ against a boundary the project itself declared, not the §4.5 decay pattern
 the signature is named for; it needs calibration before it can tell the two
 apart, the job phase 6 is for.
 
-Coupling reads at module granularity, which the extractor's own top-segment
-limit (see Blind spots) makes inert on a single-package monolith: calibrated
-on a real repository whose actual boundaries sit between sub-packages of one
-top-level package (`ai_energy_manager.documents` vs `.facts`, …), every
-internal import resolved to the same top segment and coupling delta read `0`
-across 25 commits — not a config error, but a real class of project this
-version cannot see coupling on at all. Sub-package resolution is future
-work.
+Coupling reads at module granularity, and it is no longer structurally inert
+on a single-package monolith: the resolver now matches an import against a
+module's *sub-package* headings, not only its top-level one (see Blind
+spots), so a repository whose real boundaries sit between sub-packages of one
+top-level package — `ai_energy_manager.documents` vs `.facts`, the
+repository this was calibrated against, where coupling delta read `0` across
+25 commits before this landed — resolves those boundaries once they are
+declared. The number only appears after `.plumb/architecture.md` says the
+sub-packages exist as modules in their own right; an architecture that still
+declares only the top-level package sees the same inert `0` as before,
+because there is nothing deeper to resolve against.
 
 **It is not a gate.** No finding, no threshold, no exit-code effect —
 `plumb report` always exits `0` regardless of what the numbers say, Tier C
@@ -351,15 +354,52 @@ nothing else is there:
   line-ending differences: git normalises CRLF and LF at checkout, so
   comparing raw bytes would warn on every clean Windows clone for a
   difference nobody introduced.
-- Import extraction keeps only the top segment of a dotted or scoped import
-  (`ai_energy_manager.documents` reads as `ai_energy_manager`), so a Python
-  project whose real boundaries live between sub-packages of one top-level
-  package is invisible to this gate: every internal import resolves to the
-  whole package, and both the boundary check and `plumb report`'s coupling
-  delta (below) go silent on exactly the class of project where a
-  single-package monolith is splitting internally. Calibrated on a real
-  repository of that shape, not assumed. Sub-package resolution is future
-  work, not a config error.
+- Boundaries reach sub-packages now, not only top-level packages: a
+  dotted or scoped import (`ai_energy_manager.documents`) is split into
+  segments and resolved against every declared module's path, also split
+  into segments — the import matches a module when the module path's
+  *trailing* segments equal the import's *leading* segments, and the module
+  scoring the longest such run wins. A heading `## src/pkg/documents`
+  therefore beats `## src/pkg` for the import `pkg.documents.domain`,
+  because it matches two segments instead of one; a plain top-level import
+  still resolves exactly as before, since matching one segment is what the
+  old top-segment rule did. Two things a declared module still needs to be
+  reachable at all:
+  - **The filesystem layout has to mirror the import path.** The resolver
+    matches on the module's declared *path*, not on where its files
+    physically live, so a Python package (`src/pkg/facts/` importable as
+    `pkg.facts`) or a JS package under a matching directory name resolves;
+    a project whose import name and directory name diverge — an exotic
+    source root, a package renamed at publish time — does not, because
+    nothing here reads `sys.path` or a bundler's alias config.
+  - **A tie between equally-scoring modules goes to the first one declared**
+    in `.plumb/architecture.md`, not the more specific or more recently
+    added one — two modules named `api` at different depths (`apps/api` and
+    `services/api`) both score 1 against a bare `import api`, and whichever
+    heading comes first in the file wins.
+  - **A bare `k = 1` match is still just a name match**, unchanged from the
+    old top-segment rule: nothing here checks that a resolved module and the
+    package the import actually names are the same thing, only that their
+    text lines up. Splitting one top-level package into several
+    finer-grained sub-packages multiplies how many short, common leaf names
+    (`utils`, `core`, `models`) a declared module can carry, and each is
+    exactly as exposed as a top-level module name always was to colliding
+    with an unrelated third-party package of the same name. This is not the
+    whole exposure, though: at `k ≥ 2` a declared module path that happens to
+    *mirror* a third-party package's own path can collide, too — a module
+    heading `## services/google/cloud` scores 2 against `from google.cloud
+    import storage`, exactly as if the project depended on `google.cloud`,
+    which the old top-segment rule could never do since it only ever
+    compared one segment.
+
+  What is still true regardless: Rust stays crate-level only. A Rust import
+  never spells the `src` directory (`use plumb_core::manifest`, not
+  `use plumb_core::src::manifest`), but every module file still sits under
+  it, so `src` interposes between the crate directory a module heading
+  names and the module file inside it — a crate-qualified import can reach
+  a heading like `## crates/plumb-core` but never one shaped
+  `## crates/plumb-core/src/manifest`, because no import segment will ever
+  equal the literal `src`.
 - The index scanner's symbol extraction is line-based, the same shape of
   matcher as the boundary gate's imports: a macro-generated declaration is
   missed because it never exists as a literal source line, and a multi-line

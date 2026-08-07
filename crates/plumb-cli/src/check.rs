@@ -187,10 +187,24 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
                 // exists to avoid — a comment-only edit to a file that has
                 // always had an undeclared import would warn forever, which
                 // is exactly the kind of warning a reader learns to ignore
-                // and then the whole gate gets turned off. Comparing by
-                // `(import, to_module)` pair rather than by line number is
-                // what keeps a line move from resurrecting a suppressed
-                // warning.
+                // and then the whole gate gets turned off.
+                //
+                // Keyed by `(from_module, to_module)` — the *resolved edge*
+                // — rather than by the import path as written. A key built
+                // from the full import path used to resurrect a suppressed
+                // warning on any edit to that import's spelling, even a
+                // formatting-only one: splitting `use cli::{main, other};`
+                // into two plain `use` lines changes the string but not the
+                // crossing, and so does deepening `import pkg.facts` to
+                // `import pkg.facts.helpers` when both resolve to the same
+                // module. `boundaries::edges` already dedups on exactly this
+                // pair for the same reason. The trade this accepts: a
+                // *second*, distinct import of an already-crossed module in
+                // the same file no longer warns separately — one legacy
+                // crossing suppresses the edge for that file. That is the
+                // right side to err on for a Tier B gate; the alternative is
+                // re-warning on every reshuffle of an import list that never
+                // added a new crossing.
                 //
                 // `git::show_at_head` is strict about UTF-8 and aborts the
                 // whole run for the manifest path (see its doc comment);
@@ -205,11 +219,11 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
                 };
                 let pre_existing: HashSet<(&str, &str)> = at_head
                     .iter()
-                    .map(|violation| (violation.import.as_str(), violation.to_module.as_str()))
+                    .map(|violation| (violation.from_module.as_str(), violation.to_module.as_str()))
                     .collect();
 
                 for violation in &current {
-                    let key = (violation.import.as_str(), violation.to_module.as_str());
+                    let key = (violation.from_module.as_str(), violation.to_module.as_str());
                     if !pre_existing.contains(&key) {
                         findings.push(boundary_violation(violation));
                     }
@@ -1259,9 +1273,9 @@ mod tests {
     /// The other half: a change that adds a genuinely new undeclared import
     /// on top of a pre-existing one reports only the new one. Line moves
     /// must not resurrect a suppressed warning either, which is why the
-    /// comparison is by `(import, to_module)` pair rather than by line
-    /// number — not separately pinned here because nothing in this gate's
-    /// extraction is line-position-sensitive to begin with.
+    /// comparison is by the resolved `(from_module, to_module)` edge rather
+    /// than by line number — not separately pinned here because nothing in
+    /// this gate's extraction is line-position-sensitive to begin with.
     #[test]
     fn a_new_import_is_reported_while_a_pre_existing_one_is_not() {
         let dir = repo_with(&[("crates/core/src/lib.rs", "use cli::main;\n")]);
@@ -1290,6 +1304,67 @@ mod tests {
         assert!(
             !output.contains("may not depend on crates/cli"),
             "the pre-existing violation re-warned: {output}"
+        );
+    }
+
+    /// The suppression set used to be keyed by `(import, to_module)` — the
+    /// full import path, not the resolved edge — so any edit to the spelling
+    /// of an already-legacy import changed the key and resurrected its
+    /// suppressed warning, even when the edit was pure formatting and the
+    /// crossing itself did not change. Splitting a brace group into two
+    /// plain `use` lines is exactly that: the crossing `crates/core ->
+    /// crates/cli` was already a violation at HEAD, and this change touches
+    /// only how it is spelled plus an unrelated comment.
+    #[test]
+    fn splitting_a_legacy_brace_import_does_not_re_warn() {
+        let dir = repo_with(&[("crates/core/src/lib.rs", "use cli::{main, other};\n")]);
+        write_architecture(
+            dir.path(),
+            "## crates/core\n\nMay depend on: (none).\n\n## crates/cli\n\nMay depend on: core.\n",
+        );
+        write(
+            dir.path(),
+            "crates/core/src/lib.rs",
+            "use cli::main;\nuse cli::other;\n// unrelated comment\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(
+            outcome.code, 0,
+            "a legacy violation re-warned after only its spelling changed: {}",
+            outcome.report
+        );
+    }
+
+    /// The Python sibling of the brace-split case: deepening an already-
+    /// violating import to a more specific path under the same target module
+    /// must not resurrect the suppressed warning either, because the
+    /// resolved edge (`src/pkg/documents -> src/pkg/facts`) is unchanged.
+    #[test]
+    fn deepening_a_legacy_import_to_the_same_edge_does_not_re_warn() {
+        let dir = repo_with(&[(
+            "src/pkg/documents/store.py",
+            "from pkg.facts import totals\n",
+        )]);
+        write_architecture(
+            dir.path(),
+            "## src/pkg/documents\n\nMay depend on: (none).\n\n\
+             ## src/pkg/facts\n\nMay depend on: documents.\n\n\
+             ## src/pkg\n\nMay depend on: (none).\n",
+        );
+        write(
+            dir.path(),
+            "src/pkg/documents/store.py",
+            "from pkg.facts.helpers import round_kwh\n",
+        );
+
+        let outcome = run(dir.path(), &StubRegistry::default(), false).expect("check runs");
+
+        assert_eq!(
+            outcome.code, 0,
+            "a legacy violation re-warned after deepening to the same edge: {}",
+            outcome.report
         );
     }
 
