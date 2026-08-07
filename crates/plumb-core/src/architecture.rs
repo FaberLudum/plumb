@@ -15,7 +15,8 @@ pub struct Architecture {
 
 pub fn parse(text: &str) -> Architecture {
     let mut modules: Vec<Module> = Vec::new();
-    for line in text.lines() {
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
         let trimmed = line.trim_end();
         if let Some(heading) = trimmed.strip_prefix("## ") {
             let path = heading.trim().trim_end_matches('/').to_string();
@@ -28,7 +29,20 @@ pub fn parse(text: &str) -> Architecture {
         } else if let Some(rest) = trimmed.trim_start().strip_prefix("May depend on:")
             && let Some(current) = modules.last_mut()
         {
-            current.may_depend_on = parse_dependencies(rest);
+            let mut joined = rest.to_string();
+            while let Some(next_line) = lines.peek() {
+                let next_trimmed = next_line.trim_end();
+                if next_trimmed.is_empty()
+                    || next_trimmed.starts_with("## ")
+                    || next_trimmed.trim_start().starts_with("May depend on:")
+                {
+                    break;
+                }
+                joined.push(' ');
+                joined.push_str(next_trimmed.trim());
+                lines.next();
+            }
+            current.may_depend_on = parse_dependencies(&joined);
         }
     }
     Architecture { modules }
