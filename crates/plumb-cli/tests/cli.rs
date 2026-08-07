@@ -1056,6 +1056,52 @@ fn index_without_an_agreement_points_at_init() {
         .stderr(predicates::str::contains("plumb init"));
 }
 
+/// Observed on a real repository: `plumb index` printed `run \`plumb
+/// adapters\` to refresh the instruction files` although CLAUDE.md and
+/// AGENTS.md were both hand-written and `plumb adapters` would refuse to
+/// touch them. The reminder must fire only when at least one existing
+/// instruction file actually opens with plumb's own marker — the same
+/// `opens_with_marker` check `plumb adapters`'s overwrite guard and the
+/// `check --diff` drift gate both make.
+#[test]
+fn the_adapters_reminder_is_silent_for_a_hand_written_instruction_file() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    plumb_in(dir.path())
+        .args(["init", "--defaults"])
+        .assert()
+        .success();
+    std::fs::write(
+        in_repo(dir.path(), "CLAUDE.md"),
+        "# Project notes\n\nThis file predates plumb and is maintained by hand.\n",
+    )
+    .expect("write");
+
+    plumb_in(dir.path())
+        .arg("index")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("plumb adapters").not());
+}
+
+/// The mirror of the test above: once a real generated instruction file
+/// exists, the reminder still fires — the fix must not silence it
+/// altogether, only for hand-written targets.
+#[test]
+fn the_adapters_reminder_still_fires_for_a_generated_instruction_file() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    plumb_in(dir.path())
+        .args(["init", "--defaults"])
+        .assert()
+        .success();
+    plumb_in(dir.path()).arg("adapters").assert().success();
+
+    plumb_in(dir.path())
+        .arg("index")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("run `plumb adapters`"));
+}
+
 /// `.plumb/index.md` drifts the same way the generated instruction files do:
 /// someone scans it once with `plumb index`, then the public surface grows
 /// and nobody re-runs the scan. `check --diff` catches that too, end to end
