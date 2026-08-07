@@ -388,7 +388,10 @@ longer match the working agreement — rules nobody chose.
 | Finding | Emitted when |
 |---|---|
 | `adapter-drift` | A generated instruction file exists and does not match what `plumb adapters` would produce from the current `.plumb/` |
+| `index-stale` | A scanned `.plumb/index.md` no longer matches a fresh scan of the tracked source files |
 
 Tier B: drift is a maintenance fault in this repository, not a defect in the
 change under review, and blocking a diff over it would punish the wrong
-commit. The remedy is one command, and the finding names it.
+commit. The remedy is one command, and the finding names it. The same
+reasoning covers the index: a stale map misleads the next agent into
+re-implementing what already exists, and the remedy is again one command.

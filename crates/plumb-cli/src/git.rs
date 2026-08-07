@@ -156,6 +156,38 @@ pub fn changed_paths(repo: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Returns the paths that are tracked by git, relative to the repository root
+/// and separated by `/`.
+///
+/// # Why tracked files only
+///
+/// The index scan must be reproducible from a fresh clone, so it cannot depend
+/// on untracked scratch files or build output that `.gitignore` excludes. Only
+/// paths committed and tracked in the index appear in the result.
+pub fn tracked_files(repo: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(repo)
+        .output()
+        .context("failed to run git; is it installed and on PATH?")?;
+
+    if !output.status.success() {
+        bail!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    // NUL-terminated, not NUL-separated, so the split leaves a trailing empty
+    // string. Filtering empties also makes an entirely empty listing — a clean
+    // tree — come back as no paths rather than as one nameless one.
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// Returns the contents of `path` as committed at HEAD.
 ///
 /// `path` must be relative to the repository root and forward-slash separated,
@@ -479,6 +511,28 @@ mod tests {
             paths.iter().any(|p| p == "my project/requirements.txt"),
             "{paths:?}"
         );
+    }
+
+    /// Tracked files only: an untracked scratch file and an ignored build
+    /// artefact must not appear, and paths come back repo-relative with
+    /// forward slashes.
+    #[test]
+    fn tracked_files_lists_committed_paths_only() {
+        let dir = init_repo();
+        fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        fs::write(dir.path().join("src").join("lib.rs"), "pub fn a() {}\n").expect("write");
+        fs::write(dir.path().join(".gitignore"), "target/\n").expect("write");
+        run_git(dir.path(), &["add", "-A"]);
+        run_git(dir.path(), &["commit", "-m", "track"]);
+        fs::write(dir.path().join("scratch.rs"), "pub fn b() {}\n").expect("write");
+        fs::create_dir_all(dir.path().join("target")).expect("mkdir");
+        fs::write(dir.path().join("target").join("out.rs"), "pub fn c() {}\n").expect("write");
+
+        let files = tracked_files(dir.path()).expect("git succeeds");
+
+        assert!(files.contains(&"src/lib.rs".to_string()), "{files:?}");
+        assert!(!files.iter().any(|f| f.contains("scratch")), "{files:?}");
+        assert!(!files.iter().any(|f| f.contains("target")), "{files:?}");
     }
 
     /// Sets every configuration found to change the shape of `git diff`

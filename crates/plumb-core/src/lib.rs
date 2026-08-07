@@ -10,6 +10,7 @@ pub mod boundaries;
 pub mod deps;
 pub mod diff;
 pub mod finding;
+pub mod index;
 pub mod layer1;
 pub mod manifest;
 pub mod report;
