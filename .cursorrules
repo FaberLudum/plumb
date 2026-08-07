@@ -185,6 +185,10 @@ What this repository can already do, and where. Regenerate with
 - fn `changed_paths`
 - fn `tracked_files`
 - fn `show_at_head`
+- fn `show_at`
+- struct `Commit`
+- fn `recent_commits`
+- fn `numstat`
 
 ## crates/plumb-cli/src/index_cmd.rs
 - fn `run`
@@ -202,6 +206,9 @@ What this repository can already do, and where. Regenerate with
 - fn `new`
 - fn `stale_packages`
 
+## crates/plumb-cli/src/report_cmd.rs
+- fn `run`
+
 ## crates/plumb-core/src/adapters.rs
 - struct `Adapter`
 - const `MARKER`
@@ -217,6 +224,7 @@ What this repository can already do, and where. Regenerate with
 - struct `Violation`
 - fn `imports`
 - fn `violations`
+- fn `edges`
 - fn `is_scannable`
 
 ## crates/plumb-core/src/deps.rs
@@ -263,6 +271,7 @@ What this repository can already do, and where. Regenerate with
 - mod `index`
 - mod `layer1`
 - mod `manifest`
+- mod `metrics`
 - mod `report`
 
 ## crates/plumb-core/src/manifest.rs
@@ -273,6 +282,15 @@ What this repository can already do, and where. Regenerate with
 - fn `parse_requirements`
 - fn `parse_pyproject`
 - fn `parse`
+
+## crates/plumb-core/src/metrics.rs
+- struct `CommitStats`
+- fn `deletion_ratio`
+- fn `has_decay_signature`
+- struct `Summary`
+- fn `summarize`
+- fn `render_text`
+- fn `render_json`
 
 ## crates/plumb-core/src/report.rs
 - fn `render_text`
