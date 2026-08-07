@@ -35,19 +35,16 @@ pub struct AddedDependency {
 /// rather than guessed again from `manifest_path` here. A second filename
 /// switch in this function would duplicate the dispatch rule `manifest::parse`
 /// already owns, and the two would drift the first time either one learns a
-/// new name.
-///
-/// TODO(implementation commit): this still hard-codes `Ecosystem::PyPi` and
-/// ignores the parameter, which is wrong the moment a caller passes
-/// `Ecosystem::Npm` — see `tags_added_dependencies_with_the_given_ecosystem`,
-/// which fails against this body.
+/// new name. This used to hard-code `Ecosystem::PyPi` outright, which was
+/// correct only while `Ecosystem` had one variant; a name added to a
+/// package.json would otherwise have been looked up on PyPI and either
+/// blocked a build over nothing or passed a hallucinated npm package.
 pub fn added(
     manifest_path: &str,
     before: Option<&BTreeSet<String>>,
     after: &BTreeSet<String>,
     ecosystem: Ecosystem,
 ) -> Vec<AddedDependency> {
-    let _ = ecosystem;
     let empty = BTreeSet::new();
     let before = before.unwrap_or(&empty);
 
@@ -55,8 +52,7 @@ pub fn added(
         .difference(before)
         .map(|name| AddedDependency {
             name: name.clone(),
-            // Hard-coded; see this function's documentation before changing.
-            ecosystem: Ecosystem::PyPi,
+            ecosystem,
             manifest: manifest_path.to_string(),
         })
         .collect()
@@ -109,9 +105,7 @@ mod tests {
         let before = set(&["ruff", "httpx"]);
         let after = set(&["ruff"]);
 
-        assert!(
-            added("requirements.txt", Some(&before), &after, Ecosystem::PyPi).is_empty()
-        );
+        assert!(added("requirements.txt", Some(&before), &after, Ecosystem::PyPi).is_empty());
     }
 
     #[test]
@@ -119,9 +113,7 @@ mod tests {
         let before = set(&["ruff"]);
         let after = set(&["ruff"]);
 
-        assert!(
-            added("requirements.txt", Some(&before), &after, Ecosystem::PyPi).is_empty()
-        );
+        assert!(added("requirements.txt", Some(&before), &after, Ecosystem::PyPi).is_empty());
     }
 
     /// The npm sibling of `reports_names_present_after_but_not_before`:

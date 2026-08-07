@@ -724,7 +724,51 @@ const DEPENDENCY_TABLES: [&str; 4] = [
 /// file that does not parse as JSON at all is [`Gap::Unparseable`], exactly
 /// as a `pyproject.toml` that does not parse as TOML is.
 pub fn parse_package_json(text: &str) -> Manifest {
-    todo!("package.json parsing lands in the implementation commit: {text}")
+    let mut names = BTreeSet::new();
+    let mut gaps = Vec::new();
+
+    // An empty body is not valid JSON on its own — unlike an empty TOML
+    // document, which `text.parse::<toml::Table>()` reads as a document with
+    // nothing in it — but it is what `parse`'s probe hands this function to
+    // ask "is this filename recognised", not evidence that a real file
+    // failed to parse. Without this the probe would attach a gap to every
+    // changed package.json in every repository, the JSON-specific failure
+    // the TOML probe never had to guard against.
+    if text.trim().is_empty() {
+        return Manifest {
+            names,
+            gaps,
+            ecosystem: Ecosystem::Npm,
+        };
+    }
+
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Manifest {
+            names,
+            gaps: vec![Gap::Unparseable],
+            ecosystem: Ecosystem::Npm,
+        };
+    };
+
+    // Every `as_object()` below is a filter, the same shape `parse_pyproject`
+    // takes for `as_array()`/`as_table()`: a table that is present but not
+    // the shape the reader takes is positive evidence of an intended
+    // declaration nothing came of, so it leaves a `MalformedTable` gap
+    // rather than passing over it in silence.
+    for table in DEPENDENCY_TABLES {
+        if let Some(value) = document.get(table) {
+            match value.as_object() {
+                Some(map) => names.extend(map.keys().cloned()),
+                None => gaps.push(Gap::MalformedTable(table.to_string())),
+            }
+        }
+    }
+
+    Manifest {
+        names,
+        gaps,
+        ecosystem: Ecosystem::Npm,
+    }
 }
 
 /// Dispatches on filename. Returns `None` when the path is not a manifest
@@ -736,6 +780,19 @@ pub fn parse_package_json(text: &str) -> Manifest {
 /// manifest and part of it was not read, which the caller has to say out loud.
 pub fn parse(path: &str, text: &str) -> Option<Manifest> {
     let file_name = path.rsplit('/').next().unwrap_or(path);
+
+    if file_name == "package.json" {
+        // A vendored package.json under node_modules/ belongs to a
+        // dependency, not to this project — it was not written by anyone
+        // here, so checking it would block a build over a package nobody
+        // added. Checked against the whole path, at any depth, because npm
+        // nests dependencies: node_modules/foo/node_modules/bar/package.json
+        // is exactly as vendored as the top-level case.
+        if path.split('/').any(|segment| segment == "node_modules") {
+            return None;
+        }
+        return Some(parse_package_json(text));
+    }
 
     if file_name == "pyproject.toml" {
         return Some(parse_pyproject(text));
@@ -2018,8 +2075,7 @@ dev = ["pytest"]
     #[test]
     fn parse_dispatches_package_json_at_any_depth() {
         assert_eq!(
-            parse("package.json", r#"{"dependencies": {"react": "^18.0.0"}}"#)
-                .map(|m| m.names),
+            parse("package.json", r#"{"dependencies": {"react": "^18.0.0"}}"#).map(|m| m.names),
             Some(set(&["react"]))
         );
         assert_eq!(
@@ -2039,8 +2095,6 @@ dev = ["pytest"]
     #[test]
     fn a_package_json_under_node_modules_is_not_recognised() {
         assert!(parse("node_modules/left-pad/package.json", "{}").is_none());
-        assert!(
-            parse("packages/api/node_modules/left-pad/package.json", "{}").is_none()
-        );
+        assert!(parse("packages/api/node_modules/left-pad/package.json", "{}").is_none());
     }
 }
