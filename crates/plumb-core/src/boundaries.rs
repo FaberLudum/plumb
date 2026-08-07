@@ -668,6 +668,62 @@ mod tests {
         assert_eq!(found[0].to_module, "apps/api");
     }
 
+    fn ancestor_fixture() -> architecture::Architecture {
+        architecture::parse(
+            "## alembic\n\nMay depend on: ai_energy_manager.\n\n\
+             ## other\n\nMay depend on: documents.\n\n\
+             ## other2\n\nMay depend on: identity.\n\n\
+             ## ai_energy_manager\n\nMay depend on: (none).\n\n\
+             ## ai_energy_manager/identity\n\nMay depend on: (none).\n\n\
+             ## documents\n\nMay depend on: (none).\n\n\
+             ## facts\n\nMay depend on: (none).\n",
+        )
+    }
+
+    /// A permitted entry naming an ancestor module must cover its
+    /// sub-modules too: `alembic` may depend on `ai_energy_manager`, and an
+    /// import resolving to the deeper `ai_energy_manager/identity` must be
+    /// permitted by that same entry, not flagged for lacking its own literal
+    /// listing.
+    #[test]
+    fn a_permitted_ancestor_covers_its_sub_module() {
+        let found = violations(
+            &ancestor_fixture(),
+            "alembic/migrate.py",
+            "from ai_energy_manager.identity.infrastructure import token\n",
+        );
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// An entry naming one sub-module must not permit an unrelated sibling
+    /// sub-module: `other` may depend on `documents`, which says nothing
+    /// about `facts`.
+    #[test]
+    fn a_sibling_is_not_permitted_by_an_unrelated_entry() {
+        let found = violations(
+            &ancestor_fixture(),
+            "other/x.py",
+            "from facts import totals\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "facts");
+    }
+
+    /// An entry naming a module deeper than the target must not permit the
+    /// target: `other2` may depend on `identity` (resolving to
+    /// `ai_energy_manager/identity`), which does not cover the shallower
+    /// parent `ai_energy_manager` itself.
+    #[test]
+    fn an_entry_deeper_than_the_target_does_not_permit_the_target() {
+        let found = violations(
+            &ancestor_fixture(),
+            "other2/x.py",
+            "import ai_energy_manager\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "ai_energy_manager");
+    }
+
     #[test]
     fn every_known_extension_is_dispatched_by_imports() {
         for ext in ["rs", "py", "ts", "tsx", "js", "jsx", "mjs", "cjs"] {
