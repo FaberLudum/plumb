@@ -143,7 +143,7 @@ fn detect_modules(repo: &Path) -> Vec<String> {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
-            if !SKIPPED_DIRS.contains(&name.as_str()) && contains_source(&path) {
+            if !is_skipped(&name) && contains_source(&path) {
                 modules.push(name);
             }
         } else if has_source_extension(&path) {
@@ -168,7 +168,7 @@ fn contains_source(dir: &Path) -> bool {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
-            if !SKIPPED_DIRS.contains(&name.as_str()) && contains_source(&path) {
+            if !is_skipped(&name) && contains_source(&path) {
                 return true;
             }
         } else if has_source_extension(&path) {
@@ -176,6 +176,20 @@ fn contains_source(dir: &Path) -> bool {
         }
     }
     false
+}
+
+/// Whether a directory named `name` must never be treated as, or searched
+/// for, a module.
+///
+/// `SKIPPED_DIRS` is a fixed list of known tool directories and cannot
+/// enumerate every dot-directory a project's tooling creates — `.venv`,
+/// `.worktrees`, `.tox`, `.mypy_cache`, and whatever the next tool invents.
+/// Any name starting with `.` is skipped on that basis alone, in addition to
+/// the fixed list, at both call sites: the top-level loop in
+/// `detect_modules` and the recursion in `contains_source`, so a nested
+/// dot-directory cannot make its parent look like a module either.
+fn is_skipped(name: &str) -> bool {
+    name.starts_with('.') || SKIPPED_DIRS.contains(&name)
 }
 
 fn has_source_extension(path: &Path) -> bool {
