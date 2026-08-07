@@ -295,7 +295,7 @@ fn collect(repo: &Path, registry: &dyn Registry) -> Result<Vec<Finding>> {
             },
         };
 
-        for dependency in deps::added(&path, before.as_ref(), &after.names) {
+        for dependency in deps::added(&path, before.as_ref(), &after.names, after.ecosystem) {
             if registry.exists(&dependency.name) == Existence::Missing {
                 findings.push(package_does_not_exist(&dependency));
             }
@@ -452,6 +452,7 @@ fn package_does_not_exist(dependency: &AddedDependency) -> Finding {
     // guard `deps::added` keeps over the ecosystem it hard-codes.
     let registry_name = match dependency.ecosystem {
         Ecosystem::PyPi => "PyPI",
+        Ecosystem::Npm => "npm",
     };
 
     Finding {
@@ -1652,6 +1653,8 @@ mod tests {
             "requirements-dev.txt",
             "pyproject.toml",
             "packages/api/pyproject.toml",
+            "package.json",
+            "packages/api/package.json",
         ] {
             let probed = manifest::parse(path, "")
                 .unwrap_or_else(|| panic!("{path} was not recognised from its name"));
@@ -1661,7 +1664,15 @@ mod tests {
                 probed.gaps
             );
         }
-        for path in ["src/app.py", "README.md", "requirements_notes.txt"] {
+        for path in [
+            "src/app.py",
+            "README.md",
+            "requirements_notes.txt",
+            // A vendored package.json is not this project's manifest, at any
+            // depth — see manifest::parse's doc comment.
+            "node_modules/left-pad/package.json",
+            "packages/api/node_modules/left-pad/package.json",
+        ] {
             assert!(
                 manifest::parse(path, "ruff==0.4.0\n").is_none(),
                 "{path} was treated as a manifest"

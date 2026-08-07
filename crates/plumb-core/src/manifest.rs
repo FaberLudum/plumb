@@ -45,6 +45,14 @@
 //! lock file — is a separate silence and not one a [`Gap`] can express: [`parse`]
 //! returning `None` says "not a manifest I handle", never "this project has no
 //! dependencies".
+//!
+//! The same three-way split extends to `package.json`. The four npm
+//! dependency tables read as name-to-version-range maps and only the keys
+//! matter; a table that is declared but is not an object at all is a
+//! [`Gap::MalformedTable`], the JSON sibling of [`Gap::Malformed`]. A
+//! `package.json` under `node_modules/`, at any depth, belongs to a
+//! dependency rather than to this project, so it is not recognised at all —
+//! [`parse`] returns `None` for it, the same answer a lock file gets.
 
 use std::collections::BTreeSet;
 
@@ -52,6 +60,7 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ecosystem {
     PyPi,
+    Npm,
 }
 
 /// Normalises a distribution name per PEP 503.
@@ -137,6 +146,10 @@ fn requirement_name(spec: &str) -> Option<String> {
 pub struct Manifest {
     pub names: BTreeSet<String>,
     pub gaps: Vec<Gap>,
+    /// The registry `names` belongs to, so a caller does not have to guess
+    /// it back from the manifest's filename. `deps::added` takes this as an
+    /// argument for exactly that reason — see its doc comment.
+    pub ecosystem: Ecosystem,
 }
 
 /// A dependency declaration this module did not read.
@@ -210,6 +223,17 @@ pub enum Gap {
     /// for every name already in the file.
     ToolDependencies(Vec<String>),
     Include(String),
+    /// A `package.json` dependency table (`dependencies`, `devDependencies`,
+    /// `peerDependencies` or `optionalDependencies`) whose value is not a
+    /// JSON object, named by the table's key.
+    ///
+    /// The JSON sibling of [`Gap::Malformed`]: the key is positive evidence
+    /// of an intended declaration, and the shape is why nothing came of it.
+    /// A separate variant rather than reusing `Malformed` because the two
+    /// formats name their tables differently — TOML's dotted paths and
+    /// JSON's bare keys — and a message built from the wrong convention
+    /// reads as a typo rather than as help.
+    MalformedTable(String),
 }
 
 /// The `[project]` fields whose value being `dynamic` hides dependencies.
@@ -414,6 +438,10 @@ impl Gap {
             Gap::Include(path) => {
                 format!("requirements are included from `{path}`, which Plumb does not follow")
             }
+            Gap::MalformedTable(table) => format!(
+                "`{table}` in package.json is declared but is not an object, so Plumb read no \
+                 names from it"
+            ),
         }
     }
 }
@@ -493,7 +521,11 @@ pub fn parse_requirements(text: &str) -> Manifest {
         }
     }
 
-    Manifest { names, gaps }
+    Manifest {
+        names,
+        gaps,
+        ecosystem: Ecosystem::PyPi,
+    }
 }
 
 /// Parses `[project].dependencies` and `[project.optional-dependencies]` from
@@ -512,6 +544,7 @@ pub fn parse_pyproject(text: &str) -> Manifest {
         return Manifest {
             names,
             gaps: vec![Gap::Unparseable],
+            ecosystem: Ecosystem::PyPi,
         };
     };
 
@@ -661,7 +694,37 @@ pub fn parse_pyproject(text: &str) -> Manifest {
         gaps.push(Gap::PoetryDependencies);
     }
 
-    Manifest { names, gaps }
+    Manifest {
+        names,
+        gaps,
+        ecosystem: Ecosystem::PyPi,
+    }
+}
+
+/// The four npm dependency tables whose keys this module reads as package
+/// names. Order matches `package.json`'s own conventional ordering, so a
+/// file with more than one malformed table reports its gaps in the order a
+/// reader would meet them.
+const DEPENDENCY_TABLES: [&str; 4] = [
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+];
+
+/// Parses the four dependency tables of a `package.json`: `dependencies`,
+/// `devDependencies`, `peerDependencies` and `optionalDependencies`. Only the
+/// keys are read — a table's values are version ranges, which this gate does
+/// not validate — and an absent table declares nothing, the same non-signal
+/// an absent `[project.optional-dependencies]` group is.
+///
+/// Mirrors [`parse_pyproject`]'s reading of `[project].dependencies`: a
+/// malformed table is positive evidence of an intended declaration nothing
+/// came of, so it is a [`Gap::MalformedTable`] rather than silence, and a
+/// file that does not parse as JSON at all is [`Gap::Unparseable`], exactly
+/// as a `pyproject.toml` that does not parse as TOML is.
+pub fn parse_package_json(text: &str) -> Manifest {
+    todo!("package.json parsing lands in the implementation commit: {text}")
 }
 
 /// Dispatches on filename. Returns `None` when the path is not a manifest
@@ -1867,5 +1930,117 @@ dev = ["pytest"]
                 .contains("base.txt")
         );
         assert!(!Gap::Unparseable.describe().is_empty());
+        assert!(
+            Gap::MalformedTable("dependencies".to_string())
+                .describe()
+                .contains("dependencies")
+        );
+    }
+
+    #[test]
+    fn package_json_reads_the_four_dependency_tables() {
+        let text = r#"{
+            "dependencies": { "react": "^18.0.0" },
+            "devDependencies": { "eslint": "^9.0.0" },
+            "peerDependencies": { "react-dom": "^18.0.0" },
+            "optionalDependencies": { "fsevents": "^2.0.0" }
+        }"#;
+        let manifest = parse_package_json(text);
+        assert_eq!(
+            manifest.names,
+            set(&["react", "eslint", "react-dom", "fsevents"])
+        );
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+        assert_eq!(manifest.ecosystem, Ecosystem::Npm);
+    }
+
+    #[test]
+    fn package_json_with_no_dependency_tables_declares_nothing() {
+        let text = r#"{ "name": "demo", "version": "1.0.0" }"#;
+        let manifest = parse_package_json(text);
+        assert!(manifest.names.is_empty());
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
+    /// A declaration in the wrong shape is a declaration, and it was not
+    /// read — the JSON sibling of
+    /// `a_project_dependencies_that_is_not_an_array_is_a_gap`.
+    #[test]
+    fn a_non_object_dependency_table_is_a_gap() {
+        let text = r#"{ "dependencies": ["react"] }"#;
+        let manifest = parse_package_json(text);
+        assert!(manifest.names.is_empty());
+        assert_eq!(
+            manifest.gaps,
+            vec![Gap::MalformedTable("dependencies".to_string())]
+        );
+        assert!(manifest.gaps[0].describe().contains("dependencies"));
+    }
+
+    /// A malformed table beside a well-formed one still yields the names the
+    /// well-formed table declares: a partly understood file keeps its names,
+    /// the same rule `a_malformed_optional_dependency_group_is_a_gap` pins
+    /// for `pyproject.toml`.
+    #[test]
+    fn a_malformed_table_does_not_hide_names_from_a_well_formed_one() {
+        let text = r#"{
+            "dependencies": { "react": "^18.0.0" },
+            "devDependencies": ["eslint"]
+        }"#;
+        let manifest = parse_package_json(text);
+        assert_eq!(manifest.names, set(&["react"]));
+        assert_eq!(
+            manifest.gaps,
+            vec![Gap::MalformedTable("devDependencies".to_string())]
+        );
+    }
+
+    #[test]
+    fn package_json_that_is_not_json_is_unparseable() {
+        let manifest = parse_package_json("not json at all");
+        assert!(manifest.names.is_empty());
+        assert_eq!(manifest.gaps, vec![Gap::Unparseable]);
+    }
+
+    /// The empty-body probe `check.rs`'s dispatch relies on: an empty string
+    /// is not valid JSON on its own, unlike an empty TOML document, so
+    /// without a special case every changed `package.json` in every
+    /// repository would carry a manufactured gap. Mirrors
+    /// `a_manifest_is_recognised_from_its_path_alone` in `plumb-cli`, which
+    /// pins the same contract through `parse`.
+    #[test]
+    fn an_empty_package_json_body_has_no_gaps() {
+        let manifest = parse_package_json("");
+        assert!(manifest.names.is_empty());
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
+    #[test]
+    fn parse_dispatches_package_json_at_any_depth() {
+        assert_eq!(
+            parse("package.json", r#"{"dependencies": {"react": "^18.0.0"}}"#)
+                .map(|m| m.names),
+            Some(set(&["react"]))
+        );
+        assert_eq!(
+            parse(
+                "packages/api/package.json",
+                r#"{"dependencies": {"react": "^18.0.0"}}"#
+            )
+            .map(|m| m.names),
+            Some(set(&["react"]))
+        );
+    }
+
+    /// A vendored `package.json` under `node_modules/` belongs to a
+    /// dependency, not to this project, and is not recognised at all —
+    /// `None`, the same "not a manifest I handle" answer a lock file gets.
+    /// At any depth, because npm nests dependencies.
+    #[test]
+    fn a_package_json_under_node_modules_is_not_recognised() {
+        assert!(parse("node_modules/left-pad/package.json", "{}").is_none());
+        assert!(
+            parse("packages/api/node_modules/left-pad/package.json", "{}").is_none()
+        );
     }
 }
