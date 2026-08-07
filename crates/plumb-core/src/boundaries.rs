@@ -67,7 +67,7 @@ pub fn violations(architecture: &Architecture, path: &str, text: &str) -> Vec<Vi
         if from
             .may_depend_on
             .iter()
-            .any(|entry| permits(entry, target))
+            .any(|entry| permits(entry, target, architecture))
         {
             continue;
         }
@@ -223,14 +223,44 @@ fn target_of<'a>(architecture: &'a Architecture, import: &str) -> Option<&'a Mod
     best.map(|(module, _)| module)
 }
 
-/// Whether `permitted` (an entry of May-depend-on) names `module`.
-fn permits(permitted: &str, module: &Module) -> bool {
+/// Whether `permitted` (an entry of May-depend-on) covers `target`: either
+/// the entry names `target` itself, or it names a module that is a
+/// path-ancestor of `target` — permitting a parent implicitly permits its
+/// whole subtree, so a deep import does not need every intermediate
+/// sub-module listed by name.
+///
+/// An entry that resolves to no declared module (a foreign package, a typo)
+/// falls back to the direct name-match against `target` alone, which is the
+/// pre-existing rule and the only thing such an entry could ever mean.
+fn permits(permitted: &str, target: &Module, architecture: &Architecture) -> bool {
+    if names_module(permitted, target) {
+        return true;
+    }
+    resolve_module(permitted, architecture).is_some_and(|entry_module| {
+        target.path == entry_module.path
+            || target.path.starts_with(&format!("{}/", entry_module.path))
+    })
+}
+
+/// Whether `permitted` names `module` itself: the full heading as declared,
+/// or the module's last path segment, `-`/`_` normalised.
+fn names_module(permitted: &str, module: &Module) -> bool {
     permitted == module.path
         || module
             .path
             .rsplit('/')
             .next()
             .is_some_and(|segment| normalise(segment) == normalise(permitted))
+}
+
+/// The declared module `permitted` names, if any, by the same rules as
+/// [`names_module`]. First-declared wins when more than one module shares a
+/// last segment, matching [`target_of`]'s tie-breaking.
+fn resolve_module<'a>(permitted: &str, architecture: &'a Architecture) -> Option<&'a Module> {
+    architecture
+        .modules
+        .iter()
+        .find(|module| names_module(permitted, module))
 }
 
 /// Stops the path at `;`, whitespace, `{` or `(` — whichever comes first —
