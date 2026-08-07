@@ -94,7 +94,7 @@ the reference model changes.
 | Field | Value |
 |---|---|
 | Category | MEASURED |
-| Verification | REPORTED |
+| Verification | VERIFIED (Pearce and Perry promoted 2026-08-07: titles, authors, venues and headline findings checked against the primary abstracts — "approximately 40%" vulnerable and the belief/actual-security gap both confirmed verbatim; the 39.33%/40.73% and 4-of-5 splits are body figures still carried from the sweep. Veracode remains a vendor report, contextual only) |
 | Sources | Pearce et al., IEEE S&P 2022 (peer-reviewed); Perry et al., ACM CCS 2023 (peer-reviewed); Veracode 2025 (vendor) |
 | Metric | Share of programs or samples with a CWE flagged by static analysis |
 | Effect | Pearce: 39.33% of top options and 40.73% of all options across 1,689 programs. Perry: less secure code on 4 of 5 tasks. Veracode: 45% of samples fail |
