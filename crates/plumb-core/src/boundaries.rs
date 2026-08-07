@@ -401,6 +401,17 @@ mod tests {
         assert!(imports("README.md", "use x::y;\n").is_empty());
     }
 
+    /// A `node:`-prefixed spec names a Node builtin (`node:fs`, `node:path`),
+    /// never a project module. Left unskipped, splitting on `:` in
+    /// `target_of` hands the resolver a leading segment `node` that can
+    /// collide with a declared module whose leaf happens to be named `node`,
+    /// exactly the false-positive class the relative-spec skip already
+    /// exists for.
+    #[test]
+    fn a_node_builtin_spec_is_skipped() {
+        assert!(imports("web/index.ts", "import fs from 'node:fs';\n").is_empty());
+    }
+
     /// No `.` anywhere in the path used to hand the whole trailing string —
     /// the entire path, since `rsplit('.')` with no match yields the input
     /// unchanged — to the extension match. A file literally named `rs`, with
