@@ -134,6 +134,29 @@ warning: .plumb/index.md does not match the tracked sources; run `plumb index` [
 
 and the run exits `2`.
 
+A fourth command, `plumb report --commits <n>` (default 30, first-parent from
+HEAD), prints three quantities per commit — **volume** (lines added and
+removed, from `git show --numstat`), **deletion ratio** (removed over
+added), and **coupling delta** (the change in cross-module import edges the
+commit's touched files resolve to, read against `.plumb/architecture.md`) —
+and a commit where volume and coupling delta both rise is flagged with a
+**decay signature**, the pattern taxonomy §4.5 names straight off: volume
+and coupling growing together. Run on this repository's own last 20
+commits:
+
+```console
+$ plumb report --commits 20
+commits: 20, added: 20896, removed: 462
+mean deletion ratio: 0.06
+decay signature: 4 of 20 (c8e497d, 1ed73ca, d4e8fc0, 46b0918)
+```
+
+**It is not a gate.** No finding, no threshold, no exit-code effect —
+`plumb report` always exits `0` regardless of what the numbers say, Tier C
+instrumentation for an open hypothesis rather than a calibrated rule. A
+threshold is not proposed here; one arrives, if it arrives, only after
+phase 6 calibrates it against real project history.
+
 ### What `--diff` compares, and what that rules out
 
 **`--diff` compares the working tree against HEAD** — it runs
@@ -332,6 +355,29 @@ nothing else is there:
   keeps `const`/`static` as its kind. Python's `async def` and JavaScript's
   `export default async function` are recognised the same way, each keeping
   its non-async kind (`def`, `function`).
+- `plumb report`'s coupling delta resolves every commit's touched files
+  against **today's** `.plumb/architecture.md`, not the architecture that
+  commit's author actually saw — a module renamed or split afterward reads
+  older commits under boundaries that did not exist yet at the time.
+- The commit walk is `git log --first-parent`, the same reference `numstat`
+  reads a commit's diff against: a pull request landed as a merge commit
+  counts once, as the merge's own diff, not once per inner commit it
+  carried. The two agree with each other, but a history of many small
+  merges reports very differently from a rebase-and-fast-forward one over
+  the same work.
+- `git show --numstat` quotes a path containing unusual characters (tabs,
+  quotes, non-ASCII control bytes); that quoted form is still summed into
+  volume, but coupling resolution matches paths as literal text, so a
+  quoted path's line counts land in the volume total while its edges can
+  go uncounted.
+- Coupling renders as `-` for every row, and the report falls back to
+  volume and deletion ratio alone, whenever `.plumb/architecture.md` is
+  absent — there is nothing to resolve an import edge against, and one
+  stderr line says so once, not per commit.
+- Coupling delta is `child_edges − parent_edges`, a plain count. A commit
+  that swaps one cross-module edge for a different one nets to zero:
+  replacing an undeclared dependency with an equally undeclared one shows
+  no coupling change at all.
 
 What the first rule rests on: Spracklen et al. (USENIX Security 2025) measured
 19.7% of packages referenced by code-generating models as non-existent, across
@@ -340,9 +386,9 @@ models — a three- to fourfold drop, and still not zero. 43% of hallucinated
 names recur identically across runs, which is what makes slopsquatting a
 practical attack rather than a theoretical one.
 
-Not yet built: volume and coupling tracking, and the cross-session drift
-instrumentation. Those are what distinguish Plumb from a linter, and they come
-next.
+Volume and coupling tracking is `plumb report`, described in Status above.
+Not yet built: the cross-session drift instrumentation — the other half of
+what distinguishes Plumb from a linter.
 
 ## Building
 
