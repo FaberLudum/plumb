@@ -161,6 +161,15 @@ against a boundary the project itself declared, not the §4.5 decay pattern
 the signature is named for; it needs calibration before it can tell the two
 apart, the job phase 6 is for.
 
+Coupling reads at module granularity, which the extractor's own top-segment
+limit (see Blind spots) makes inert on a single-package monolith: calibrated
+on a real repository whose actual boundaries sit between sub-packages of one
+top-level package (`ai_energy_manager.documents` vs `.facts`, …), every
+internal import resolved to the same top segment and coupling delta read `0`
+across 25 commits — not a config error, but a real class of project this
+version cannot see coupling on at all. Sub-package resolution is future
+work.
+
 **It is not a gate.** No finding, no threshold, no exit-code effect —
 `plumb report` always exits `0` regardless of what the numbers say, Tier C
 instrumentation for an open hypothesis rather than a calibrated rule. A
@@ -342,6 +351,15 @@ nothing else is there:
   line-ending differences: git normalises CRLF and LF at checkout, so
   comparing raw bytes would warn on every clean Windows clone for a
   difference nobody introduced.
+- Import extraction keeps only the top segment of a dotted or scoped import
+  (`ai_energy_manager.documents` reads as `ai_energy_manager`), so a Python
+  project whose real boundaries live between sub-packages of one top-level
+  package is invisible to this gate: every internal import resolves to the
+  whole package, and both the boundary check and `plumb report`'s coupling
+  delta (below) go silent on exactly the class of project where a
+  single-package monolith is splitting internally. Calibrated on a real
+  repository of that shape, not assumed. Sub-package resolution is future
+  work, not a config error.
 - The index scanner's symbol extraction is line-based, the same shape of
   matcher as the boundary gate's imports: a macro-generated declaration is
   missed because it never exists as a literal source line, and a multi-line
