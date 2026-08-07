@@ -120,4 +120,77 @@ Responsibility: the evidence base.
         let architecture = parse("# Architecture — X\n\n## m\n");
         assert_eq!(architecture.modules.len(), 1);
     }
+
+    /// A real `May depend on:` list that wraps onto a following line used to
+    /// be silently truncated: only the first physical line was read, so the
+    /// entries after the line break vanished and the boundary gate warned on
+    /// edges the architecture explicitly permitted.
+    #[test]
+    fn a_wrapped_may_depend_on_list_yields_every_entry() {
+        let text = "\
+## alembic
+
+May depend on: ai, conversations, documents, facts, identity,
+interventions, persistence, tenancy, ai_energy_manager.
+
+## ai
+";
+        let architecture = parse(text);
+        assert_eq!(
+            architecture.modules[0].may_depend_on,
+            vec![
+                "ai",
+                "conversations",
+                "documents",
+                "facts",
+                "identity",
+                "interventions",
+                "persistence",
+                "tenancy",
+                "ai_energy_manager"
+            ]
+        );
+    }
+
+    /// The `(none) — prose` case can also wrap onto a second line; the
+    /// joined text still starts with `(none)`, so it must still parse to
+    /// the empty list rather than picking up words from the prose as
+    /// dependency entries.
+    #[test]
+    fn a_wrapped_none_with_prose_stays_empty() {
+        let text = "\
+## persistence
+
+May depend on: (none) — persistence imports no other
+sub-package within this codebase.
+
+## other
+";
+        let architecture = parse(text);
+        assert!(architecture.modules[0].may_depend_on.is_empty());
+    }
+
+    /// Wrapping must stop at the first blank line: prose that follows a
+    /// wrapped list on its own paragraph must not be swallowed into the
+    /// dependency list.
+    #[test]
+    fn a_wrapped_list_stops_at_the_next_blank_line() {
+        let text = "\
+## m
+
+May depend on: a, b,
+c, d.
+
+Responsibility: prose that must not be swallowed.
+
+## other
+";
+        let architecture = parse(text);
+        assert_eq!(architecture.modules.len(), 2);
+        assert_eq!(
+            architecture.modules[0].may_depend_on,
+            vec!["a", "b", "c", "d"]
+        );
+        assert!(architecture.modules[1].may_depend_on.is_empty());
+    }
 }
