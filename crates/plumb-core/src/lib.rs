@@ -13,4 +13,5 @@ pub mod finding;
 pub mod index;
 pub mod layer1;
 pub mod manifest;
+pub mod metrics;
 pub mod report;
