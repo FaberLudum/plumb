@@ -51,12 +51,14 @@ Proposing a Tier A rule on a preprint is a rejection. Propose it as Tier B.
 
 ## Status
 
-**Early, and honest about it.** One rule is built and runs: every package a
-change adds must actually exist on its registry. `plumb check --diff` asks git
-for the paths a change touched, reads each Python manifest among them as it
-stands and as it stands at HEAD, looks up only the names the change adds, and
-blocks on a name PyPI does not have. 142 tests, no network access from any of
-them.
+**Early, and honest about it.** One rule is built and runs, over two
+registries now: every package a change adds must actually exist on its
+registry. `plumb check --diff` asks git for the paths a change touched,
+reads each manifest among them — `requirements.txt`, `requirements-*.txt`
+and `pyproject.toml` on the PyPI side, `package.json` on the npm side — as
+it stands and as it stands at HEAD, looks up only the names the change
+adds, and blocks on a name its own registry does not have. 330 tests, no
+network access from any of them.
 
 ```console
 $ plumb check --diff
@@ -66,6 +68,27 @@ blocking: package `reqeusts` does not exist on PyPI [package-exists]
 $ echo $?
 1
 ```
+
+npm reads the same way, against `package.json`'s four dependency tables —
+`dependencies`, `devDependencies`, `peerDependencies`,
+`optionalDependencies` — and blocks on the same shape of finding, `npm` in
+place of `PyPI`. This repository carries no `package.json` of its own to
+dogfood against, so this is a scratch repository, one commit with
+`{"dependencies": {"react": "^18.0.0"}}`, then a garbage name added on top
+and `plumb check --diff` run for real, online, no `--offline`:
+
+```console
+$ plumb check --diff
+blocking: package `plumb-nonexistent-calibration-xyz` does not exist on npm [package-exists]
+  package.json
+  evidence: taxonomy §4.1
+$ echo $?
+1
+```
+
+`react`, the name already in the manifest, is not re-checked and does not
+appear in that output at all — only a name the change actually adds is
+looked up, on either registry.
 
 `--json` emits the same findings as an array, `--offline` never contacts a
 registry. Exit codes are a fixed contract: `0` clean, `1` blocking, `2`
@@ -230,8 +253,32 @@ What it does not do yet, listed because a gate that stays quiet about them is
 worse than one that has none. The list is what has been found, not a proof that
 nothing else is there:
 
-- PyPI only. TypeScript and .NET manifests are the same shape of code, one
-  ecosystem at a time.
+- PyPI and npm, two ecosystems, added one at a time. .NET manifests are the
+  same shape of code and are still not read.
+- npm's coverage: one filename, `package.json`, at any depth, with any path
+  segment named `node_modules` excluded entirely — a vendored `package.json`
+  belongs to a dependency, not to this project, and checking it would block
+  a build over a package nobody here added; npm nests dependencies, so
+  `node_modules/foo/node_modules/bar/package.json` is excluded exactly like
+  the top-level case. Four tables are read — `dependencies`,
+  `devDependencies`, `peerDependencies`, `optionalDependencies` — and only
+  their keys: a table's values are version *ranges*, and this gate checks
+  existence, not whether a range is satisfiable, so `"left-pad": "^999.0.0"`
+  passes exactly as cleanly as `"left-pad": "^1.0.0"` does. A table present
+  but not an object (`"dependencies": []`) is a `manifest-understood`
+  warning naming the table, the JSON sibling of the PEP 621 shape-mismatch
+  warning below.
+- **Lockfiles are not read.** `package-lock.json`, `yarn.lock` and
+  `pnpm-lock.yaml` are invisible to Plumb; a name that exists only inside
+  one of them — never declared in `package.json` itself — is never looked
+  up in either direction. It does not block if the name is hallucinated,
+  and it does not confirm if the name is real.
+- **A private npm registry false-positives.** A name published only to a
+  company's private registry or scope resolves against
+  `https://registry.npmjs.org` alone, the public registry — the same gap a
+  package that exists only on a private PyPI index has (see the third false
+  positive below): Plumb cannot tell "does not exist anywhere" from "does
+  not exist on the one registry it asked."
 - Three filenames, at any depth: `requirements.txt`, `requirements-*.txt` and
   `pyproject.toml`. From a `pyproject.toml` it reads PEP 621 `[project]`
   `dependencies` and `optional-dependencies`, nothing else.
@@ -310,8 +357,9 @@ nothing else is there:
   invisible from the outside: a pixi or conda-lock project gets a clean run, and
   a clean run must not be read as "these dependencies were checked".
 
-  Plumb checks one registry, PyPI. A hallucinated conda package is a real
-  defect and Plumb does not look for it. Concretely, no warning and no lookup
+  Plumb checks PyPI and npm, not conda. A hallucinated conda package is a
+  real defect and Plumb does not look for it. Concretely, no warning and no
+  lookup
   for `[tool.pixi.dependencies]`, `[tool.pixi.feature.<name>.dependencies]`,
   pixi's `build-`, `host-` and `run-dependencies` under `package`, its
   per-platform `[tool.pixi.target.<platform>.…]` variants, or
@@ -506,8 +554,9 @@ under `%LOCALAPPDATA%\plumb\registry\` on Windows, and `$XDG_CACHE_HOME/plumb/`
 or `~/.cache/plumb/` elsewhere, keyed per repository.
 
 The location is a correctness property, not housekeeping. The cache is
-unauthenticated and a fresh entry answers without contacting PyPI, so a cache
-file that travels with a change can assert that a nonexistent package exists and
+unauthenticated and a fresh entry answers without contacting the registry, so
+a cache file that travels with a change can assert that a nonexistent package
+exists and
 the gate will believe it — silently, and for up to thirty days. Earlier versions
 kept it at `<repo>/.plumb/cache/registry.json`, where committing one file
 disabled the gate. **Never keep a Plumb cache inside a repository.** If one is
