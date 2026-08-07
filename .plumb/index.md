@@ -37,6 +37,14 @@ What this repository can already do, and where. Regenerate with
 - struct `PyPiRegistry`
 - fn `new`
 - fn `stale_packages`
+- fn `exists`
+- struct `NpmRegistry`
+- fn `new`
+- fn `stale_packages`
+- fn `exists`
+- struct `RegistryRouter`
+- fn `new`
+- fn `stale_packages`
 
 ## crates/plumb-cli/src/report_cmd.rs
 - fn `run`
@@ -113,6 +121,7 @@ What this repository can already do, and where. Regenerate with
 - fn `describe`
 - fn `parse_requirements`
 - fn `parse_pyproject`
+- fn `parse_package_json`
 - fn `parse`
 
 ## crates/plumb-core/src/metrics.rs
