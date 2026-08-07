@@ -446,10 +446,15 @@ fn manifest_not_fully_read(path: &str, detail: &str) -> Finding {
 /// Tier A: taxonomy §4.1 is peer-reviewed and the detection is objective — the
 /// name is in the registry or it is not.
 fn package_does_not_exist(dependency: &AddedDependency) -> Finding {
-    // Exhaustive on purpose, and it stops compiling the moment a second
-    // ecosystem lands — which is the moment this message becomes a lie and
-    // this whole function starts naming the wrong registry. It is the same
-    // guard `deps::added` keeps over the ecosystem it hard-codes.
+    // Exhaustive on purpose, and it stops compiling the moment a third
+    // ecosystem variant is added — which is the moment this message would
+    // otherwise start naming the wrong registry for it. `dependency.ecosystem`
+    // is not guessed here: it is `Manifest::ecosystem`, a mandatory field
+    // `manifest::parse` sets from the file it dispatched on, carried through
+    // unchanged by `deps::added` onto every `AddedDependency` it returns. This
+    // match is the second of two places in the crates that must stay
+    // exhaustive over `Ecosystem` for that reason; `RegistryRouter::exists`'s
+    // dispatch in `registry.rs` is the other.
     let registry_name = match dependency.ecosystem {
         Ecosystem::PyPi => "PyPI",
         Ecosystem::Npm => "npm",
