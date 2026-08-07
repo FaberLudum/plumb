@@ -82,12 +82,20 @@ pub fn render_text(stats: &[CommitStats]) -> String {
             .unwrap_or_else(|| "-".to_string());
         let coupling_str = stat
             .coupling_delta
-            .map(|d| format!("{:+}", d))
+            .map(|d| {
+                if d == 0 {
+                    "0".to_string()
+                } else {
+                    format!("{:+}", d)
+                }
+            })
             .unwrap_or_else(|| "-".to_string());
+        // Truncate subject to 40 characters on char boundaries, never byte slicing.
+        let subject_short: String = stat.subject.chars().take(40).collect();
 
         output.push_str(&format!(
-            "{}  +{:<6} -{:<6} ratio {}  coupling {}\n",
-            hash_short, stat.added, stat.removed, ratio_str, coupling_str
+            "{}  +{:<6} -{:<6} ratio {}  coupling {}  {}\n",
+            hash_short, stat.added, stat.removed, ratio_str, coupling_str, subject_short
         ));
     }
 
@@ -100,11 +108,28 @@ pub fn render_text(stats: &[CommitStats]) -> String {
     if let Some(ratio) = summary.mean_deletion_ratio {
         output.push_str(&format!("mean deletion ratio: {:.2}\n", ratio));
     }
-    output.push_str(&format!(
-        "decay signature: {} of {}\n",
-        summary.decay_commits.len(),
-        summary.commits
-    ));
+
+    // Decay line: list short hashes when K > 0.
+    let decay_line = if summary.decay_commits.is_empty() {
+        format!(
+            "decay signature: {} of {}\n",
+            summary.decay_commits.len(),
+            summary.commits
+        )
+    } else {
+        let short_hashes: Vec<&str> = summary
+            .decay_commits
+            .iter()
+            .map(|h| &h[..7.min(h.len())])
+            .collect();
+        format!(
+            "decay signature: {} of {} ({})\n",
+            summary.decay_commits.len(),
+            summary.commits,
+            short_hashes.join(", ")
+        )
+    };
+    output.push_str(&decay_line);
 
     output
 }
@@ -156,7 +181,7 @@ mod tests {
     fn commit(hash: &str, added: u64, removed: u64, coupling: Option<i64>) -> CommitStats {
         CommitStats {
             hash: hash.to_string(),
-            subject: format!("subject for {hash}"),
+            subject: format!("change {}", &hash[..3.min(hash.len())]),
             added,
             removed,
             coupling_delta: coupling,
@@ -211,7 +236,36 @@ mod tests {
         assert!(text.contains("+100"), "{text}");
         assert!(text.contains("-20"), "{text}");
         assert!(text.contains("decay signature: 1 of 2"), "{text}");
+        // Decay commit short hash should be listed.
+        assert!(text.contains("aaaaaaa"), "decay hash shortened: {text}");
         assert!(text.ends_with('\n'), "{text:?}");
+    }
+
+    #[test]
+    fn text_report_truncates_subject_on_char_boundaries() {
+        // 45 × 'é' (multi-byte character) should truncate at 40 chars without panic.
+        let long_subject = "é".repeat(45);
+        let stat = CommitStats {
+            hash: "abc1234".to_string(),
+            subject: long_subject.clone(),
+            added: 10,
+            removed: 5,
+            coupling_delta: Some(1),
+        };
+        let text = render_text(&[stat]);
+        // Should not panic; subject should be truncated.
+        assert!(text.contains("abc1234"), "{text}");
+        // Verify it doesn't contain the whole 45-char subject.
+        assert!(!text.contains(&long_subject), "{text}");
+    }
+
+    #[test]
+    fn coupling_zero_renders_without_sign() {
+        let stat = commit("abc1234", 50, 10, Some(0));
+        let text = render_text(&[stat]);
+        // Some(0) should render as "0", not "+0".
+        assert!(text.contains("coupling 0"), "{text}");
+        assert!(!text.contains("coupling +0"), "{text}");
     }
 
     #[test]
