@@ -228,7 +228,6 @@ pub fn show_at_head(repo: &Path, path: &str) -> Result<Option<String>> {
 ///
 /// Unlike [`changed_paths`] this stays strict about UTF-8: a manifest really
 /// should be UTF-8, and here the error names a file the user can fix.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the report command, a later task
 pub fn show_at(repo: &Path, reference: &str, path: &str) -> Result<Option<String>> {
     let output = Command::new("git")
         .arg("show")
@@ -259,7 +258,6 @@ pub struct Commit {
 /// commit it carried. That matches how [`numstat`] reads a commit — also
 /// against its first parent — so the two agree on what one entry in this
 /// history means.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the report command, a later task
 pub fn recent_commits(repo: &Path, limit: usize) -> Result<Vec<Commit>> {
     let output = Command::new("git")
         .args([
@@ -307,7 +305,6 @@ pub fn recent_commits(repo: &Path, limit: usize) -> Result<Vec<Commit>> {
 /// stays a documented limitation of this metrics view rather than reason to
 /// add a second parser for one field that is not the counts this function
 /// exists to report.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the report command, a later task
 pub fn numstat(repo: &Path, hash: &str) -> Result<Vec<(u64, u64, String)>> {
     let output = Command::new("git")
         .args(["show", "--first-parent", "--numstat", "--format="])
