@@ -754,6 +754,29 @@ mod tests {
         assert_eq!(found[0].to_module, "ai_energy_manager");
     }
 
+    /// The ancestor-permission path resolves the entry to a module and then
+    /// checks a slash-suffixed prefix, so a name that merely shares a
+    /// hyphen/underscore-extended string prefix must not be treated as a
+    /// descendant: `src/ai_energy_manager_extra` is a sibling of
+    /// `src/ai_energy_manager`, not a sub-module of it, the same
+    /// component-wise-not-string-prefix rule `module_of` already enforces
+    /// for file attribution.
+    #[test]
+    fn an_ancestor_entry_does_not_permit_a_hyphen_extended_sibling() {
+        let architecture = architecture::parse(
+            "## other3\n\nMay depend on: ai_energy_manager.\n\n\
+             ## src/ai_energy_manager\n\nMay depend on: (none).\n\n\
+             ## src/ai_energy_manager_extra\n\nMay depend on: (none).\n",
+        );
+        let found = violations(
+            &architecture,
+            "other3/x.py",
+            "import ai_energy_manager_extra\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "src/ai_energy_manager_extra");
+    }
+
     #[test]
     fn every_known_extension_is_dispatched_by_imports() {
         for ext in ["rs", "py", "ts", "tsx", "js", "jsx", "mjs", "cjs"] {
