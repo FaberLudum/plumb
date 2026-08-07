@@ -476,13 +476,26 @@ impl PyPiRegistry {
         // The prefixed key first, then the legacy bare one — a file written
         // before npm existed has no prefix at all, and every entry in it was
         // a PyPI answer, so it still answers here rather than being silently
-        // discarded the day this key format changed.
+        // discarded the day this key format changed. The bare-key fallback
+        // is gated on `name` itself carrying no `:`: a prefixed key can
+        // never be a legitimate legacy bare name (legacy files predate
+        // prefixes entirely), so a queried name that contains one must not
+        // be allowed to match another ecosystem's namespace by accident —
+        // `plumb-core` happens to keep `:` out of every name it extracts
+        // today, but that is an invariant of a different crate, asserted
+        // nowhere in this one, and this guard must not rest on it.
         let cached = {
             let cache = self.cache.borrow();
             cache
                 .known
                 .get(&pypi_cache_key(name))
-                .or_else(|| cache.known.get(name))
+                .or_else(|| {
+                    if name.contains(':') {
+                        None
+                    } else {
+                        cache.known.get(name)
+                    }
+                })
                 .copied()
         };
         if let Some(entry) = cached
