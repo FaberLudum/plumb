@@ -322,12 +322,18 @@ mod tests {
     use crate::architecture;
 
     #[test]
-    fn rust_use_lines_yield_the_crate_name() {
+    fn rust_use_lines_yield_the_full_path() {
         let text = "use plumb_core::manifest;\npub use serde::Serialize;\nuse std::path::Path;\n";
         assert_eq!(
             imports("crates/x/src/main.rs", text),
-            vec!["plumb_core", "serde", "std"]
+            vec!["plumb_core::manifest", "serde::Serialize", "std::path::Path"]
         );
+    }
+
+    #[test]
+    fn a_rust_brace_group_yields_the_path_before_the_brace() {
+        let text = "use plumb_core::{manifest, finding};\n";
+        assert_eq!(imports("crates/x/src/main.rs", text), vec!["plumb_core"]);
     }
 
     #[test]
@@ -337,10 +343,12 @@ mod tests {
     }
 
     #[test]
-    fn python_imports_yield_the_top_name() {
-        let text =
-            "import requests\nfrom flask import Flask\nfrom . import sibling\nimport os.path\n";
-        assert_eq!(imports("api/app.py", text), vec!["requests", "flask", "os"]);
+    fn python_imports_yield_the_dotted_path() {
+        let text = "import requests\nfrom flask import Flask\nfrom . import sibling\nimport os.path\nfrom ai_energy_manager.documents import domain\n";
+        assert_eq!(
+            imports("api/app.py", text),
+            vec!["requests", "flask", "os.path", "ai_energy_manager.documents"]
+        );
     }
 
     /// `import os, sys` used to extract `os,` — the comma glued onto the
@@ -353,11 +361,11 @@ mod tests {
     }
 
     #[test]
-    fn javascript_imports_yield_the_first_segment_and_skip_relative() {
+    fn javascript_imports_yield_the_full_spec_and_skip_relative() {
         let text = "import x from 'react-dom/client';\nconst y = require(\"lodash\");\nimport z from './local';\nimport s from '@scope/pkg/deep';\n";
         assert_eq!(
             imports("web/index.ts", text),
-            vec!["react-dom", "lodash", "@scope/pkg"]
+            vec!["react-dom/client", "lodash", "@scope/pkg/deep"]
         );
     }
 
@@ -383,7 +391,7 @@ mod tests {
         let text = "use plumb_core::manifest;\n";
         assert_eq!(
             imports("crates/x/src/LIB.RS", text),
-            vec!["plumb_core"],
+            vec!["plumb_core::manifest"],
             "an uppercase extension was not recognised"
         );
     }
@@ -414,7 +422,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].from_module, "crates/plumb-core");
         assert_eq!(found[0].to_module, "crates/plumb-cli");
-        assert_eq!(found[0].import, "plumb_cli");
+        assert_eq!(found[0].import, "plumb_cli::check");
         assert_eq!(found[0].file, "crates/plumb-core/src/lib.rs");
     }
 
