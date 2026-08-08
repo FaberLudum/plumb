@@ -52,6 +52,7 @@ What this repository can already do, and where. Regenerate with
 ## crates/plumb-core/src/adapters.rs
 - struct `Adapter`
 - const `MARKER`
+- const `INDEX_INLINE_MAX_LINES`
 - fn `opens_with_marker`
 - fn `render`
 
