@@ -45,6 +45,24 @@ pub fn opens_with_marker(first_line: &str) -> bool {
 /// One body on purpose: the harnesses differ in where they read instructions
 /// from, not in what the project needs from an agent. A per-harness body would
 /// drift the first time one of them was edited in a hurry.
+/// The index section as the instruction files carry it: inline when small,
+/// a pointer to `.plumb/index.md` when over [`INDEX_INLINE_MAX_LINES`].
+///
+/// The pointer is an instruction, not enforcement — an agent can skip the
+/// read. The index-stale gate still catches the regeneration half, and a
+/// skipped read costs a duplicated symbol at review, not silent damage.
+fn index_section(index: &str) -> String {
+    if index.lines().count() <= INDEX_INLINE_MAX_LINES {
+        return index.to_string();
+    }
+    "# Index\n\n\
+     The symbol index is too large to inline here. Before adding code\n\
+     that might already exist, read the relevant section of\n\
+     `.plumb/index.md`. Regenerate it with `plumb index` after the\n\
+     public surface changes.\n"
+        .to_string()
+}
+
 fn body(project_name: &str, artefacts: &Artefacts) -> String {
     format!(
         "# {project_name} — working agreement\n\n\
@@ -62,7 +80,7 @@ fn body(project_name: &str, artefacts: &Artefacts) -> String {
         architecture = artefacts.architecture,
         conventions = artefacts.conventions,
         invariants = artefacts.invariants,
-        index = artefacts.index,
+        index = index_section(&artefacts.index),
     )
 }
 
