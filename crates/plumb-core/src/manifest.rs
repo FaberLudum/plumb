@@ -204,7 +204,7 @@ impl Gap {
     /// A sentence naming what was not read, for a human reading a finding.
     pub fn describe(&self) -> String {
         match self {
-            Gap::Unparseable => "the file does not parse as TOML".to_string(),
+            Gap::Unparseable => "the file could not be parsed".to_string(),
             Gap::PoetryDependencies => "dependencies are declared under [tool.poetry] — in \
                  [tool.poetry.dependencies] or a [tool.poetry.group.<name>.dependencies] table \
                  — which Plumb does not read"
