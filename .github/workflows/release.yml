@@ -37,6 +37,18 @@ jobs:
         shell: bash
         run: bash .github/scripts/assert-toolchain.sh
 
+      # Same cache as ci.yml, same key, so a release reuses the artefacts
+      # the last main build wrote instead of compiling every dependency on
+      # a 10x-billed macOS runner.
+      - name: Cache cargo registry and build artefacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
       # The suite runs in ci.yml on every push; a release build repeats the
       # test run anyway because a release is cut from a tag, not from a
       # commit ci already vouched for — tags can point anywhere.

@@ -3,11 +3,26 @@ name: ci
 on:
   push:
     branches: [main]
+    # A change that touches no file cargo reads cannot change what cargo
+    # does. Markdown and docs/ are skipped on that ground alone — the list
+    # is deliberately conservative: .plumb/, the generated instruction
+    # files and workflow files all stay in, because a PR touching only
+    # those still deserves the suite it is about to gate.
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   # A workflow that only runs on `main` and on pull requests cannot be tried
   # from a branch before it is proposed, and an untested gate is the thing this
   # project exists to complain about.
   workflow_dispatch:
+
+# A second push to the same branch makes the running build's answer
+# irrelevant; letting it finish would spend minutes on a commit nobody can
+# merge anymore. On main the group is the ref too: if two merges land back to
+# back, the second run validates the HEAD that actually matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 # Nothing here writes anything back.
 permissions:
@@ -23,7 +38,17 @@ jobs:
     # normalises it, and what closing the read end of a pipe reports to the
     # writer. Every one of those has a test. Development happened on Windows,
     # so Linux and macOS are the platforms whose behaviour nobody has watched.
+    #
+    # But not all three on every pull request. On a private repository a
+    # macOS minute bills at 10x and a Windows minute at 2x, so the full
+    # matrix costs roughly eight times what its Linux slice does. Pull
+    # requests get Linux — the platform the developer's own machine is not —
+    # and the full matrix runs where it protects the thing that lasts: every
+    # push to main, and any run started by hand. A platform-specific break
+    # can therefore land and be found one merge late; that trade is taken
+    # knowingly, minutes being finite and main being fixable.
     name: ${{ matrix.os }}
+    if: github.event_name != 'pull_request' || matrix.os == 'ubuntu-latest'
     runs-on: ${{ matrix.os }}
     # A full run takes a few minutes. This is a bound on a hang, not a target:
     # without it the default is six hours of a runner spent on a build that has
@@ -58,6 +83,21 @@ jobs:
       - name: Fail if a different toolchain is what will run
         shell: bash
         run: bash .github/scripts/assert-toolchain.sh
+
+      # GitHub's own cache action, pinned by commit like the checkout above.
+      # The key is exact on Cargo.lock and the toolchain file: dependencies
+      # are few and pinned, so a lockfile change is rare and a stale partial
+      # cache (restore-keys) would mostly re-download anyway. What this
+      # saves is the from-scratch build of every dependency on every run —
+      # the single largest block of billed minutes in this workflow.
+      - name: Cache cargo registry and build artefacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       # `cargo fmt` is the one command here without `--locked`: it is an
       # external subcommand that never resolves dependencies, and it rejects the
@@ -112,6 +152,18 @@ jobs:
           curl --silent --show-error --fail --max-time 30
           --retry 3 --retry-delay 5 --retry-all-errors
           --output /dev/null https://pypi.org/simple/ruff/
+
+      # Same cache as the matrix job, same key — this job runs on
+      # ubuntu-latest, so it shares the Linux entry instead of writing a
+      # second one.
+      - name: Cache cargo registry and build artefacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Build the tests while there is still a network
         run: cargo test --workspace --locked --no-run
