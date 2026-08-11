@@ -862,9 +862,28 @@ fn nuget_cache_key(name: &str) -> String {
 /// interpolated. Pure and separate from [`NuGetRegistry::lookup`] so the
 /// mapping can be pinned without a request, the same reasoning [`npm_url`]
 /// follows for npm.
+///
+/// `v3-flatcontainer`, not `v3-flat2`. The design spec and this file both
+/// carried `v3-flat2` from Task 2 through the whole of Task 3's automated
+/// test suite unnoticed, because every test that exercises `nuget_url`
+/// pins the *string this function builds*, never a real response — the
+/// stub transport in `exists_via`'s own tests never touches the network
+/// either. Nothing caught it until this task's live smoke test ran the
+/// built binary against nuget.org for real: `Newtonsoft.Json`, a package
+/// that has shipped for over a decade, came back 404 and blocked the
+/// build, in the same run that correctly blocked a genuinely nonexistent
+/// name — because *every* lookup 404s against the wrong path, real or
+/// hallucinated alike. Verified directly with `curl` outside the test
+/// suite: `v3-flat2/newtonsoft.json/index.json` is a 404
+/// `ResourceNotFound`; `v3-flatcontainer/newtonsoft.json/index.json` is a
+/// 200 listing its published versions. This is exactly the failure mode
+/// `CLAUDE.md`'s "check the current API before writing code against it"
+/// rule exists for — a URL path recalled from memory rather than looked
+/// up, and a mocked test suite is structurally unable to catch it because
+/// the mock and the code under test share the same wrong assumption.
 fn nuget_url(name: &str) -> String {
     format!(
-        "https://api.nuget.org/v3-flat2/{}/index.json",
+        "https://api.nuget.org/v3-flatcontainer/{}/index.json",
         name.to_ascii_lowercase()
     )
 }
@@ -874,13 +893,13 @@ fn nuget_url(name: &str) -> String {
 /// Non-empty, ASCII alphanumerics plus `.`, `_` and `-` only — narrower than
 /// [`is_valid_npm_name`] (no `@` or `/`), and unlike [`is_valid_pypi_name`]
 /// it explicitly rejects the empty string: the flat-container URL for an
-/// empty id collapses to `.../v3-flat2//index.json`, a different,
+/// empty id collapses to `.../v3-flatcontainer//index.json`, a different,
 /// well-formed request nobody asked for, not a lookup for "no package".
 ///
 /// The first and last character must also be ASCII alphanumeric. A charset
 /// check alone is not enough here: `.` is otherwise an ordinary character,
 /// so it admitted `.` and `..` whole — RFC 3986 dot-segments — and
-/// `nuget_url("..")` emitted `.../v3-flat2/../index.json`. The pinned http
+/// `nuget_url("..")` emitted `.../v3-flatcontainer/../index.json`. The pinned http
 /// client does not normalise a dot-segment out of the path client-side, so
 /// that request reached the wire as written and server-side normalisation
 /// alone decided what answered, with the result cached under `nuget:..` as
@@ -2250,7 +2269,7 @@ mod tests {
 
     /// `.` and `..` are RFC 3986 dot-segments: `is_valid_nuget_id`'s old
     /// charset admitted both, since `.` is otherwise a legal character, so
-    /// `nuget_url("..")` emitted `.../v3-flat2/../index.json` — a path the
+    /// `nuget_url("..")` emitted `.../v3-flatcontainer/../index.json` — a path the
     /// pinned http client does not normalise client-side, leaving
     /// server-side normalisation to decide what actually answers, cached
     /// under `nuget:..` as a Tier A verdict regardless. Leading or trailing
@@ -2296,11 +2315,16 @@ mod tests {
     /// Pure and network-free, as the plan requires: the flat-container index
     /// is served at the lowercased path only, so the URL builder must
     /// lowercase the id itself rather than relying on every caller to.
+    ///
+    /// `v3-flatcontainer`, confirmed against the real service with `curl`
+    /// during this task's live smoke test — see `nuget_url`'s doc comment
+    /// for what the wrong path (`v3-flat2`, this test's own value until
+    /// then) cost: every lookup 404ing, real packages included.
     #[test]
     fn the_lookup_url_lowercases_the_id() {
         assert_eq!(
             nuget_url("OpenAI"),
-            "https://api.nuget.org/v3-flat2/openai/index.json"
+            "https://api.nuget.org/v3-flatcontainer/openai/index.json"
         );
     }
 
