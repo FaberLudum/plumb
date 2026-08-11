@@ -39,7 +39,9 @@ pub fn imports(path: &str, text: &str) -> Vec<String> {
         "rs" => crate::languages::for_extension("rs")
             .map(|language| language.imports(text))
             .unwrap_or_default(),
-        "py" => python_imports(text),
+        "py" => crate::languages::for_extension("py")
+            .map(|language| language.imports(text))
+            .unwrap_or_default(),
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => javascript_imports(text),
         _ => Vec::new(),
     }
@@ -265,47 +267,6 @@ fn resolve_module<'a>(permitted: &str, architecture: &'a Architecture) -> Option
         .find(|module| names_module(permitted, module))
 }
 
-/// Stops a dotted Python module path at `,`, whitespace or `(` — the dots
-/// inside the path are kept, so the whole dotted path comes back as written.
-fn python_name(rest: &str) -> &str {
-    let end = rest
-        .find(|c: char| c == ',' || c.is_whitespace() || c == '(')
-        .unwrap_or(rest.len());
-    &rest[..end]
-}
-
-/// `import NAME[.rest]` and `from NAME[.rest] import …`, kept as the full
-/// dotted path. `from .` is a relative import and is skipped.
-///
-/// A bare `import` may name several modules on one line, comma-separated —
-/// `import os, sys` — which `from NAME import …` cannot: there the comma
-/// separates *imported names* from one module, not modules themselves, so
-/// only the single name after `from` is ever a module. Only the `import` arm
-/// therefore splits on `,`; the `from` arm keeps taking one name, as before.
-fn python_imports(text: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("from ") {
-            if rest.starts_with('.') {
-                continue;
-            }
-            let name = python_name(rest);
-            if !name.is_empty() {
-                names.push(name.to_string());
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("import ") {
-            for segment in rest.split(',') {
-                let name = python_name(segment.trim());
-                if !name.is_empty() {
-                    names.push(name.to_string());
-                }
-            }
-        }
-    }
-    names
-}
-
 /// The quoted spec after the first `from '`/`from "`/`require('`/`require("`
 /// found in `line`, if any.
 fn javascript_spec(line: &str) -> Option<&str> {
@@ -346,29 +307,6 @@ fn javascript_imports(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::architecture;
-
-    #[test]
-    fn python_imports_yield_the_dotted_path() {
-        let text = "import requests\nfrom flask import Flask\nfrom . import sibling\nimport os.path\nfrom ai_energy_manager.documents import domain\n";
-        assert_eq!(
-            imports("api/app.py", text),
-            vec![
-                "requests",
-                "flask",
-                "os.path",
-                "ai_energy_manager.documents"
-            ]
-        );
-    }
-
-    /// `import os, sys` used to extract `os,` — the comma glued onto the
-    /// name because the same single-name extraction ran over the whole
-    /// comma-joined rest of the line — matching no module and so silently
-    /// clearing the boundary check for both names on that line.
-    #[test]
-    fn a_multi_name_import_yields_every_name() {
-        assert_eq!(imports("app.py", "import os, sys\n"), vec!["os", "sys"]);
-    }
 
     #[test]
     fn javascript_imports_yield_the_full_spec_and_skip_relative() {

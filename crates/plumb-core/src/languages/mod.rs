@@ -4,6 +4,7 @@
 //! The language table: one file per language, one registration line here.
 //! Adding a language = implement `Language` in a new file, add it to `ALL`.
 
+mod python;
 mod rust;
 
 use crate::index::Symbol;
@@ -17,7 +18,7 @@ pub trait Language {
     fn symbols(&self, text: &str) -> Vec<Symbol>;
 }
 
-static ALL: [&(dyn Language + Sync); 1] = [&rust::Rust];
+static ALL: [&(dyn Language + Sync); 2] = [&rust::Rust, &python::Python];
 
 pub fn all() -> &'static [&'static (dyn Language + Sync)] {
     &ALL
