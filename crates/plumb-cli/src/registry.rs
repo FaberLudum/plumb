@@ -2029,4 +2029,127 @@ mod tests {
             Existence::Exists
         );
     }
+
+    // -- NuGet ----------------------------------------------------------
+    //
+    // `NuGetRegistry` mirrors `NpmRegistry`, which mirrors `PyPiRegistry`;
+    // the shared machinery is already pinned above. This is the task's own
+    // test list: the validity guard, case-insensitive cache keys, the
+    // lowercased lookup URL, the unreachable-network answer, the
+    // flat-container status mapping, and the `nuget:` cache key prefix.
+
+    /// An ID [`is_valid_nuget_id`] refuses must never reach the network or
+    /// the cache — the npm lesson: an illegal name interpolated into a
+    /// lookup URL can resolve to something else entirely and poison the
+    /// cache under a name nobody searched for. `offline: false` is
+    /// deliberate, as in npm's own twin test: if the charset guard did not
+    /// run first, `exists` would fall through to a real connection attempt,
+    /// which no test in this suite may make.
+    #[test]
+    fn an_illegal_nuget_id_is_missing_without_a_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NuGetRegistry::new(false, Some(cache_path.clone()));
+
+        for name in ["bad name", "x?y", ""] {
+            assert_eq!(registry.exists(name), Existence::Missing, "{name:?}");
+        }
+
+        assert!(
+            !cache_path.exists(),
+            "an illegal id should never create a cache file, let alone a request"
+        );
+    }
+
+    /// NuGet package IDs are case-insensitive, so two spellings of the same
+    /// ID must share one cache entry. Offline, so the only way this can
+    /// answer at all is from the cache.
+    #[test]
+    fn nuget_ids_are_case_insensitive_in_the_cache() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("nuget:newtonsoft.json", true, 0)]),
+        )
+        .expect("write cache");
+
+        let registry = NuGetRegistry::new(true, Some(cache_path));
+
+        assert_eq!(registry.exists("Newtonsoft.Json"), Existence::Exists);
+    }
+
+    /// Pure and network-free, as the plan requires: the flat-container index
+    /// is served at the lowercased path only, so the URL builder must
+    /// lowercase the id itself rather than relying on every caller to.
+    #[test]
+    fn the_lookup_url_lowercases_the_id() {
+        assert_eq!(
+            nuget_url("OpenAI"),
+            "https://api.nuget.org/v3-flat2/openai/index.json"
+        );
+    }
+
+    /// A transport failure is a fact about this run's network, not about the
+    /// package: `Unknown`, and never cached. See
+    /// [`PyPiRegistry::exists_via`] for the same property proven against
+    /// PyPI.
+    #[test]
+    fn an_unreachable_registry_is_unknown() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NuGetRegistry::new(false, Some(cache_path.clone()));
+
+        assert_eq!(
+            registry.exists_via("Newtonsoft.Json", |_| Outcome::Unreachable),
+            Existence::Unknown
+        );
+        assert!(
+            !cache_path.exists(),
+            "an unreachable registry cached something"
+        );
+    }
+
+    /// The flat-container contract: a 200 — [`classify`]'s
+    /// `Outcome::Answered(Existence::Exists)` — means the package exists, a
+    /// 404 — `Outcome::Answered(Existence::Missing)` — means it does not.
+    /// `classify` itself is shared with PyPI and npm and is pinned once,
+    /// against real status codes, in `only_a_404_reads_as_missing`; this
+    /// proves `NuGetRegistry` propagates what it is given rather than
+    /// reinterpreting it.
+    #[test]
+    fn a_404_is_missing_and_a_200_is_exists() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let registry = NuGetRegistry::new(false, Some(dir.path().join("registry.json")));
+
+        assert_eq!(
+            registry.exists_via("Missing.Package", |_| Outcome::Answered(
+                Existence::Missing
+            )),
+            Existence::Missing
+        );
+        assert_eq!(
+            registry.exists_via("Newtonsoft.Json", |_| Outcome::Answered(
+                Existence::Exists
+            )),
+            Existence::Exists
+        );
+    }
+
+    /// A definite answer is written under the `nuget:` prefix, lowercased —
+    /// see [`nuget_cache_key`].
+    #[test]
+    fn cache_keys_carry_the_nuget_prefix() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NuGetRegistry::new(true, Some(cache_path.clone()));
+
+        registry.record("Newtonsoft.Json", Existence::Exists);
+
+        let written = std::fs::read_to_string(&cache_path).expect("read cache");
+        assert!(
+            written.contains("\"nuget:newtonsoft.json\""),
+            "written: {written}"
+        );
+    }
 }
