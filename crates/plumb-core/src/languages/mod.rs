@@ -20,7 +20,12 @@ pub trait Language {
     fn symbols(&self, text: &str) -> Vec<Symbol>;
 }
 
-static ALL: [&(dyn Language + Sync); 3] = [&rust::Rust, &python::Python, &javascript::JavaScript];
+static ALL: [&(dyn Language + Sync); 4] = [
+    &rust::Rust,
+    &python::Python,
+    &javascript::JavaScript,
+    &csharp::CSharp,
+];
 
 pub fn all() -> &'static [&'static (dyn Language + Sync)] {
     &ALL

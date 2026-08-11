@@ -152,7 +152,14 @@ fn normalise(name: &str) -> String {
 /// leading-import segment match.
 ///
 /// An import splits on `::`, `.` and `/` into segments `I`; a module path
-/// splits on `/` into segments `M`, both normalised (`-` → `_`). A module
+/// splits on `/` **and `.`** into segments `M`, both normalised (`-` → `_`).
+/// A module path splits on the dot because a C#-style project puts a whole
+/// dotted namespace in one directory name — `## src/Ummarell.Api` heading
+/// files that say `using Ummarell.Api.Services;` — and an undivided segment
+/// `ummarell.api` can never equal the import's first segment `ummarell`, so
+/// the import would resolve to nothing and the boundary would be
+/// unenforceable. A module path without a dot in it splits exactly as
+/// before. A module
 /// matches with score `k` when its last `k` segments equal `I`'s first `k`
 /// segments; the import resolves to the module with the highest `k` over
 /// all declared modules. A score of 1 is exactly the old last-segment rule,
@@ -176,7 +183,7 @@ fn target_of<'a>(architecture: &'a Architecture, import: &str) -> Option<&'a Mod
     }
     let mut best: Option<(&Module, usize)> = None;
     for module in &architecture.modules {
-        let module_segments: Vec<String> = module.path.split('/').map(normalise).collect();
+        let module_segments: Vec<String> = module.path.split(['/', '.']).map(normalise).collect();
         let max_k = import_segments.len().min(module_segments.len());
         let score = (1..=max_k)
             .rev()
