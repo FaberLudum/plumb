@@ -877,17 +877,39 @@ fn nuget_url(name: &str) -> String {
 /// empty id collapses to `.../v3-flat2//index.json`, a different,
 /// well-formed request nobody asked for, not a lookup for "no package".
 ///
+/// The first and last character must also be ASCII alphanumeric. A charset
+/// check alone is not enough here: `.` is otherwise an ordinary character,
+/// so it admitted `.` and `..` whole — RFC 3986 dot-segments — and
+/// `nuget_url("..")` emitted `.../v3-flat2/../index.json`. The pinned http
+/// client does not normalise a dot-segment out of the path client-side, so
+/// that request reached the wire as written and server-side normalisation
+/// alone decided what answered, with the result cached under `nuget:..` as
+/// a Tier A verdict regardless of what it was. Anchoring both ends on
+/// alphanumeric kills `.` and `..` structurally — neither has an
+/// alphanumeric character at all — along with the wider family of
+/// leading/trailing `.` or `-`, which matches nuget.org's real id shape:
+/// every id it actually serves starts and ends alphanumeric.
+///
 /// This is the gate [`NuGetRegistry::exists`] checks before it does
 /// anything else, exactly as [`is_valid_npm_name`] gates
 /// [`NpmRegistry::exists`]: an illegal id interpolated into the lookup URL
 /// unescaped could resolve to something else entirely and poison the cache
 /// under a name nobody searched for — the same class of bug
-/// [`is_valid_npm_name`]'s own doc comment describes for npm.
+/// [`is_valid_npm_name`]'s own doc comment describes for npm, and the same
+/// class the dot-segment case above turned out to be one member of.
 fn is_valid_nuget_id(name: &str) -> bool {
-    !name.is_empty()
+    let charset_ok = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    let ends_alphanumeric = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+    charset_ok && ends_alphanumeric
 }
 
 /// Resolves package ids against nuget.org's flat-container index, with the
