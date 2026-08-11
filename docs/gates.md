@@ -97,8 +97,9 @@ Three warning gates run alongside the manifest check.
 **Boundary.** Imports are validated against the module boundaries declared
 in `.plumb/architecture.md`. Each changed file is attributed to a module by
 path, and its imports are extracted with a heuristic, line-based matcher
-covering the Rust, Python and JavaScript/TypeScript family of import
-syntaxes. An import reaching a module outside the file's declared
+covering five languages: Rust, Python, the JavaScript/TypeScript family,
+C# (`using` directives) and Dart (`package:` imports and exports). An
+import reaching a module outside the file's declared
 `May depend on:` list warns rather than blocks. The comparison is
 before-versus-after, the same shape as the manifest check's: **the gate
 reports only violations the change introduces.** A violation already
@@ -487,6 +488,114 @@ that nothing else is there.
   heading like `## crates/plumb-core` but never one shaped
   `## crates/plumb-core/src/manifest`, because no import segment will ever
   equal the literal `src`.
+- **C# and Dart are read by the same line-based heuristic as the other
+  three, and each has gaps the other languages do not.** Both extractors
+  decide visibility on something objective in their own language — C#'s
+  `public` keyword, Dart's leading `_` — so neither makes a style
+  judgement. What they miss:
+
+  **C#.** Imports are `using` directives: a plain `using X.Y.Z;`, a
+  `global using`, a `using static X.Y.Z;` (which keeps the type name, inert
+  because resolution matches leading segments) and the alias form
+  `using Db = X.Y.Z;`. The `using` *statement* — `using (var f = …)`,
+  `using var scope = …;`, `await using …` — is excluded by shape, not by a
+  list of exceptions.
+  - **A C# namespace maps to a directory path by convention, not by
+    contract**, and this is the gap worth knowing before trusting a clean
+    boundary run on a .NET repository. Resolution splits a declared module's
+    path on `.` as well as `/`, so a heading `## src/Ummarell.Api` matches
+    `using Ummarell.Api.Services;`. That works because most .NET projects
+    keep namespace and folder in step. A project where they diverge — a
+    `RootNamespace` set in the `.csproj`, a namespace flattened at the
+    assembly root, files moved without renaming their namespace — resolves
+    to no module at all, and its cross-boundary edges are **silently
+    missed**, no finding and no warning. Nothing here reads the `.csproj`,
+    so Plumb cannot tell the two cases apart.
+  - Splitting module paths on `.` is a repository-wide rule, not a C#-local
+    one. Any future heading carrying a dot (`## vendor/lib.v2`,
+    `## config/app.settings`) now resolves on its parts. No such heading
+    exists today.
+  - Only `public` **type** declarations are indexed — `class`, `interface`,
+    `struct`, `record`, `enum`, `delegate`. Methods, properties and fields
+    are deliberately not: a C# file's members outnumber its types several
+    times over and would bury the surface the index exists to show. The
+    cost is that a file whose whole contribution is methods on a `partial`
+    class indexes as nothing — but only when that part omits the
+    accessibility modifier. A part written `public partial class Foo`
+    still indexes as `class Foo`, so a type split across parts shows up
+    once per part that repeats `public`, and only the bare
+    `partial class Foo` parts disappear.
+  - An attribute on the same line as the declaration
+    (`[ApiController] public class HomeController`) yields nothing, because
+    the first token is neither `public` nor a known modifier. The common
+    style puts the attribute on its own line.
+
+  **Dart.** Only `package:` URIs become edges. `import 'dart:async';` is an
+  SDK builtin and is skipped, the `node:` precedent; `part` and `part of`
+  are never imports, since the two halves are one library.
+  - **Relative imports are invisible to the boundary gate, and that miss is
+    much wider in Dart than in the JavaScript rule it copies.** In Flutter,
+    `import 'chat_state.dart';` and `import '../core/result.dart';` are the
+    ordinary way to reach another file, and in many codebases they are the
+    majority of all imports — commonly *within* a feature, and often
+    between features too. Where the JS rule gives up on an occasional
+    relative specifier, the Dart one gives up on however much of a Flutter
+    project prefers relative style, which can be most of it. Only
+    `package:` edges are seen.
+  - **An intra-package `package:` import resolves to nothing either**, and
+    together with the point above that is the one worth stopping on. A
+    `package:` URI's first segment is the *pub package name*, and Dart
+    requires a package's library code to live under `lib/`, which no import
+    path ever spells. So `package:umarell/features/session/chat.dart`
+    yields the segments `umarell/features/session/chat`, and a module
+    declared at the path those files actually occupy —
+    `## lib/features/session` — ends in `session`, never in `umarell`.
+    Nothing matches, and the edge is dropped in silence. This is the same
+    shape as the Rust `src` note above, but it bites harder: in Rust it
+    costs sub-crate resolution, in Dart it costs *every* intra-package
+    edge. Only a **cross-package** `package:other_pkg/…` import resolves,
+    and only against a module whose path ends in that package's name
+    (`## packages/other_pkg`), which is a mono-repo layout, not the
+    single-package one most Flutter apps have.
+
+    The two misses compound, and the compound was measured rather than
+    assumed. In the Flutter application this language support was built
+    against, every one of the 232 internal imports is either relative (223)
+    or `package:` naming the app's own package (9). **Not one internal edge
+    is visible to the boundary gate.** It reports no findings, and that
+    result carries no information at all. Read a clean boundary run on a
+    single-package Flutter repository as "nothing was checked", not as
+    "nothing was wrong".
+  - **A `package:` URI containing `../` is not normalised.**
+    `package:app/features/../core/x.dart` is kept as the literal
+    `app/features/../core/x`, and `..` is not a segment any declared module
+    can match, so the import resolves to no module and the edge is dropped.
+    Legal Dart, uncommon, silently missed.
+  - **A directive split across lines is missed entirely**, the same
+    `text.lines()` trade the parenthesised Python import and the multi-line
+    Rust `use` group take. Extraction needs the `import`/`export` keyword
+    and the opening quote on one line, so a URI wrapped onto the next line
+    yields nothing at all — not a partial edge, no edge.
+  - Symbols are column-0 declarations only, which in Dart *is* the
+    top-level filter, as in Python. Two consequences: a top-level function
+    written without a return type (`main() { … }`, `myWidget() => …`) is
+    not indexed, because one token before a parameter list is
+    indistinguishable from a call; and top-level getters and setters
+    (`String get name => …`) are not indexed either, having no parameter
+    list for the function rule to find.
+  - **An unformatted column-0 initialiser can index as a function that is
+    not there.** `int counter=f(x);`, with no spaces around the `=`, leaves
+    two tokens before the parameter list — `int` and `counter=f` — which is
+    exactly the shape the function rule matches, so it is indexed as
+    `fn counter`. Written the way `dart format` writes it,
+    `int counter = f(x);` has three tokens and is rejected. The line
+    heuristic paying its price in the other direction for once: the rest of
+    these gaps drop real symbols, this one invents one.
+
+  One thing both changes do beyond their own languages: `.cs` and `.dart`
+  files under a declared module are now scannable, so a repository
+  containing them sees different `boundary` and `index-stale` results than
+  it did before, whether or not it asked for the new languages.
 - The index scanner's symbol extraction is line-based, the same shape of
   matcher as the boundary gate's imports. A macro-generated declaration is
   missed because it never exists as a literal source line, and a multi-line

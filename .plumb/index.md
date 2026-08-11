@@ -116,6 +116,12 @@ What this repository can already do, and where. Regenerate with
 - fn `has_scannable_extension`
 - fn `render`
 
+## crates/plumb-core/src/languages/csharp.rs
+- struct `CSharp`
+
+## crates/plumb-core/src/languages/dart.rs
+- struct `Dart`
+
 ## crates/plumb-core/src/languages/javascript.rs
 - struct `JavaScript`
 

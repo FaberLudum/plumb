@@ -8,6 +8,34 @@ here explicitly.
 
 ## [Unreleased]
 
+- **C# and Dart join the scanning surface.** `plumb index` and the
+  `boundary` gate now read `.cs` and `.dart` files alongside Rust, Python
+  and the JavaScript/TypeScript family — two more entries on the `Language`
+  table, no new dependency and no parser. C# imports are `using`
+  directives, including `global using`, `using static` and the alias form,
+  with the `using` *statement* excluded by shape; symbols are `public` type
+  declarations (`class`, `interface`, `struct`, `record`, `enum`,
+  `delegate`), members deliberately left out. Dart imports are `package:`
+  URIs on `import` and `export` (SDK `dart:`, relative specifiers and
+  `part` skipped); symbols are column-0 declarations, names beginning `_`
+  dropped as the language's own privacy rule. To let a dotted `using` reach
+  a directory-shaped module, boundary resolution now splits a declared
+  module's path on `.` as well as `/`, so `## src/Ummarell.Api` matches
+  `using Ummarell.Api.Services;` — a repository-wide change to how module
+  headings resolve, not a C#-local one. Both extractors stay line-based
+  heuristics: C# namespaces map to folders by convention rather than
+  contract, so a project whose namespaces diverge from its layout gets
+  silently missed edges. On the Dart side the boundary gate is weaker
+  still, and [docs/gates.md](docs/gates.md) now says how weak: relative
+  imports are invisible, and an intra-package `package:` import resolves to
+  nothing either, because its first segment is the pub package name and
+  Dart keeps library code under `lib/`, which no import path spells. Only
+  cross-package edges in a mono-repo layout resolve. Measured on the
+  Flutter application this was built against, all 232 internal imports fall
+  into one of those two holes, so the gate sees no edges whatsoever — a
+  clean boundary run on a single-package Flutter repository means nothing
+  was checked, not that nothing was wrong. Indexing is unaffected and works
+  on both languages. Tier B throughout; evidence: taxonomy §4.5, §11.
 - **pub.dev/Dart: the `package-exists` gate's fourth ecosystem.**
   `pubspec.yaml` is read for its `dependencies`, `dev_dependencies` and
   `dependency_overrides` tables; a nonexistent package blocks exactly like

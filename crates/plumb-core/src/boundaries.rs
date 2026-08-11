@@ -152,14 +152,24 @@ fn normalise(name: &str) -> String {
 /// leading-import segment match.
 ///
 /// An import splits on `::`, `.` and `/` into segments `I`; a module path
-/// splits on `/` into segments `M`, both normalised (`-` → `_`). A module
+/// splits on `/` **and `.`** into segments `M`, both normalised (`-` → `_`).
+/// A module path splits on the dot because a C#-style project puts a whole
+/// dotted namespace in one directory name — `## src/Ummarell.Api` heading
+/// files that say `using Ummarell.Api.Services;` — and an undivided segment
+/// `ummarell.api` can never equal the import's first segment `ummarell`, so
+/// the import would resolve to nothing and the boundary would be
+/// unenforceable. A module path without a dot in it splits exactly as
+/// before. A module
 /// matches with score `k` when its last `k` segments equal `I`'s first `k`
 /// segments; the import resolves to the module with the highest `k` over
-/// all declared modules. A score of 1 is exactly the old last-segment rule,
-/// so every previously-resolving import still resolves the same way — a
-/// sub-package heading simply wins now by scoring higher when the import
-/// names it more specifically (`pkg.facts` scores 2 against `src/pkg/facts`
-/// and only 1 against `src/pkg`, so the deeper module wins).
+/// all declared modules. A sub-package heading wins by scoring higher when
+/// the import names it more specifically (`pkg.facts` scores 2 against
+/// `src/pkg/facts` and only 1 against `src/pkg`, so the deeper module wins).
+/// Splitting module paths on the dot is not neutral, though: a dotted
+/// heading that previously resolved to nothing now resolves on its parts,
+/// and it can either tie an undotted module at score 1 (first-declared
+/// wins) or outscore it outright — so in a repository carrying dotted
+/// headings an import can land on a different module than it did before.
 ///
 /// Ties go to the first-declared module: `Iterator::max_by_key` keeps the
 /// *last* maximum on a tie, which is the wrong direction here, so this
@@ -176,7 +186,7 @@ fn target_of<'a>(architecture: &'a Architecture, import: &str) -> Option<&'a Mod
     }
     let mut best: Option<(&Module, usize)> = None;
     for module in &architecture.modules {
-        let module_segments: Vec<String> = module.path.split('/').map(normalise).collect();
+        let module_segments: Vec<String> = module.path.split(['/', '.']).map(normalise).collect();
         let max_k = import_segments.len().min(module_segments.len());
         let score = (1..=max_k)
             .rev()
@@ -504,6 +514,61 @@ mod tests {
             "from ai_energy_manager.identity.infrastructure import token\n",
         );
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// A C# namespace is dotted where the directory holding it is one path
+    /// segment: `## src/Ummarell.Api` heading a project whose files say
+    /// `using Ummarell.Api.Services;`. Splitting module paths on `/` alone
+    /// yields the single segment `ummarell.api`, which can never equal the
+    /// import's first segment `ummarell`, so the import resolved to nothing
+    /// and the boundary was unenforceable for every dotted-project layout.
+    #[test]
+    fn a_dotted_module_heading_matches_a_csharp_namespace_import() {
+        let architecture = architecture::parse(
+            "## src/Ummarell.Api\n\nMay depend on: (none).\n\n\
+             ## src/Ummarell.Web\n\nMay depend on: (none).\n",
+        );
+        let found = violations(
+            &architecture,
+            "src/Ummarell.Web/Home.cs",
+            "using Ummarell.Api.Services;\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "src/Ummarell.Api");
+        assert_eq!(found[0].import, "Ummarell.Api.Services");
+    }
+
+    /// The dotted heading must still win against the shallower module it
+    /// lives under: `Ummarell.Api` scores 2 against `src/Ummarell.Api` and
+    /// nothing at all against `src`, so the deeper module is the target even
+    /// though `src` is declared first.
+    #[test]
+    fn a_dotted_module_heading_still_matches_by_plain_path() {
+        let architecture = architecture::parse(
+            "## src\n\nMay depend on: (none).\n\n\
+             ## src/Ummarell.Api\n\nMay depend on: (none).\n\n\
+             ## app\n\nMay depend on: (none).\n",
+        );
+        let found = violations(&architecture, "app/Program.cs", "using Ummarell.Api;\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "src/Ummarell.Api");
+    }
+
+    /// The dot-split must not disturb a module path that has no dot in it.
+    /// Fixture and expectations copied verbatim from
+    /// `a_subpackage_import_resolves_to_the_deepest_matching_module`: if the
+    /// change ever regresses undotted resolution, this fails alongside it
+    /// rather than leaving the regression class untested here.
+    #[test]
+    fn existing_resolution_is_unchanged_for_undotted_modules() {
+        let found = violations(
+            &monolith(),
+            "src/pkg/documents/store.py",
+            "from pkg.facts import totals\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "src/pkg/facts");
+        assert_eq!(found[0].import, "pkg.facts");
     }
 
     /// An entry naming one sub-module must not permit an unrelated sibling
