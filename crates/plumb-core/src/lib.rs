@@ -9,6 +9,7 @@ pub mod architecture;
 pub mod boundaries;
 pub mod deps;
 pub mod diff;
+pub mod ecosystems;
 pub mod finding;
 pub mod index;
 pub mod languages;

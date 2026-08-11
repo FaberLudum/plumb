@@ -76,6 +76,20 @@ What this repository can already do, and where. Regenerate with
 - struct `ChangedFile`
 - fn `parse_unified_diff`
 
+## crates/plumb-core/src/ecosystems/mod.rs
+- trait `EcosystemSpec`
+- fn `specs`
+- fn `for_path`
+
+## crates/plumb-core/src/ecosystems/npm.rs
+- fn `parse_package_json`
+- struct `Npm`
+
+## crates/plumb-core/src/ecosystems/pypi.rs
+- fn `parse_requirements`
+- fn `parse_pyproject`
+- struct `PyPi`
+
 ## crates/plumb-core/src/finding.rs
 - enum `Tier`
 - struct `Finding`
@@ -122,6 +136,7 @@ What this repository can already do, and where. Regenerate with
 - mod `boundaries`
 - mod `deps`
 - mod `diff`
+- mod `ecosystems`
 - mod `finding`
 - mod `index`
 - mod `languages`
@@ -135,9 +150,6 @@ What this repository can already do, and where. Regenerate with
 - struct `Manifest`
 - enum `Gap`
 - fn `describe`
-- fn `parse_requirements`
-- fn `parse_pyproject`
-- fn `parse_package_json`
 - fn `parse`
 
 ## crates/plumb-core/src/metrics.rs
