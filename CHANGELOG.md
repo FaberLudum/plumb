@@ -6,7 +6,7 @@ Notable changes, most recent first. Format follows
 contract can change in minor versions, and each such change is called out
 here explicitly.
 
-## [Unreleased]
+## [0.2.0] — 2026-08-12
 
 - **Dart boundary resolution is live.** The `boundary` gate resolved no Dart
   import at all when the language first landed, and the entry below says so;
