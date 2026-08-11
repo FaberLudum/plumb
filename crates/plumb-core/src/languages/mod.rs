@@ -4,6 +4,7 @@
 //! The language table: one file per language, one registration line here.
 //! Adding a language = implement `Language` in a new file, add it to `ALL`.
 
+mod javascript;
 mod python;
 mod rust;
 
@@ -18,7 +19,7 @@ pub trait Language {
     fn symbols(&self, text: &str) -> Vec<Symbol>;
 }
 
-static ALL: [&(dyn Language + Sync); 2] = [&rust::Rust, &python::Python];
+static ALL: [&(dyn Language + Sync); 3] = [&rust::Rust, &python::Python, &javascript::JavaScript];
 
 pub fn all() -> &'static [&'static (dyn Language + Sync)] {
     &ALL

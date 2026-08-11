@@ -18,15 +18,9 @@ pub fn symbols(path: &str, text: &str) -> Vec<Symbol> {
     // declaration opens the file — the same idiom `boundaries.rs`'s include
     // matcher and `manifest.rs` already strip this same character for.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    match extension(path).as_str() {
-        "rs" => crate::languages::for_extension("rs")
-            .map(|language| language.symbols(text))
-            .unwrap_or_default(),
-        "py" => crate::languages::for_extension("py")
-            .map(|language| language.symbols(text))
-            .unwrap_or_default(),
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => javascript_symbols(text),
-        _ => Vec::new(),
+    match crate::languages::for_extension(&extension(path)) {
+        Some(language) => language.symbols(text),
+        None => Vec::new(),
     }
 }
 
@@ -42,25 +36,7 @@ pub fn symbols(path: &str, text: &str) -> Vec<Symbol> {
 /// binary in the repository is never read into memory for a scan whose
 /// answer was always going to be "no symbols".
 pub fn has_scannable_extension(path: &str) -> bool {
-    is_known_extension(&extension(path))
-}
-
-/// Whether `extension` (already lowercased by [`extension`]) is one
-/// [`symbols`] does anything with.
-///
-/// This list must be kept identical to the extensions matched in
-/// [`symbols`]'s dispatch. The two are not merged into one because
-/// [`symbols`] needs `text` to decide *which* extractor to run, while
-/// [`has_scannable_extension`] must answer with no `text` at all — but a
-/// language added to one list and not the other silently reopens the gap
-/// [`has_scannable_extension`] exists to close:
-/// `every_known_extension_is_dispatched_by_symbols` pins that they stay in
-/// step.
-fn is_known_extension(extension: &str) -> bool {
-    matches!(
-        extension,
-        "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs"
-    )
+    crate::languages::for_extension(&extension(path)).is_some()
 }
 
 /// The full index document from (path, symbols) pairs. Sorts by path;
@@ -98,132 +74,6 @@ pub fn render(entries: &[(String, Vec<Symbol>)]) -> String {
     doc
 }
 
-/// Extract public symbols from JavaScript/TypeScript source code.
-fn javascript_symbols(text: &str) -> Vec<Symbol> {
-    let mut found = Vec::new();
-    for line in text.lines() {
-        if let Some(symbol) = javascript_symbol(line) {
-            found.push(symbol);
-        }
-    }
-    found
-}
-
-/// Match a single line for a JavaScript/TypeScript export.
-fn javascript_symbol(line: &str) -> Option<Symbol> {
-    let trimmed = line.trim_start();
-
-    // export function NAME, export async function NAME
-    if let Some(rest) = trimmed.strip_prefix("export async function ") {
-        let name = identifier(rest);
-        if !name.is_empty() {
-            return Some(Symbol {
-                kind: "function".to_string(),
-                name,
-            });
-        }
-    }
-
-    if let Some(rest) = trimmed.strip_prefix("export function ") {
-        let name = identifier(rest);
-        if !name.is_empty() {
-            return Some(Symbol {
-                kind: "function".to_string(),
-                name,
-            });
-        }
-    }
-
-    // export default function NAME, export default async function NAME
-    if let Some(rest) = trimmed.strip_prefix("export default async function ") {
-        let name = identifier(rest);
-        if !name.is_empty() {
-            return Some(Symbol {
-                kind: "function".to_string(),
-                name,
-            });
-        }
-    }
-
-    if let Some(rest) = trimmed.strip_prefix("export default function ") {
-        let name = identifier(rest);
-        if !name.is_empty() {
-            return Some(Symbol {
-                kind: "function".to_string(),
-                name,
-            });
-        }
-    }
-
-    // export class NAME
-    if let Some(rest) = trimmed.strip_prefix("export class ") {
-        let name = identifier(rest);
-        if !name.is_empty() {
-            return Some(Symbol {
-                kind: "class".to_string(),
-                name,
-            });
-        }
-    }
-
-    // export const NAME
-    if let Some(rest) = trimmed.strip_prefix("export const ") {
-        let name = identifier(rest);
-        if !name.is_empty() {
-            return Some(Symbol {
-                kind: "const".to_string(),
-                name,
-            });
-        }
-    }
-
-    // export let NAME
-    if let Some(rest) = trimmed.strip_prefix("export let ") {
-        let name = identifier(rest);
-        if !name.is_empty() {
-            return Some(Symbol {
-                kind: "let".to_string(),
-                name,
-            });
-        }
-    }
-
-    // export interface NAME
-    if let Some(rest) = trimmed.strip_prefix("export interface ") {
-        let name = identifier(rest);
-        if !name.is_empty() {
-            return Some(Symbol {
-                kind: "interface".to_string(),
-                name,
-            });
-        }
-    }
-
-    // export type NAME
-    if let Some(rest) = trimmed.strip_prefix("export type ") {
-        let name = identifier(rest);
-        if !name.is_empty() {
-            return Some(Symbol {
-                kind: "type".to_string(),
-                name,
-            });
-        }
-    }
-
-    // export enum NAME
-    if let Some(rest) = trimmed.strip_prefix("export enum ") {
-        let name = identifier(rest);
-        if !name.is_empty() {
-            return Some(Symbol {
-                kind: "enum".to_string(),
-                name,
-            });
-        }
-    }
-
-    None
-}
-
 /// Extract an identifier from the start of a string.
 pub(crate) fn identifier(text: &str) -> String {
     text.chars()
@@ -246,21 +96,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn javascript_exported_declarations_are_extracted() {
-        let text = "\
-export function start() {}\n\
-export async function stop() {}\n\
-export const LIMIT = 3;\n\
-export default function main() {}\n\
-export default async function mainAsync() {}\n\
-export { rename } from './other';\n\
-const internal = 1;\n";
-        let found = symbols("web/index.ts", text);
-        let names: Vec<&str> = found.iter().map(|symbol| symbol.name.as_str()).collect();
-        assert_eq!(names, vec!["start", "stop", "LIMIT", "main", "mainAsync"]);
-    }
-
-    #[test]
     fn an_unknown_extension_yields_no_symbols() {
         assert!(symbols("README.md", "pub fn x() {}\n").is_empty());
     }
@@ -275,36 +110,6 @@ const internal = 1;\n";
         assert!(!has_scannable_extension("Cargo.lock"));
         assert!(!has_scannable_extension("assets/logo.png"));
         assert!(!has_scannable_extension("tools/README"));
-    }
-
-    /// `has_scannable_extension`'s extension list and `symbols`'s dispatch
-    /// must name the same languages, the same shape as
-    /// `boundaries::every_known_extension_is_dispatched_by_imports`: a
-    /// language added to one list and not the other silently reopens the gap
-    /// `has_scannable_extension` exists to close.
-    #[test]
-    fn every_known_extension_is_dispatched_by_symbols() {
-        let cases: &[(&str, &str)] = &[
-            ("rs", "pub fn x() {}\n"),
-            ("py", "def x():\n"),
-            ("ts", "export function x() {}\n"),
-            ("tsx", "export function x() {}\n"),
-            ("js", "export function x() {}\n"),
-            ("jsx", "export function x() {}\n"),
-            ("mjs", "export function x() {}\n"),
-            ("cjs", "export function x() {}\n"),
-        ];
-        for (ext, text) in cases {
-            let path = format!("file.{ext}");
-            assert!(
-                has_scannable_extension(&path),
-                "{ext} is dispatched by symbols but not recognised by has_scannable_extension"
-            );
-            assert!(
-                !symbols(&path, text).is_empty(),
-                "{ext} is recognised by has_scannable_extension but symbols() extracted nothing for it"
-            );
-        }
     }
 
     /// A UTF-8 BOM (U+FEFF) on the first line is not `char::is_whitespace`,
