@@ -59,8 +59,8 @@ pub(crate) fn extension_of(path: &str) -> String {
 
 /// Extract an identifier from the start of a string.
 ///
-/// Shared across the language extractors that need it (`rust.rs`,
-/// `javascript.rs`, reached as `super::identifier`); private items of a
+/// Shared across the language extractors that need it, reached as
+/// `super::identifier`; private items of a
 /// module are visible to its descendants, so a plain `fn` here is already
 /// visible to every submodule without widening it further.
 fn identifier(text: &str) -> String {

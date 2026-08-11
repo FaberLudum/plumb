@@ -520,7 +520,11 @@ that nothing else is there.
     are deliberately not: a C# file's members outnumber its types several
     times over and would bury the surface the index exists to show. The
     cost is that a file whose whole contribution is methods on a `partial`
-    class indexes as nothing.
+    class indexes as nothing — but only when that part omits the
+    accessibility modifier. A part written `public partial class Foo`
+    still indexes as `class Foo`, so a type split across parts shows up
+    once per part that repeats `public`, and only the bare
+    `partial class Foo` parts disappear.
   - An attribute on the same line as the declaration
     (`[ApiController] public class HomeController`) yields nothing, because
     the first token is neither `public` nor a known modifier. The common
@@ -579,6 +583,14 @@ that nothing else is there.
     indistinguishable from a call; and top-level getters and setters
     (`String get name => …`) are not indexed either, having no parameter
     list for the function rule to find.
+  - **An unformatted column-0 initialiser can index as a function that is
+    not there.** `int counter=f(x);`, with no spaces around the `=`, leaves
+    two tokens before the parameter list — `int` and `counter=f` — which is
+    exactly the shape the function rule matches, so it is indexed as
+    `fn counter`. Written the way `dart format` writes it,
+    `int counter = f(x);` has three tokens and is rejected. The line
+    heuristic paying its price in the other direction for once: the rest of
+    these gaps drop real symbols, this one invents one.
 
   One thing both changes do beyond their own languages: `.cs` and `.dart`
   files under a declared module are now scannable, so a repository

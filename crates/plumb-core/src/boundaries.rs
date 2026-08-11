@@ -162,11 +162,14 @@ fn normalise(name: &str) -> String {
 /// before. A module
 /// matches with score `k` when its last `k` segments equal `I`'s first `k`
 /// segments; the import resolves to the module with the highest `k` over
-/// all declared modules. A score of 1 is exactly the old last-segment rule,
-/// so every previously-resolving import still resolves the same way — a
-/// sub-package heading simply wins now by scoring higher when the import
-/// names it more specifically (`pkg.facts` scores 2 against `src/pkg/facts`
-/// and only 1 against `src/pkg`, so the deeper module wins).
+/// all declared modules. A sub-package heading wins by scoring higher when
+/// the import names it more specifically (`pkg.facts` scores 2 against
+/// `src/pkg/facts` and only 1 against `src/pkg`, so the deeper module wins).
+/// Splitting module paths on the dot is not neutral, though: a dotted
+/// heading that previously resolved to nothing now resolves on its parts,
+/// and it can either tie an undotted module at score 1 (first-declared
+/// wins) or outscore it outright — so in a repository carrying dotted
+/// headings an import can land on a different module than it did before.
 ///
 /// Ties go to the first-declared module: `Iterator::max_by_key` keeps the
 /// *last* maximum on a tie, which is the wrong direction here, so this
