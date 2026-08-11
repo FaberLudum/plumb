@@ -637,6 +637,136 @@ fn a_change_touching_both_pypi_and_npm_manifests_reports_both() {
         );
 }
 
+/// The NuGet mirror of the two PyPI/npm existence tests above: a change
+/// adding a nonexistent package id to a `.csproj`'s `PackageReference` must
+/// block, and the message must name NuGet rather than PyPI or npm. This is
+/// the first end-to-end proof that `check --diff` reaches `NuGetRegistry`
+/// through the router at all, rather than only the unit-level routing
+/// pinned in `registry.rs` and `check.rs`.
+///
+/// The cache is seeded under the `nuget:`-prefixed, lowercased key
+/// `nuget_cache_key` builds (see `registry.rs`) — NuGet ids are
+/// case-insensitive, so the key is lowercased regardless of how the id is
+/// spelled in the cache and in the manifest. This id is already lowercase,
+/// so the lowercasing is not exercised here; the driving repo's real id
+/// carries mixed case, exercised in the live smoke test in this task's
+/// report instead.
+///
+/// `Api.csproj` is new here, staged for the same reason `package.json` is
+/// in the npm tests: `git diff --name-only HEAD` does not report an
+/// untracked file.
+#[test]
+fn check_exits_one_when_an_added_nuget_dependency_does_not_exist() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "Api.csproj"),
+        r#"<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>
+            <PackageReference Include="surely-not-a-real-package-xyz" Version="1.0.0" />
+        </ItemGroup></Project>"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(
+        dir.path(),
+        &cache_entry("nuget:surely-not-a-real-package-xyz", false, 0),
+    );
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(1)
+        .stdout(
+            predicates::str::contains("surely-not-a-real-package-xyz")
+                .and(predicates::str::contains("Api.csproj"))
+                .and(predicates::str::contains("NuGet"))
+                .and(predicates::str::contains("taxonomy §4.1")),
+        );
+}
+
+/// The other half: an existing id, seeded `exists: true` under the same
+/// `nuget:` prefix, must not block.
+///
+/// Staged for the same reason as the test above.
+#[test]
+fn check_exits_zero_when_an_added_nuget_dependency_exists() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "Api.csproj"),
+        r#"<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>
+            <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+        </ItemGroup></Project>"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(dir.path(), &cache_entry("nuget:newtonsoft.json", true, 0));
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no findings"));
+}
+
+/// Central Package Management's file behaves identically to a `.csproj`: a
+/// `PackageVersion` element's `Include` is read the same way a
+/// `PackageReference`'s is, through the same `parse_project` reader — see
+/// `ecosystems::nuget`. This is the end-to-end proof that `Directory.Packages.props`
+/// reaches the gate at all, not only `parse_project`'s own unit tests.
+#[test]
+fn a_directory_packages_props_addition_is_checked_the_same_as_a_csproj() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "Directory.Packages.props"),
+        r#"<Project><ItemGroup>
+            <PackageVersion Include="surely-not-a-real-package-xyz" Version="1.0.0" />
+        </ItemGroup></Project>"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(
+        dir.path(),
+        &cache_entry("nuget:surely-not-a-real-package-xyz", false, 0),
+    );
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(1)
+        .stdout(
+            predicates::str::contains("surely-not-a-real-package-xyz")
+                .and(predicates::str::contains("Directory.Packages.props"))
+                .and(predicates::str::contains("NuGet")),
+        );
+}
+
+/// `packages.config` is recognised by filename and deliberately never
+/// parsed — see `ecosystems::nuget`'s doc comment — so a change that adds
+/// one must warn rather than block, and must never look anything up: the
+/// gap fires regardless of what the file actually contains, even a
+/// well-formed declaration that looks exactly like a package reference.
+#[test]
+fn a_packages_config_in_the_diff_warns_and_does_not_block() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "packages.config"),
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<packages>
+  <package id="Newtonsoft.Json" version="13.0.1" targetFramework="net472" />
+</packages>"#,
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(2)
+        .stdout(
+            predicates::str::contains("manifest-understood")
+                .and(predicates::str::contains("packages.config")),
+        );
+}
+
 /// The whole binary, from a working diff carrying an undeclared cross-module
 /// import to exit code 2. `--offline` is exercised for the same reason as the
 /// package-existence test above: this rule never touches a registry, so the
