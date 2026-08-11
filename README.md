@@ -81,7 +81,7 @@ echo 'plumb check --diff' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-com
 
 | Finding | Tier | What it means |
 |---|---|---|
-| `package-exists` | A, blocks | A package the change adds doesn't exist on its registry (PyPI or npm). This is how hallucinated dependencies get in. |
+| `package-exists` | A, blocks | A package the change adds doesn't exist on its registry (PyPI, npm, NuGet or pub.dev). This is how hallucinated dependencies get in. |
 | `manifest-understood` | B, warns | Part of a manifest was in a shape Plumb couldn't read. Said out loud so a run that established nothing isn't mistaken for a clean one. |
 | `boundary` | B, warns | An import crosses a module boundary that `.plumb/architecture.md` doesn't allow. Only violations the change introduces are reported; legacy ones stay quiet. |
 | `adapter-drift` | B, warns | A generated instruction file no longer matches `.plumb/`. One command fixes it. |

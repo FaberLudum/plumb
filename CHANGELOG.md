@@ -8,6 +8,25 @@ here explicitly.
 
 ## [Unreleased]
 
+- **pub.dev/Dart: the `package-exists` gate's fourth ecosystem.**
+  `pubspec.yaml` is read for its `dependencies`, `dev_dependencies` and
+  `dependency_overrides` tables; a nonexistent package blocks exactly like
+  a PyPI, npm or NuGet one, against pub.dev's package API, cached outside
+  the repository under the same 30-day/1-hour split. Names are matched
+  case-sensitively — pub.dev resolves `Autolinker` and `autolinker` as
+  different packages — so unlike the NuGet cache key, the pub.dev one is
+  not lowercased. Only registry-hosted entries are looked up: `sdk:`,
+  `git:` and `path:` dependencies are dropped before any lookup, so
+  `flutter` and `flutter_test` produce nothing at all rather than a
+  forgiven finding. A `hosted:` naming a private registry is a
+  `manifest-understood` gap, not a lookup; a `hosted:` naming pub.dev
+  itself (or the retired `pub.dartlang.org`) is an ordinary lookup.
+  Version constraints are unchecked (existence only); `pubspec.lock`,
+  `pubspec_overrides.yaml` and workspace `resolution:` are unread.
+  Evidence: taxonomy §4.1, with the same honesty note the NuGet entry
+  carries — Spracklen and Churilov measured Python and JavaScript
+  hallucination rates, not Dart, so this extension rests on the defect
+  class and objective detection alone.
 - **NuGet: the `package-exists` gate's third ecosystem.** `.csproj`,
   `.fsproj`, `.vbproj` and `Directory.Packages.props` are read for
   `PackageReference`, `PackageVersion` and `GlobalPackageReference`
