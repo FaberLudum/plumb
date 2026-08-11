@@ -223,11 +223,12 @@ pub enum Existence {
 /// Object safe on purpose: `check.rs` holds `&dyn Registry` for the whole run
 /// so tests can inject a stub instead of reaching the network.
 ///
-/// Only [`RegistryRouter`] implements this trait. [`PyPiRegistry`] and
-/// [`NpmRegistry`] each expose an ecosystem-less inherent `exists(name)`
-/// instead: each already knows which registry it asks, so the parameter
-/// would be dead weight on both of them. The router is the one thing that
-/// needs it, to decide which of the two to ask — see its doc comment.
+/// Only [`RegistryRouter`] implements this trait. Every concrete registry
+/// exposes an ecosystem-less inherent `exists(name)` instead: each already
+/// knows which registry it asks, so the parameter would be dead weight on
+/// all of them. The router is the one thing that needs it, to decide which
+/// registry to ask — see its doc comment. [`Ecosystem`] names the full set,
+/// so this comment does not have to be revisited when the set grows.
 pub trait Registry {
     fn exists(&self, name: &str, ecosystem: Ecosystem) -> Existence;
 }
@@ -1338,7 +1339,7 @@ impl PubRegistry {
 /// One [`PyPiRegistry`], one [`NpmRegistry`], one [`NuGetRegistry`] and one
 /// [`PubRegistry`], all
 /// constructed against the same `cache_path` — see the cache key prefix
-/// functions for how the three share one file without colliding. `check.rs`
+/// functions for how the four share one file without colliding. `check.rs`
 /// holds this behind `&dyn Registry` for the whole run, exactly as it held a
 /// bare `PyPiRegistry` before npm existed: one router, not one per manifest,
 /// because the cache and the unreachable-network latch inside each concrete

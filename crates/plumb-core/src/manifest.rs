@@ -171,6 +171,10 @@ pub enum Gap {
     /// why nothing came of it. Without this the reader's `as_array()` and
     /// `as_table()` are silent filters, and a file reports as fully understood
     /// because of a typo.
+    ///
+    /// The path is dotted TOML for `pyproject.toml`; `pubspec.yaml` reuses
+    /// the variant with a dotted `{section}.{name}` YAML path, which reads
+    /// the same way and locates the declaration just as precisely.
     Malformed(String),
     /// Dependency declarations under `[tool]` that this module does not read,
     /// named by their dotted TOML paths, sorted and never empty.
