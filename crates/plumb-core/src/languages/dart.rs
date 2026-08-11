@@ -202,8 +202,14 @@ mod tests {
     use crate::boundaries::imports;
     use crate::index::symbols;
 
+    /// A `package:` URI's first segment is the package's own name, not a
+    /// directory anyone has on disk: `package:umarell/features/chat/x.dart`
+    /// is the file `lib/features/chat/x.dart` of the package `umarell`.
+    /// Leaving `umarell` on the front hands the resolver a segment no
+    /// declared module heading can ever match, which is what made the Dart
+    /// boundary gate inert.
     #[test]
-    fn package_imports_yield_the_stripped_path() {
+    fn package_imports_drop_the_package_name_segment() {
         let text = "import 'package:umarell/features/chat/chat_service.dart';\n\
                     export 'package:umarell/core/result.dart';\n\
                     import \"package:flutter/material.dart\";\n\
@@ -213,28 +219,54 @@ mod tests {
         assert_eq!(
             imports("lib/features/chat/chat_view.dart", text),
             vec![
-                "umarell/features/chat/chat_service",
-                "umarell/core/result",
-                "flutter/material",
-                "provider/provider",
-                "umarell/models/user",
-                "umarell/models/role",
+                "features/chat/chat_service",
+                "core/result",
+                "material",
+                "provider",
+                "models/user",
+                "models/role",
             ]
         );
     }
 
-    /// A `dart:` spec names an SDK builtin, the `node:` precedent, and a
-    /// relative spec names a file rather than a package, the JS relative
-    /// precedent. Neither can resolve to a declared module, and both would
-    /// hand the resolver leading segments (`dart`, `..`, a bare file stem)
-    /// that can collide with a module whose leaf happens to match.
+    /// A relative spec names a file relative to the importing file's own
+    /// directory, so the same line in two files means two different targets
+    /// and the importer's path is the only thing that can tell them apart.
+    /// Normalisation is lexical: no filesystem is consulted, because the
+    /// text being scanned may come from `git show` rather than a worktree.
     #[test]
-    fn sdk_and_relative_imports_are_skipped() {
+    fn relative_imports_resolve_against_the_importer() {
+        let text = "import 'chat_state.dart';\n\
+                    import './widgets/bubble.dart';\n\
+                    import '../../shared/models/m.dart';\n\
+                    import '../profile/profile_view.dart' as profile;\n";
+        assert_eq!(
+            imports("lib/features/chat/a.dart", text),
+            vec![
+                "lib/features/chat/chat_state",
+                "lib/features/chat/widgets/bubble",
+                "lib/shared/models/m",
+                "lib/features/profile/profile_view",
+            ]
+        );
+    }
+
+    /// A `..` chain that climbs past the repository root cannot name a file
+    /// this repository contains, so there is nothing to resolve and nothing
+    /// to report — skipped, as an unresolvable spec was before.
+    #[test]
+    fn a_relative_import_escaping_the_root_is_skipped() {
+        let found = imports("lib/a.dart", "import '../../../x.dart';\n");
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// A `dart:` spec names an SDK builtin, the `node:` precedent. It names
+    /// no file in the repository and can resolve to no declared module.
+    #[test]
+    fn sdk_imports_are_still_skipped() {
         let text = "import 'dart:async';\n\
                     import 'dart:io' as io;\n\
-                    import 'chat_state.dart';\n\
-                    import '../core/result.dart';\n\
-                    import './widgets/bubble.dart';\n";
+                    import 'dart:convert' show jsonDecode;\n";
         let found = imports("lib/features/chat/chat_view.dart", text);
         assert!(found.is_empty(), "{found:?}");
     }
