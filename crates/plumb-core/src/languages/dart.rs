@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Plumb Authors
 
-//! Dart: `package:` imports and exports, column-0 declarations as symbols.
+//! Dart: `package:` and relative imports and exports, column-0
+//! declarations as symbols.
 //!
 //! Members are deliberately not extracted, the same altitude Python's and
 //! C#'s extractors work at: a Dart file's methods, fields and `build`
@@ -53,28 +54,83 @@ fn dart_spec(line: &str) -> Option<&str> {
     quoted(rest)
 }
 
-/// The module path a `package:` URI names, `package:` and the `.dart`
-/// suffix removed: `package:umarell/features/chat/chat_service.dart` →
-/// `umarell/features/chat/chat_service`.
+/// The repository-relative path a `package:` URI names, without the `.dart`
+/// suffix: `package:umarell/features/chat/chat_service.dart` →
+/// `features/chat/chat_service`.
 ///
-/// Every other URI scheme is skipped, which covers two cases the other
-/// extractors already skip for the same reason. `dart:async` names an SDK
-/// builtin, the JS `node:` precedent. `'chat_state.dart'` and `'../x.dart'`
-/// are relative, the JS relative-spec precedent: they name a file, not a
-/// package, and left unskipped they would hand the resolver a leading
-/// segment (`chat_state`, `..`) that can collide with a declared module
-/// whose leaf happens to match. The trade is the same one documented there
-/// — a relative import inside a package is invisible to the boundary gate.
-fn dart_segment(spec: &str) -> Option<String> {
-    let path = spec.strip_prefix("package:")?;
-    let path = path.strip_suffix(".dart").unwrap_or(path);
-    (!path.is_empty()).then(|| path.to_string())
+/// The first segment is dropped because it is the package's own name, not a
+/// directory: a `package:` URI addresses a file under the package's `lib/`,
+/// and `umarell/` exists in no checkout. Left on the front it is a segment
+/// no declared module heading can match, which is exactly what kept the
+/// Dart boundary gate inert.
+///
+/// The trade is a shallow dependency: `package:flutter/material.dart`
+/// becomes the bare `material`, so a repository that also declares a module
+/// whose last segment is `material` will see the Flutter import resolve to
+/// it. That is the same leaf-collision risk every language's resolution
+/// already carries, and the alternative — keeping a segment that matches
+/// nothing — makes the gate report nothing at all.
+fn package_target(uri: &str) -> Option<String> {
+    let path = uri.strip_suffix(".dart").unwrap_or(uri);
+    let (_package, inside) = path.split_once('/')?;
+    (!inside.is_empty()).then(|| inside.to_string())
 }
 
-fn dart_imports(text: &str) -> Vec<String> {
+/// The repository-relative path a relative spec names, resolved against the
+/// importing file's directory and without the `.dart` suffix:
+/// `'../../shared/models/m.dart'` from `lib/features/chat/a.dart` →
+/// `lib/shared/models/m`.
+///
+/// Normalisation is lexical — `.` dropped, `..` popping one segment, no
+/// filesystem touched. `plumb-core` may not touch the filesystem at all, and
+/// the text being scanned often comes from `git show` rather than a
+/// worktree, so there is no path on disk to canonicalise against even where
+/// it would be allowed. A `..` that climbs past the repository root names
+/// nothing this repository contains, so it yields `None` and the spec is
+/// skipped, as an unresolvable spec was before.
+fn relative_target(importer: &str, spec: &str) -> Option<String> {
+    let spec = spec.strip_suffix(".dart").unwrap_or(spec);
+    let directory = importer.rsplit_once('/').map_or("", |(head, _)| head);
+    let mut segments: Vec<&str> = directory.split('/').filter(|s| !s.is_empty()).collect();
+    for segment in spec.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            name => segments.push(name),
+        }
+    }
+    (!segments.is_empty()).then(|| segments.join("/"))
+}
+
+/// The module path an `import`/`export` spec resolves to, from `path`.
+///
+/// Three shapes, one of which is skipped. `package:` goes to
+/// [`package_target`]. Any other scheme is skipped: `dart:async` names an
+/// SDK builtin, the JS `node:` precedent, and nothing else a Dart file can
+/// name — an `http:` spec in an old-style library — is a file this
+/// repository contains. Everything left is relative and goes to
+/// [`relative_target`].
+///
+/// A scheme is a `:` before the first `/`, which no relative path can carry:
+/// a bare `:` later in a spec would be a filename character, not a scheme
+/// separator.
+fn dart_target(path: &str, spec: &str) -> Option<String> {
+    if let Some(uri) = spec.strip_prefix("package:") {
+        return package_target(uri);
+    }
+    let head = spec.split_once('/').map_or(spec, |(head, _)| head);
+    if head.contains(':') {
+        return None;
+    }
+    relative_target(path, spec)
+}
+
+fn dart_imports(path: &str, text: &str) -> Vec<String> {
     text.lines()
         .filter_map(dart_spec)
-        .filter_map(dart_segment)
+        .filter_map(|spec| dart_target(path, spec))
         .collect()
 }
 
@@ -189,8 +245,8 @@ impl Language for Dart {
     fn extensions(&self) -> &'static [&'static str] {
         &["dart"]
     }
-    fn imports(&self, _path: &str, text: &str) -> Vec<String> {
-        dart_imports(text)
+    fn imports(&self, path: &str, text: &str) -> Vec<String> {
+        dart_imports(path, text)
     }
     fn symbols(&self, text: &str) -> Vec<Symbol> {
         dart_symbols(text)
