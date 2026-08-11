@@ -63,24 +63,28 @@ Other conventions, all checked by review rather than by tooling:
 
 ## Adding a language
 
-Boundary checking and index scanning dispatch on file extension, in two
-places that must stay in agreement. Tests pin that they do, so a half-done
-addition is a red test, not a silent gap.
+Boundary checking and index scanning both dispatch on a single language
+table, `crates/plumb-core/src/languages/mod.rs`. There is one place to
+register a language, not two to keep in sync.
 
-1. **Imports**, in `crates/plumb-core/src/boundaries.rs`: add the extension
-   to the `match` in `imports` with an extraction function for the
-   language's import syntax, and to the extension list `is_scannable`
-   consults. The pin test `every_known_extension_is_dispatched_by_imports`
-   fails until both agree.
-2. **Symbols**, in `crates/plumb-core/src/index.rs`: add the extension to
-   the `symbols` dispatch with a `<language>_symbols` extractor, and to
-   `is_known_extension`. Pinned by
-   `every_known_extension_is_dispatched_by_symbols`.
+1. **Implement `Language`**, in a new file
+   `crates/plumb-core/src/languages/<name>.rs`: the trait needs the
+   extensions the language claims, an import extractor, and a symbol
+   extractor. Look at `languages/python.rs` for the shape.
+2. **Register it**: add one line for the new language to the `ALL` table in
+   `languages/mod.rs`. That single line is what makes both boundary checking
+   and index scanning see the language — there is no second dispatch to
+   update.
+
+Structural tests in `languages/mod.rs` enforce table coherence
+automatically: no extension is claimed twice, every language claims at
+least one extension, and `for_extension` answers for everything declared. A
+half-done addition is a red test, not a silent gap.
 
 Extractors are heuristic and line-based on purpose: no parser dependency,
-no AST. Look at `python_symbols` for the shape. Recognise the declaration
-forms that make up a public surface and skip the rest. Perfect recall is not
-the bar; a stable, deterministic surface map is.
+no AST. Recognise the declaration forms that make up a public surface and
+skip the rest. Perfect recall is not the bar; a stable, deterministic
+surface map is.
 
 This needs no new taxonomy row. It extends rules that already have one
 (§4.5 for boundaries, §11 for the index) to another language.

@@ -35,7 +35,7 @@ pub struct Violation {
 /// dependency per language, and boundary findings are Tier B precisely
 /// because of heuristics like this one.
 pub fn imports(path: &str, text: &str) -> Vec<String> {
-    match crate::languages::for_extension(&extension(path)) {
+    match crate::languages::for_extension(&crate::languages::extension_of(path)) {
         Some(language) => language.imports(text),
         None => Vec::new(),
     }
@@ -126,24 +126,8 @@ pub fn edges(architecture: &Architecture, path: &str, text: &str) -> Vec<(String
 /// diff touching an unrelated multi-gigabyte binary pays nothing for a scan
 /// whose answer was always going to be "no findings".
 pub fn is_scannable(architecture: &Architecture, path: &str) -> bool {
-    crate::languages::for_extension(&extension(path)).is_some()
+    crate::languages::for_extension(&crate::languages::extension_of(path)).is_some()
         && module_of(architecture, path).is_some()
-}
-
-/// The lowercased extension of `path`'s final path segment, or empty when it
-/// has none.
-///
-/// Two things a caller must not have to know: a path with no `.` in its
-/// final segment has no extension — `rsplit('.')` alone answers that with the
-/// whole remaining string instead, which a dotless file named exactly `rs`
-/// would then match against the `"rs"` arm below — and matching must be
-/// case-insensitive, since `LIB.RS` is as much a Rust file as `lib.rs`.
-fn extension(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    match name.rsplit_once('.') {
-        Some((_, ext)) if !ext.is_empty() => ext.to_lowercase(),
-        _ => String::new(),
-    }
 }
 
 /// The module owning `path`: longest component-wise prefix match.
@@ -373,12 +357,6 @@ mod tests {
         );
     }
 
-    /// `is_scannable`'s extension list and `imports`'s dispatch must name the
-    /// same languages. This would fail the moment one names a language the
-    /// other does not: `is_scannable` returning true for an extension
-    /// `imports` does nothing with would let a scannable file through with
-    /// no findings ever possible, and the reverse would skip reading a file
-    /// `imports` could actually have extracted something from.
     /// `edges` is `violations` without the permission check: every
     /// cross-module pair a file's imports resolve to, distinct, regardless
     /// of whether the architecture's `May depend on:` list allows it.

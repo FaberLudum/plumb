@@ -18,7 +18,7 @@ pub fn symbols(path: &str, text: &str) -> Vec<Symbol> {
     // declaration opens the file — the same idiom `boundaries.rs`'s include
     // matcher and `manifest.rs` already strip this same character for.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    match crate::languages::for_extension(&extension(path)) {
+    match crate::languages::for_extension(&crate::languages::extension_of(path)) {
         Some(language) => language.symbols(text),
         None => Vec::new(),
     }
@@ -36,7 +36,7 @@ pub fn symbols(path: &str, text: &str) -> Vec<Symbol> {
 /// binary in the repository is never read into memory for a scan whose
 /// answer was always going to be "no symbols".
 pub fn has_scannable_extension(path: &str) -> bool {
-    crate::languages::for_extension(&extension(path)).is_some()
+    crate::languages::for_extension(&crate::languages::extension_of(path)).is_some()
 }
 
 /// The full index document from (path, symbols) pairs. Sorts by path;
@@ -79,16 +79,6 @@ pub(crate) fn identifier(text: &str) -> String {
     text.chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect()
-}
-
-/// The lowercased extension of `path`'s final path segment, or empty when it
-/// has none.
-fn extension(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    match name.rsplit_once('.') {
-        Some((_, ext)) if !ext.is_empty() => ext.to_lowercase(),
-        _ => String::new(),
-    }
 }
 
 #[cfg(test)]

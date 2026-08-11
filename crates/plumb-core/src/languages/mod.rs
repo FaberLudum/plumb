@@ -32,6 +32,22 @@ pub fn for_extension(extension: &str) -> Option<&'static (dyn Language + Sync)> 
         .find(|language| language.extensions().contains(&extension))
 }
 
+/// The lowercased extension of `path`'s final path segment, or empty when it
+/// has none.
+///
+/// Two things a caller must not have to know: a path with no `.` in its
+/// final segment has no extension — `rsplit('.')` alone answers that with the
+/// whole remaining string instead, which a dotless file named exactly `rs`
+/// would then match against the `"rs"` arm below — and matching must be
+/// case-insensitive, since `LIB.RS` is as much a Rust file as `lib.rs`.
+pub(crate) fn extension_of(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name.rsplit_once('.') {
+        Some((_, ext)) if !ext.is_empty() => ext.to_lowercase(),
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
