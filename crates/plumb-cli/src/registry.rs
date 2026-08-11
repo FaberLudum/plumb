@@ -844,41 +844,212 @@ impl NpmRegistry {
     }
 }
 
+/// The map key an answer about `name` is stored under for NuGet.
+///
+/// NuGet package IDs are case-insensitive, so the key lowercases `name`
+/// first: `"Newtonsoft.Json"` and `"newtonsoft.json"` must share the one
+/// cache entry rather than silently duplicating it under two keys that
+/// never see each other. No legacy bare form, for the same reason as
+/// [`npm_cache_key`]: a bare key predates NuGet's existence entirely.
+fn nuget_cache_key(name: &str) -> String {
+    format!("nuget:{}", name.to_ascii_lowercase())
+}
+
+/// Builds the nuget.org flat-container lookup URL for `name`.
+///
+/// NuGet package IDs are case-insensitive and the flat-container index is
+/// served at the lowercased path only, so `name` is lowercased before it is
+/// interpolated. Pure and separate from [`NuGetRegistry::lookup`] so the
+/// mapping can be pinned without a request, the same reasoning [`npm_url`]
+/// follows for npm.
+fn nuget_url(name: &str) -> String {
+    format!(
+        "https://api.nuget.org/v3-flat2/{}/index.json",
+        name.to_ascii_lowercase()
+    )
+}
+
+/// Whether `name` is a syntactically ordinary NuGet package ID.
+///
+/// Non-empty, ASCII alphanumerics plus `.`, `_` and `-` only — narrower than
+/// [`is_valid_npm_name`] (no `@` or `/`), and unlike [`is_valid_pypi_name`]
+/// it explicitly rejects the empty string: the flat-container URL for an
+/// empty id collapses to `.../v3-flat2//index.json`, a different,
+/// well-formed request nobody asked for, not a lookup for "no package".
+///
+/// This is the gate [`NuGetRegistry::exists`] checks before it does
+/// anything else, exactly as [`is_valid_npm_name`] gates
+/// [`NpmRegistry::exists`]: an illegal id interpolated into the lookup URL
+/// unescaped could resolve to something else entirely and poison the cache
+/// under a name nobody searched for — the same class of bug
+/// [`is_valid_npm_name`]'s own doc comment describes for npm.
+fn is_valid_nuget_id(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Resolves package ids against nuget.org's flat-container index, with the
+/// same on-disk cache, offline mode and unreachable-network latch as
+/// [`PyPiRegistry`] and [`NpmRegistry`] — see [`PyPiRegistry`]'s doc comment
+/// for the reasoning behind all of them, none of which differs here. What
+/// differs is narrow and is all this type states of its own: the endpoint
+/// ([`nuget_url`]), the cache key prefix ([`nuget_cache_key`], lowercased
+/// for NuGet's case-insensitive ids and with no legacy bare-key fallback),
+/// and the character set an id must satisfy before it reaches the URL
+/// ([`is_valid_nuget_id`]).
+pub struct NuGetRegistry {
+    offline: bool,
+    cache_path: Option<PathBuf>,
+    cache: RefCell<Cache>,
+    agent: ureq::Agent,
+    unreachable: Cell<bool>,
+    honoured_stale: RefCell<BTreeSet<String>>,
+}
+
+impl NuGetRegistry {
+    /// See [`PyPiRegistry::new`]; identical, against the shared cache file.
+    pub fn new(offline: bool, cache_path: Option<PathBuf>) -> Self {
+        let cache = load_cache(cache_path.as_deref());
+
+        Self {
+            offline,
+            cache_path,
+            cache: RefCell::new(cache),
+            agent: lookup_agent(),
+            unreachable: Cell::new(false),
+            honoured_stale: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    /// See [`PyPiRegistry::stale_packages`].
+    pub fn stale_packages(&self) -> usize {
+        self.honoured_stale.borrow().len()
+    }
+
+    /// See [`PyPiRegistry::exists_via`]; identical but for the cache key,
+    /// which lowercases `name` and has no legacy bare-key fallback — see
+    /// [`nuget_cache_key`].
+    fn exists_via(&self, name: &str, lookup: impl Fn(&str) -> Outcome) -> Existence {
+        let cached = self
+            .cache
+            .borrow()
+            .known
+            .get(&nuget_cache_key(name))
+            .copied();
+        if let Some(entry) = cached
+            && entry.is_fresh(now_unix())
+        {
+            return entry.existence();
+        }
+
+        if self.offline {
+            let answer = honour_offline(cached);
+            if answer != Existence::Unknown {
+                self.honoured_stale.borrow_mut().insert(name.to_string());
+            }
+            return answer;
+        }
+
+        if self.unreachable.get() {
+            return Existence::Unknown;
+        }
+
+        let outcome = lookup(name);
+        if outcome == Outcome::Unreachable {
+            self.unreachable.set(true);
+        }
+
+        let existence = outcome.existence();
+        self.record(name, existence);
+        existence
+    }
+
+    /// Answers from the cache, then from nuget.org, then not at all. See
+    /// [`PyPiRegistry::exists`].
+    ///
+    /// A name [`is_valid_nuget_id`] refuses is answered `Missing`
+    /// immediately — no cache read, no offline fallback, no request — and
+    /// that runs first, ahead of everything
+    /// [`exists_via`](Self::exists_via) does, exactly as
+    /// [`NpmRegistry::exists`] gates on [`is_valid_npm_name`] first: an
+    /// illegal id must never reach the URL or the cache.
+    pub fn exists(&self, name: &str) -> Existence {
+        if !is_valid_nuget_id(name) {
+            return Existence::Missing;
+        }
+        self.exists_via(name, |name| self.lookup(name))
+    }
+
+    /// Asks nuget.org about one package id.
+    fn lookup(&self, name: &str) -> Outcome {
+        // `NuGetRegistry::exists` already refuses a name this check would
+        // reject, before `lookup` is ever reached. Kept as a debug-only
+        // tripwire, consistent with [`NpmRegistry::lookup`]'s own guard.
+        debug_assert!(
+            is_valid_nuget_id(name),
+            "nuget id reached the registry unvalidated: {name:?}"
+        );
+        classify(self.agent.get(&nuget_url(name)).call().map(|_| ()))
+    }
+
+    /// Records a definite answer and writes it into the shared cache file.
+    /// See [`PyPiRegistry::record`].
+    fn record(&self, name: &str, outcome: Existence) {
+        if outcome == Existence::Unknown {
+            return;
+        }
+        let entry = Entry {
+            exists: outcome == Existence::Exists,
+            checked: now_unix(),
+        };
+        let key = nuget_cache_key(name);
+        self.cache.borrow_mut().known.insert(key.clone(), entry);
+        if let Some(cache_path) = self.cache_path.as_deref() {
+            persist_entry(cache_path, &key, entry);
+        }
+    }
+}
+
 /// Dispatches a lookup to the registry for its ecosystem.
 ///
-/// One [`PyPiRegistry`] and one [`NpmRegistry`], both constructed against the
-/// same `cache_path` — see the cache key prefix functions for how the two
-/// share one file without colliding. `check.rs` holds this behind `&dyn
-/// Registry` for the whole run, exactly as it held a bare `PyPiRegistry`
-/// before npm existed: one router, not one per manifest, because the cache
-/// and the unreachable-network latch inside each concrete registry are
-/// per-process state that a fresh registry per lookup would throw away.
+/// One [`PyPiRegistry`], one [`NpmRegistry`] and one [`NuGetRegistry`], all
+/// constructed against the same `cache_path` — see the cache key prefix
+/// functions for how the three share one file without colliding. `check.rs`
+/// holds this behind `&dyn Registry` for the whole run, exactly as it held a
+/// bare `PyPiRegistry` before npm existed: one router, not one per manifest,
+/// because the cache and the unreachable-network latch inside each concrete
+/// registry are per-process state that a fresh registry per lookup would
+/// throw away.
 ///
 /// Holds the concrete types rather than `Box<dyn Registry>`, so
-/// [`RegistryRouter::stale_packages`] can read both registries'
+/// [`RegistryRouter::stale_packages`] can read every registry's
 /// `stale_packages()` — a method [`Registry`] deliberately does not carry,
 /// per [`PyPiRegistry::stale_packages`]'s own doc comment. A router of trait
 /// objects could dispatch lookups but could not report this.
 pub struct RegistryRouter {
     pypi: PyPiRegistry,
     npm: NpmRegistry,
+    nuget: NuGetRegistry,
 }
 
 impl RegistryRouter {
     pub fn new(offline: bool, cache_path: Option<PathBuf>) -> Self {
         Self {
             pypi: PyPiRegistry::new(offline, cache_path.clone()),
-            npm: NpmRegistry::new(offline, cache_path),
+            npm: NpmRegistry::new(offline, cache_path.clone()),
+            nuget: NuGetRegistry::new(offline, cache_path),
         }
     }
 
-    /// Distinct packages either registry answered from cache entries past
-    /// their lifetime, summed across both. See
+    /// Distinct packages any registry answered from cache entries past
+    /// their lifetime, summed across all three. See
     /// [`PyPiRegistry::stale_packages`] for what "stale" means and why
     /// offline honours it at all; the message this feeds only has to be
     /// truthful about the count, not about which ecosystem it came from.
     pub fn stale_packages(&self) -> usize {
-        self.pypi.stale_packages() + self.npm.stale_packages()
+        self.pypi.stale_packages() + self.npm.stale_packages() + self.nuget.stale_packages()
     }
 }
 
@@ -887,13 +1058,7 @@ impl Registry for RegistryRouter {
         match ecosystem {
             Ecosystem::PyPi => self.pypi.exists(name),
             Ecosystem::Npm => self.npm.exists(name),
-            // No NuGet registry client yet — that is Task 2. `Unknown` is
-            // the honest answer for a registry this router cannot consult:
-            // "never a violation", exactly as it is for a PyPI or npm lookup
-            // that could not reach the network. This must not become
-            // `Missing`, which would block every build with an added NuGet
-            // package on a registry nobody asked.
-            Ecosystem::NuGet => Existence::Unknown,
+            Ecosystem::NuGet => self.nuget.exists(name),
         }
     }
 }
@@ -2123,15 +2288,11 @@ mod tests {
         let registry = NuGetRegistry::new(false, Some(dir.path().join("registry.json")));
 
         assert_eq!(
-            registry.exists_via("Missing.Package", |_| Outcome::Answered(
-                Existence::Missing
-            )),
+            registry.exists_via("Missing.Package", |_| Outcome::Answered(Existence::Missing)),
             Existence::Missing
         );
         assert_eq!(
-            registry.exists_via("Newtonsoft.Json", |_| Outcome::Answered(
-                Existence::Exists
-            )),
+            registry.exists_via("Newtonsoft.Json", |_| Outcome::Answered(Existence::Exists)),
             Existence::Exists
         );
     }
