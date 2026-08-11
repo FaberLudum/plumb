@@ -87,6 +87,20 @@ What this repository can already do, and where. Regenerate with
 - fn `symbols`
 - fn `has_scannable_extension`
 - fn `render`
+
+## crates/plumb-core/src/languages/javascript.rs
+- struct `JavaScript`
+
+## crates/plumb-core/src/languages/mod.rs
+- trait `Language`
+- fn `all`
+- fn `for_extension`
+
+## crates/plumb-core/src/languages/python.rs
+- struct `Python`
+
+## crates/plumb-core/src/languages/rust.rs
+- struct `Rust`
 - fn `run`
 - struct `Outcome`
 - fn `method`
@@ -110,6 +124,7 @@ What this repository can already do, and where. Regenerate with
 - mod `diff`
 - mod `finding`
 - mod `index`
+- mod `languages`
 - mod `layer1`
 - mod `manifest`
 - mod `metrics`
