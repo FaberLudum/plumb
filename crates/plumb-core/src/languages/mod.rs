@@ -74,7 +74,36 @@ mod tests {
     fn for_extension_answers_for_every_declared_extension() {
         for language in all() {
             for ext in language.extensions() {
-                assert!(for_extension(ext).is_some(), "{ext} not dispatched");
+                // Probe through the real path-lowering path a caller
+                // actually takes (`extension_of` a file named `x.<ext>`),
+                // not `for_extension(ext)` directly — the direct probe
+                // bypasses `extension_of`'s lowercasing, so a declared
+                // extension with an uppercase letter would pass this test
+                // while never dispatching in production.
+                assert!(
+                    for_extension(&extension_of(&format!("x.{ext}"))).is_some(),
+                    "{ext} not dispatched through extension_of"
+                );
+            }
+        }
+    }
+
+    /// Every declared extension must already be lowercase. `extension_of`
+    /// lowercases whatever it reads off a path before `for_extension` ever
+    /// sees it, so an uppercase entry in a `Language::extensions()` table
+    /// can never be reached in production even though it would satisfy a
+    /// test that probes `for_extension` directly with the declared string.
+    /// This pins that invariant for extensions declared in the future.
+    #[test]
+    fn declared_extensions_are_already_lowercase() {
+        for language in all() {
+            for ext in language.extensions() {
+                assert_eq!(
+                    *ext,
+                    ext.to_lowercase().as_str(),
+                    "{ext} declares an uppercase extension, which extension_of's \
+                     lowercasing means for_extension can never dispatch to in production"
+                );
             }
         }
     }
