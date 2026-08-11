@@ -49,16 +49,75 @@ Rules are tiered by strength of evidence, not by severity:
 
 Proposing a Tier A rule on a preprint is a rejection. Propose it as Tier B.
 
+## Installing
+
+From a released binary — one archive per platform is attached to each
+[release](https://github.com/FaberLudum/plumb/releases), named by host
+triple; unpack it and put `plumb` on your `PATH`.
+
+From source, with a Rust toolchain installed (the build pins its own
+compiler via `rust-toolchain.toml`):
+
+```bash
+cargo install --git https://github.com/FaberLudum/plumb plumb-cli --locked
+```
+
+The binary is `plumb`. Not on crates.io yet.
+
+## Quick start
+
+In the repository you want checked:
+
+```bash
+plumb init      # answer a short Q&A; writes .plumb/ — the working agreement
+plumb index     # scan the sources; writes .plumb/index.md
+plumb adapters  # render CLAUDE.md, AGENTS.md, .cursorrules, copilot-instructions.md
+```
+
+Review what `init` wrote — `.plumb/architecture.md` in particular is a
+contract, and only you know which module may depend on which. Then gate
+changes:
+
+```bash
+plumb check --diff
+```
+
+Exit `0` is clean, `1` is a blocking Tier A violation, `2` is warnings
+only. Wire it wherever a wrong exit code stops the line — a pre-commit
+hook:
+
+```bash
+echo 'plumb check --diff' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+```
+
+or a CI job (add `--offline` if the runner must not reach the registries;
+the package-exists gate then answers from cache only):
+
+```yaml
+  plumb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - run: cargo install --git https://github.com/FaberLudum/plumb plumb-cli --locked
+      - run: plumb check --diff
+```
+
+`plumb report --commits 30` prints the longitudinal volume and coupling
+metrics; it never affects the exit code.
+
 ## Status
 
-**Early, and honest about it.** One rule is built and runs, over two
-registries now: every package a change adds must actually exist on its
-registry. `plumb check --diff` asks git for the paths a change touched,
-reads each manifest among them — `requirements.txt`, `requirements-*.txt`
-and `pyproject.toml` on the PyPI side, `package.json` on the npm side — as
-it stands and as it stands at HEAD, looks up only the names the change
-adds, and blocks on a name its own registry does not have. 330 tests, no
-network access from any of them.
+**Early, and honest about it.** Five commands, six kinds of finding, 347
+tests, none of which touches the network. One rule blocks: every package a
+change adds must actually exist on its registry. `plumb check --diff` asks
+git for the paths a change touched, reads each manifest among them —
+`requirements.txt`, `requirements-*.txt` and `pyproject.toml` on the PyPI
+side, `package.json` on the npm side — as it stands and as it stands at
+HEAD, looks up only the names the change adds, and blocks on a name its
+own registry does not have. Everything else warns or measures: the tier a
+rule enforces at is set by the strength of its evidence, and only §4.1 has
+peer review behind it today.
 
 ```console
 $ plumb check --diff

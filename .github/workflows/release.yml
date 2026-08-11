@@ -1,0 +1,91 @@
+name: release
+
+# Runs only when a version tag is pushed. Building from the tag and not from
+# a branch means the binary a release carries is the binary that commit
+# produces — there is no window for main to move between tagging and building.
+on:
+  push:
+    tags: ["v*"]
+
+# `contents: write` is required to attach assets to the release, and it is the
+# only write this workflow performs. The ci workflow keeps `contents: read`;
+# widening that one instead of adding this one would give every PR build a
+# permission it has no use for.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # A failed macOS build must not cancel a Linux binary people can use.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      # Same commit-pinned checkout as ci.yml, for the same reason: a project
+      # whose one shipped rule is about unverified dependencies should not
+      # take a moving reference to someone else's code on trust.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the toolchain rust-toolchain.toml selects
+        run: rustup toolchain install --no-self-update
+
+      - name: Fail if a different toolchain is what will run
+        shell: bash
+        run: bash .github/scripts/assert-toolchain.sh
+
+      # The suite runs in ci.yml on every push; a release build repeats the
+      # test run anyway because a release is cut from a tag, not from a
+      # commit ci already vouched for — tags can point anywhere.
+      - run: cargo test --workspace --locked
+
+      - run: cargo build --release --locked -p plumb-cli
+
+      # One archive per host triple, named so a `curl | tar` user can guess
+      # the URL from `rustc -vV`. Windows gets a zip because tar is present
+      # on the runner but unzip is what users have.
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          version="${GITHUB_REF_NAME#v}"
+          name="plumb-${version}-${triple}"
+          mkdir "$name"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cp target/release/plumb.exe "$name/"
+            7z a "${name}.zip" "$name" > /dev/null
+            echo "asset=${name}.zip" >> "$GITHUB_OUTPUT"
+          else
+            cp target/release/plumb "$name/"
+            tar czf "${name}.tar.gz" "$name"
+            echo "asset=${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      # `gh` is preinstalled on the runners and talks to this repository with
+      # the workflow's own token — no third-party release action, which would
+      # be one more moving dependency in the pipeline that ships the binary.
+      #
+      # `--clobber` makes the three matrix jobs idempotent: whichever lands
+      # first creates nothing (the release exists from the step below or a
+      # concurrent job), the others just add their asset.
+      - name: Create the release if this job is first
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes "See CHANGELOG.md for what this version contains." \
+              || true
+
+      - name: Upload the asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "${{ steps.package.outputs.asset }}" --clobber
