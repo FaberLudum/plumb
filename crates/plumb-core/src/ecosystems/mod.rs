@@ -7,6 +7,7 @@
 
 pub(crate) mod npm;
 pub(crate) mod nuget;
+pub(crate) mod pub_dev;
 pub(crate) mod pypi;
 
 /// One package ecosystem's manifest recognition and parsing.
