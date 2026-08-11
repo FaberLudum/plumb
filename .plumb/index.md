@@ -46,6 +46,10 @@ What this repository can already do, and where. Regenerate with
 - fn `new`
 - fn `stale_packages`
 - fn `exists`
+- struct `PubRegistry`
+- fn `new`
+- fn `stale_packages`
+- fn `exists`
 - struct `RegistryRouter`
 - fn `new`
 - fn `stale_packages`
