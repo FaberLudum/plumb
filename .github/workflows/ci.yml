@@ -3,14 +3,12 @@ name: ci
 on:
   push:
     branches: [main]
-    # A change that touches no file cargo reads cannot change what cargo
-    # does. Markdown and docs/ are skipped on that ground alone — the list
-    # is deliberately conservative: .plumb/, the generated instruction
-    # files and workflow files all stay in, because a PR touching only
-    # those still deserves the suite it is about to gate.
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  # No paths-ignore: branch protection requires these four checks on every
+  # pull request, and a workflow that never starts leaves them "expected"
+  # forever — a docs-only PR would be unmergeable. The suite on a cached
+  # runner costs under a minute, which is cheaper than the skipped-check
+  # workaround is fragile.
   pull_request:
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   # A workflow that only runs on `main` and on pull requests cannot be tried
   # from a branch before it is proposed, and an untested gate is the thing this
   # project exists to complain about.
