@@ -1920,6 +1920,33 @@ mod tests {
         assert_eq!(erased.exists("ruff", Ecosystem::PyPi), Existence::Exists);
     }
 
+    /// The PyPI counterpart of npm's dot-segment guard, below: `is_valid_pypi_name`'s
+    /// charset check is `all()` over the name's characters, which is
+    /// vacuously true when there are none, so `""` read as a syntactically
+    /// legal PyPI name with nothing to catch it — `PyPiRegistry::exists`,
+    /// unlike `NpmRegistry::exists` and `NuGetRegistry::exists`, had no
+    /// charset gate of its own at all. Left alone, `""` would flow through
+    /// `exists_via` unchanged and, on a cache miss while online, build
+    /// `https://pypi.org/pypi//json` and let the server decide what
+    /// answers. `offline: false` is deliberate, as in this file's other
+    /// charset-gate tests: if the guard did not run ahead of `exists_via`,
+    /// this call would fall through to a real connection attempt, which no
+    /// test in this suite may make.
+    #[test]
+    fn an_empty_pypi_name_is_missing_without_a_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = PyPiRegistry::new(false, Some(cache_path.clone()));
+
+        assert_eq!(registry.exists(""), Existence::Missing);
+        assert!(
+            !cache_path.exists(),
+            "an empty pypi name should never create a cache file"
+        );
+
+        assert!(is_valid_pypi_name("ruff"), "positive control");
+    }
+
     // -- npm and the router -------------------------------------------------
     //
     // `NpmRegistry` mirrors `PyPiRegistry` exactly, so its own tests below
@@ -2053,6 +2080,42 @@ mod tests {
             !cache_path.exists(),
             "an invalid-charset name should never create a cache file"
         );
+    }
+
+    /// The npm counterpart of NuGet's dot-segment guard (see
+    /// `a_dot_segment_id_is_missing_without_a_request` below): the old
+    /// `is_valid_npm_name` had no ends anchor, so `".."` satisfied its
+    /// charset check whole — `.` is otherwise an ordinary character in
+    /// npm's charset. `npm_url("..")` would emit
+    /// `https://registry.npmjs.org/..`, a path the pinned http client does
+    /// not normalise client-side, leaving server-side normalisation to
+    /// decide what answers; npm's own router resolves it to the registry
+    /// root and answers 200, which would cache `npm:..` as `Exists` on a
+    /// blocking gate for a name nobody could ever publish. `offline: false`
+    /// is deliberate, as in this file's other charset-gate tests: if the
+    /// anchor did not run ahead of `exists_via`, this call would fall
+    /// through to a real connection attempt, which no test in this suite
+    /// may make.
+    #[test]
+    fn a_dot_segment_npm_name_is_missing_without_a_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NpmRegistry::new(false, Some(cache_path.clone()));
+
+        for name in ["..", ".", ".leading", "trailing."] {
+            assert_eq!(registry.exists(name), Existence::Missing, "{name:?}");
+        }
+        assert!(
+            !cache_path.exists(),
+            "a dot-segment npm name should never create a cache file"
+        );
+
+        // Positive controls: an ordinary unscoped name, and a scoped name,
+        // which legitimately starts with `@` — the anchor must admit that
+        // leading character even though it is not alphanumeric, while still
+        // requiring the trailing character to be.
+        assert!(is_valid_npm_name("react"), "positive control");
+        assert!(is_valid_npm_name("@scope/pkg"), "positive control");
     }
 
     /// The exact shape of the reviewer's live poisoned-cache scenario, pinned
