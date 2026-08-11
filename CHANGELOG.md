@@ -8,6 +8,34 @@ here explicitly.
 
 ## [Unreleased]
 
+- **Dart boundary resolution is live.** The `boundary` gate resolved no Dart
+  import at all when the language first landed, and the entry below says so;
+  this closes that. A `package:` URI now loses its first segment, because
+  that segment is the pub package's own name rather than a directory —
+  Dart keeps library code under `lib/`, which no import path ever spells, so
+  `package:umarell/features/session/chat.dart` resolves to
+  `features/session/chat` and reaches a `## lib/features` heading. Nothing
+  reads `pubspec.yaml` to confirm the name: the segment is dropped, not
+  resolved, which keeps plumb-core off the filesystem. The trade is a leaf
+  collision on external packages — `package:flutter/material.dart` becomes
+  the bare `material`, so a module whose last path segment is `material`
+  captures it — the same risk every language's segment matching already
+  carries, and the deliberate side to err on against a gate that matched
+  nothing. Relative specifiers now resolve too, joined against the importing
+  file's own directory with `.` and `..` normalised **lexically**: no
+  `canonicalize`, no symlink resolution, no existence check, because
+  plumb-core may not touch a filesystem and the text often arrives from
+  `git show` rather than a worktree. A `..` climbing past the repository root
+  resolves to nothing and is skipped. The two shapes produce two spellings of
+  the same module — `package:` resolves lib-relative, a relative import
+  repo-relative — which match the same heading on its trailing segments and
+  can appear side by side in one report; [docs/gates.md](docs/gates.md) says
+  so, along with what a malformed `.dart`-adjacent specifier does. Re-measured
+  on the same Flutter application: 138 tracked `.dart` files swept in one
+  run against a four-module architecture produced exactly the four
+  `shared → features` crossings the repository has and nothing else, where
+  the previous measurement produced zero findings out of 232 internal
+  imports. Tier B, unchanged; evidence: taxonomy §4.5.
 - **C# and Dart join the scanning surface.** `plumb index` and the
   `boundary` gate now read `.cs` and `.dart` files alongside Rust, Python
   and the JavaScript/TypeScript family — two more entries on the `Language`
@@ -25,17 +53,20 @@ here explicitly.
   headings resolve, not a C#-local one. Both extractors stay line-based
   heuristics: C# namespaces map to folders by convention rather than
   contract, so a project whose namespaces diverge from its layout gets
-  silently missed edges. On the Dart side the boundary gate is weaker
-  still, and [docs/gates.md](docs/gates.md) now says how weak: relative
-  imports are invisible, and an intra-package `package:` import resolves to
-  nothing either, because its first segment is the pub package name and
-  Dart keeps library code under `lib/`, which no import path spells. Only
-  cross-package edges in a mono-repo layout resolve. Measured on the
-  Flutter application this was built against, all 232 internal imports fall
-  into one of those two holes, so the gate sees no edges whatsoever — a
-  clean boundary run on a single-package Flutter repository means nothing
-  was checked, not that nothing was wrong. Indexing is unaffected and works
-  on both languages. Tier B throughout; evidence: taxonomy §4.5, §11.
+  silently missed edges. On the Dart side the boundary gate shipped inert,
+  and said so: relative imports were invisible, and an intra-package
+  `package:` import resolved to nothing either, because its first segment is
+  the pub package name and Dart keeps library code under `lib/`, which no
+  import path spells. All 232 internal imports of the Flutter application
+  this was built against fell into one of those two holes, so the gate saw
+  no edges whatsoever. That 232 was itself an undercount — bare-filename
+  relative imports such as `import 'chat_state.dart';` were invisible to
+  the tally for the same reason they were invisible to the gate, and the
+  measurement in [docs/gates.md](docs/gates.md) puts the real figure at 271
+  internal imports over the same tree. **Both holes are closed by the entry above, which
+  supersedes this passage**; what is still current here is the shape of the
+  extractor, not its reach. Indexing was unaffected throughout and works on
+  both languages. Tier B throughout; evidence: taxonomy §4.5, §11.
 - **pub.dev/Dart: the `package-exists` gate's fourth ecosystem.**
   `pubspec.yaml` is read for its `dependencies`, `dev_dependencies` and
   `dependency_overrides` tables; a nonexistent package blocks exactly like

@@ -116,7 +116,7 @@ impl Language for Rust {
     fn extensions(&self) -> &'static [&'static str] {
         &["rs"]
     }
-    fn imports(&self, text: &str) -> Vec<String> {
+    fn imports(&self, _path: &str, text: &str) -> Vec<String> {
         rust_imports(text)
     }
     fn symbols(&self, text: &str) -> Vec<Symbol> {

@@ -172,7 +172,7 @@ impl Language for JavaScript {
     fn extensions(&self) -> &'static [&'static str] {
         &["ts", "tsx", "js", "jsx", "mjs", "cjs"]
     }
-    fn imports(&self, text: &str) -> Vec<String> {
+    fn imports(&self, _path: &str, text: &str) -> Vec<String> {
         javascript_imports(text)
     }
     fn symbols(&self, text: &str) -> Vec<Symbol> {

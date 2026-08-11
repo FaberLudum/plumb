@@ -98,7 +98,8 @@ Three warning gates run alongside the manifest check.
 in `.plumb/architecture.md`. Each changed file is attributed to a module by
 path, and its imports are extracted with a heuristic, line-based matcher
 covering five languages: Rust, Python, the JavaScript/TypeScript family,
-C# (`using` directives) and Dart (`package:` imports and exports). An
+C# (`using` directives) and Dart (`package:` and relative imports and
+exports). An
 import reaching a module outside the file's declared
 `May depend on:` list warns rather than blocks. The comparison is
 before-versus-after, the same shape as the manifest check's: **the gate
@@ -530,47 +531,75 @@ that nothing else is there.
     the first token is neither `public` nor a known modifier. The common
     style puts the attribute on its own line.
 
-  **Dart.** Only `package:` URIs become edges. `import 'dart:async';` is an
-  SDK builtin and is skipped, the `node:` precedent; `part` and `part of`
-  are never imports, since the two halves are one library.
-  - **Relative imports are invisible to the boundary gate, and that miss is
-    much wider in Dart than in the JavaScript rule it copies.** In Flutter,
-    `import 'chat_state.dart';` and `import '../core/result.dart';` are the
-    ordinary way to reach another file, and in many codebases they are the
-    majority of all imports — commonly *within* a feature, and often
-    between features too. Where the JS rule gives up on an occasional
-    relative specifier, the Dart one gives up on however much of a Flutter
-    project prefers relative style, which can be most of it. Only
-    `package:` edges are seen.
-  - **An intra-package `package:` import resolves to nothing either**, and
-    together with the point above that is the one worth stopping on. A
-    `package:` URI's first segment is the *pub package name*, and Dart
-    requires a package's library code to live under `lib/`, which no import
-    path ever spells. So `package:umarell/features/session/chat.dart`
-    yields the segments `umarell/features/session/chat`, and a module
-    declared at the path those files actually occupy —
-    `## lib/features/session` — ends in `session`, never in `umarell`.
-    Nothing matches, and the edge is dropped in silence. This is the same
-    shape as the Rust `src` note above, but it bites harder: in Rust it
-    costs sub-crate resolution, in Dart it costs *every* intra-package
-    edge. Only a **cross-package** `package:other_pkg/…` import resolves,
-    and only against a module whose path ends in that package's name
-    (`## packages/other_pkg`), which is a mono-repo layout, not the
-    single-package one most Flutter apps have.
+  **Dart.** Both `package:` URIs and relative specifiers become edges.
+  `import 'dart:async';` is an SDK builtin and is skipped, the `node:`
+  precedent; `part` and `part of` are never imports, since the two halves
+  are one library.
 
-    The two misses compound, and the compound was measured rather than
-    assumed. In the Flutter application this language support was built
-    against, every one of the 232 internal imports is either relative (223)
-    or `package:` naming the app's own package (9). **Not one internal edge
-    is visible to the boundary gate.** It reports no findings, and that
-    result carries no information at all. Read a clean boundary run on a
-    single-package Flutter repository as "nothing was checked", not as
-    "nothing was wrong".
-  - **A `package:` URI containing `../` is not normalised.**
-    `package:app/features/../core/x.dart` is kept as the literal
-    `app/features/../core/x`, and `..` is not a segment any declared module
-    can match, so the import resolves to no module and the edge is dropped.
-    Legal Dart, uncommon, silently missed.
+  This paragraph used to say the Dart boundary gate was inert, and it was:
+  a `package:` URI kept its first segment and a relative specifier was
+  dropped on the floor, so on the Flutter application this support was
+  built against every internal import fell into one of those two holes and
+  the gate reported nothing at all. Both holes are now closed, and what
+  follows is what closing them costs.
+  - **A `package:` URI loses its first segment**, because that segment is
+    the pub package's own name and not a directory. Dart requires a
+    package's library code to live under `lib/`, which no import path ever
+    spells, so `package:umarell/features/session/chat.dart` addresses the
+    file `lib/features/session/chat.dart` and the leading `umarell` names
+    nothing on disk. Dropping it yields `features/session/chat`, which
+    reaches a heading `## lib/features` on its first segment. Nothing reads
+    `pubspec.yaml` to confirm the name — plumb-core may not touch the
+    filesystem — so the first segment is *dropped*, not *resolved*.
+  - **The trade for that drop is a leaf collision on external packages.**
+    `package:flutter/material.dart` becomes the bare `material`, so a
+    repository that also declares a module whose last path segment is
+    `material` will see the Flutter import resolve to it and warn about a
+    crossing that does not exist. That is the same leaf-collision risk
+    every language's resolution already carries — segment matching cannot
+    tell a vendor name from a directory name — and it is the deliberate
+    side to err on, because the alternative was a segment that matched
+    nothing and a gate that reported nothing.
+  - **A relative specifier is joined against the importing file's own
+    directory**, so the same line in two files means two different targets:
+    `import '../../shared/models/m.dart';` in
+    `lib/features/chat/a.dart` resolves to `lib/shared/models/m`.
+  - **`.` and `..` are normalised lexically, against the path text and not
+    against the filesystem.** No `canonicalize`, no symlink resolution, no
+    check that the target exists. Two reasons, and both are structural
+    rather than an economy: plumb-core is forbidden the filesystem, and the
+    text being scanned often arrives from `git show` — the HEAD side of the
+    before/after comparison — where there is no worktree to canonicalise
+    against even where it would be allowed. A `..` chain that climbs past
+    the repository root names no file this repository contains, so it
+    yields nothing and the specifier is skipped rather than guessed at.
+    A `package:` URI containing `../` is not normalised at all, since its
+    path is package-internal rather than file-relative; that shape is legal
+    Dart, uncommon, and still silently missed.
+  - **The two shapes resolve to two different spellings of the same
+    module, and both spellings appear in the same report.** A `package:`
+    import resolves *lib-relative* (`features/session/chat`) because the
+    package name it dropped stood where `lib/` would be; a relative import
+    resolves *repo-relative* (`lib/features/session/chat`) because it was
+    joined against a repository path. Resolution matches a module's
+    trailing segments against an import's leading ones, so both land on
+    `## lib/features` — the first at score 1, the second at score 2 — and
+    the gate's verdict is the same either way. What differs is the text a
+    finding quotes, since it quotes the import as resolved — so one run
+    over one repository prints `features/session/chat` on one line and
+    `lib/features/session/chat` on the next, both naming
+    `## lib/features`. Cosmetic, and worth knowing before reading it as a
+    bug.
+  - **A malformed specifier that only looks `.dart`-adjacent keeps its
+    tail.** The suffix strip is a literal `.dart` at the end of the string,
+    so a `'…/project.dart?v=1'` — legal in no Dart compiler — is not
+    stripped and the query tail survives into the resolved path. It costs
+    nothing but noise: the target module is matched on the *leading*
+    segments, which are unaffected, so the edge is still found and still
+    reported; only the import quoted in the message carries the garbage.
+    Measured on the Flutter repository below, both the `package:` and the
+    relative form of that specifier produced the same finding a well-formed
+    one would, with `project.dart?v=1` in the text.
   - **A directive split across lines is missed entirely**, the same
     `text.lines()` trade the parenthesised Python import and the multi-line
     Rust `use` group take. Extraction needs the `import`/`export` keyword
@@ -591,6 +620,28 @@ that nothing else is there.
     `int counter = f(x);` has three tokens and is rejected. The line
     heuristic paying its price in the other direction for once: the rest of
     these gaps drop real symbols, this one invents one.
+
+  **What that adds up to, measured.** The same Flutter application the
+  inertness was found on — 138 tracked `.dart` files, 271 internal imports
+  under `lib/`, 262 of them relative and 9 `package:` naming the app's own
+  package — was swept a second time against a `.plumb/architecture.md`
+  declaring `## lib/core`, `## lib/features`, `## lib/shared` and
+  `## lib/l10n`, with `lib/shared` permitted nothing. Every tracked `.dart`
+  file was put through the gate in one run — but "put through" is not
+  "checked": 59 of those 138 files live under `test/` and
+  `integration_test/`, outside every declared module, and their 180
+  `package:` imports are attributed to no module and so can never produce a
+  finding. That skip is by design — `module_of` returns `None` for a path no
+  module heading covers, and a file the gate cannot attribute is a file it
+  will not judge — but it belongs next to the measurement rather than only
+  in the design notes. It reported four findings, all
+  four in `lib/shared/models/enum_mappers.dart`, all four the
+  `shared → features` crossings the repository genuinely has, and nothing
+  else anywhere in the tree. Declaring each feature its own module and
+  permitting nothing to anything — a fixture, not a design — turned the
+  same sweep into 160 findings across 39 files, every one of which names an
+  import that resolves to a file that exists on disk. The number to
+  remember is that the previous count was zero.
 
   One thing both changes do beyond their own languages: `.cs` and `.dart`
   files under a declared module are now scannable, so a repository

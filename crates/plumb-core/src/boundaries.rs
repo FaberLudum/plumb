@@ -36,7 +36,7 @@ pub struct Violation {
 /// because of heuristics like this one.
 pub fn imports(path: &str, text: &str) -> Vec<String> {
     match crate::languages::for_extension(&crate::languages::extension_of(path)) {
-        Some(language) => language.imports(text),
+        Some(language) => language.imports(path, text),
         None => Vec::new(),
     }
 }
@@ -569,6 +569,29 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].to_module, "src/pkg/facts");
         assert_eq!(found[0].import, "pkg.facts");
+    }
+
+    /// The Flutter layout end to end: a `lib/shared` file reaching into
+    /// `lib/features` through a `package:` URI. This is Umarell's real
+    /// defect shape — shared code that grew a dependency on a feature — and
+    /// it went unreported for as long as the `package:` name segment stayed
+    /// on the front of the import, because `umarell/features/chat/…` matches
+    /// no declared heading.
+    #[test]
+    fn a_flutter_shared_to_features_import_is_a_violation() {
+        let architecture = architecture::parse(
+            "## lib/features\n\nMay depend on: (none).\n\n\
+             ## lib/shared\n\nMay depend on: (none).\n",
+        );
+        let found = violations(
+            &architecture,
+            "lib/shared/models/enum_mappers.dart",
+            "import 'package:umarell/features/chat/chat_models.dart';\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].from_module, "lib/shared");
+        assert_eq!(found[0].to_module, "lib/features");
+        assert_eq!(found[0].import, "features/chat/chat_models");
     }
 
     /// An entry naming one sub-module must not permit an unrelated sibling
