@@ -14,7 +14,13 @@ pub trait EcosystemSpec {
     /// Whether `filename` (final path segment, as-is) is a manifest of this
     /// ecosystem.
     fn matches(&self, filename: &str) -> bool;
-    fn parse(&self, text: &str) -> crate::manifest::Manifest;
+    /// Parses a manifest already known (via [`matches`](Self::matches)) to
+    /// belong to this ecosystem. `filename` is the same final path segment
+    /// `matches` saw — an ecosystem with more than one manifest syntax needs
+    /// it to tell them apart, since a malformed instance of one syntax can
+    /// parse as a valid (if useless) instance of another when read from
+    /// `text` alone.
+    fn parse(&self, filename: &str, text: &str) -> crate::manifest::Manifest;
 }
 
 static ALL: [&(dyn EcosystemSpec + Sync); 1] = [&pypi::PyPi];

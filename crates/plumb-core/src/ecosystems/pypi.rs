@@ -546,7 +546,7 @@ impl super::EcosystemSpec for PyPi {
     /// It tries the TOML syntax first, since a well-formed requirements.txt
     /// line essentially never parses as a TOML document, and falls back to
     /// the requirements syntax when it does not.
-    fn parse(&self, text: &str) -> Manifest {
+    fn parse(&self, _filename: &str, text: &str) -> Manifest {
         match text.parse::<toml::Table>() {
             Ok(_) => parse_pyproject(text),
             Err(_) => parse_requirements(text),
@@ -1529,6 +1529,22 @@ dev = ["pytest"]
     #[test]
     fn malformed_toml_is_a_gap_rather_than_an_empty_manifest() {
         let manifest = parse_pyproject("this is not toml {{{");
+        assert!(manifest.names.is_empty());
+        assert_eq!(manifest.gaps, vec![Gap::Unparseable]);
+    }
+
+    /// The same malformed `pyproject.toml`, routed through the trait's
+    /// `parse` the way `manifest::parse` will once it collapses to a table
+    /// lookup, must land on the same `Gap::Unparseable` outcome as the
+    /// direct call above — not on whatever `parse_requirements` makes of the
+    /// text, which is what a text-only sniff falls back to. `filename` is
+    /// what `matches` already used to admit this text as a `pyproject.toml`;
+    /// dropping it and guessing from `text` alone is the bug this pins.
+    #[test]
+    fn parse_routes_a_malformed_pyproject_toml_by_filename_not_a_text_sniff() {
+        use crate::ecosystems::EcosystemSpec;
+
+        let manifest = PyPi.parse("pyproject.toml", "this is not toml {{{");
         assert!(manifest.names.is_empty());
         assert_eq!(manifest.gaps, vec![Gap::Unparseable]);
     }
