@@ -51,6 +51,15 @@ fn unparseable() -> Manifest {
 /// [`Gap::MsBuildExpression`], and any other element name is left alone —
 /// notably `ProjectReference`, which shares the `Include` convention but
 /// names a sibling project rather than a NuGet package.
+///
+/// The value is trimmed before either check. MSBuild itself trims an
+/// `Include` before using it — XML attribute-value normalisation only
+/// touches line endings, not spaces — so `"  Newtonsoft.Json  "` is real,
+/// writable syntax naming an ordinary package, not a different one with
+/// whitespace in its name. Trimming ahead of the `$(` check and storing the
+/// trimmed text in the gap (rather than trimming only the name path) keeps
+/// both outcomes consistent: the leading/trailing whitespace is MSBuild
+/// noise either way, not part of the property expression.
 fn read_package(
     start: &BytesStart,
     decoder: Decoder,
@@ -68,10 +77,17 @@ fn read_package(
             attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
                 .ok()
         })
-        .map(|value| value.into_owned())
+        .map(|value| value.trim().to_string())
     else {
         return;
     };
+    // An `Include` that is empty, or only whitespace, names nothing — not a
+    // package, and not an unresolved reference the way an MSBuild expression
+    // is. Silently skipped rather than inserted as an empty-string name,
+    // which would reach Task 2's registry lookup as a literal package name.
+    if include.is_empty() {
+        return;
+    }
     if include.contains("$(") {
         gaps.push(Gap::MsBuildExpression(include));
     } else {
@@ -280,6 +296,23 @@ mod tests {
         </ItemGroup></Project>"#;
         let manifest = NuGet.parse("Api.csproj", text);
         assert_eq!(manifest.names, set(&["Newtonsoft.Json"]));
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
+    /// An `Include` that is empty, or trims to empty, must not surface as an
+    /// empty-string package name — that would reach Task 2's registry
+    /// lookup as a literal name and could only ever come back `Missing`.
+    /// Silently skipped, the same as a `PackageReference` with no `Include`
+    /// attribute at all, rather than raising a gap: there is no unresolved
+    /// reference here to point a reader at, unlike an MSBuild expression.
+    #[test]
+    fn an_include_that_trims_to_empty_yields_no_name() {
+        let text = r#"<Project><ItemGroup>
+            <PackageReference Include="   " Version="1.0" />
+            <PackageReference Include="" Version="1.0" />
+        </ItemGroup></Project>"#;
+        let manifest = NuGet.parse("Api.csproj", text);
+        assert!(manifest.names.is_empty(), "names: {:?}", manifest.names);
         assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
     }
 
