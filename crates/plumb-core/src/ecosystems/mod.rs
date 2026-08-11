@@ -5,7 +5,7 @@
 //! line here. Adding an ecosystem = implement `EcosystemSpec` in a new file,
 //! add it to `ALL`.
 
-mod pypi;
+pub(crate) mod pypi;
 
 /// One package ecosystem's manifest recognition and parsing.
 pub trait EcosystemSpec {
