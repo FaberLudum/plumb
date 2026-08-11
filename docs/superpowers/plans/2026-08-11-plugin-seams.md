@@ -238,7 +238,7 @@ pub fn imports(path: &str, text: &str) -> Vec<String> {
       fn ecosystem(&self) -> crate::manifest::Ecosystem;
       /// Whether `filename` (final path segment, as-is) is a manifest of this ecosystem.
       fn matches(&self, filename: &str) -> bool;
-      fn parse(&self, text: &str) -> crate::manifest::Manifest;
+      fn parse(&self, filename: &str, text: &str) -> crate::manifest::Manifest;
   }
   pub fn specs() -> &'static [&'static (dyn EcosystemSpec + Sync)];
   pub fn for_path(path: &str) -> Option<&'static (dyn EcosystemSpec + Sync)>;
@@ -268,6 +268,19 @@ pub fn imports(path: &str, text: &str) -> Vec<String> {
 - [ ] **Step 4: Commits**: `refactor(ecosystems): drive manifest parsing from the ecosystem table` (+ `chore:` regeneration commit if demanded).
 
 ---
+
+## Amendment (2026-08-11, after Task 5's review)
+
+`EcosystemSpec::parse` was originally frozen as `parse(&self, text: &str)`.
+Task 5's implementation revealed that PyPI's two manifest syntaxes cannot be
+told apart from text alone: a sniff-based `PyPi::parse` reads a malformed
+`pyproject.toml` as a requirements file, which breaks the plan's own
+higher-priority constraint (bit-identical behaviour) the moment Task 6
+collapses `manifest::parse` into a `spec.parse(...)` lookup. The trait is
+therefore amended to `parse(&self, filename: &str, text: &str)` — `Npm`
+ignores the filename; `PyPi` dispatches on it deterministically, making the
+trait method reachable and testable instead of dead. Task 6 implements the
+amended signature and reworks `PyPi::parse` accordingly.
 
 ## Self-review notes
 
