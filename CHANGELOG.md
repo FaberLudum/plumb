@@ -25,10 +25,17 @@ here explicitly.
   headings resolve, not a C#-local one. Both extractors stay line-based
   heuristics: C# namespaces map to folders by convention rather than
   contract, so a project whose namespaces diverge from its layout gets
-  silently missed edges, and Dart's relative imports — the common style
-  inside a Flutter feature — are invisible to the boundary gate. Both gaps,
-  and the rest, are written down in [docs/gates.md](docs/gates.md). Tier B
-  throughout; evidence: taxonomy §4.5, §11.
+  silently missed edges. On the Dart side the boundary gate is weaker
+  still, and [docs/gates.md](docs/gates.md) now says how weak: relative
+  imports are invisible, and an intra-package `package:` import resolves to
+  nothing either, because its first segment is the pub package name and
+  Dart keeps library code under `lib/`, which no import path spells. Only
+  cross-package edges in a mono-repo layout resolve. Measured on the
+  Flutter application this was built against, all 232 internal imports fall
+  into one of those two holes, so the gate sees no edges whatsoever — a
+  clean boundary run on a single-package Flutter repository means nothing
+  was checked, not that nothing was wrong. Indexing is unaffected and works
+  on both languages. Tier B throughout; evidence: taxonomy §4.5, §11.
 - **pub.dev/Dart: the `package-exists` gate's fourth ecosystem.**
   `pubspec.yaml` is read for its `dependencies`, `dev_dependencies` and
   `dependency_overrides` tables; a nonexistent package blocks exactly like

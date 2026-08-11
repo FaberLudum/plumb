@@ -537,9 +537,31 @@ that nothing else is there.
     between features too. Where the JS rule gives up on an occasional
     relative specifier, the Dart one gives up on however much of a Flutter
     project prefers relative style, which can be most of it. Only
-    `package:` edges are seen. **A clean boundary run on a Flutter
-    repository is therefore weak evidence**, and how weak depends entirely
-    on a convention Plumb never inspects.
+    `package:` edges are seen.
+  - **An intra-package `package:` import resolves to nothing either**, and
+    together with the point above that is the one worth stopping on. A
+    `package:` URI's first segment is the *pub package name*, and Dart
+    requires a package's library code to live under `lib/`, which no import
+    path ever spells. So `package:umarell/features/session/chat.dart`
+    yields the segments `umarell/features/session/chat`, and a module
+    declared at the path those files actually occupy —
+    `## lib/features/session` — ends in `session`, never in `umarell`.
+    Nothing matches, and the edge is dropped in silence. This is the same
+    shape as the Rust `src` note above, but it bites harder: in Rust it
+    costs sub-crate resolution, in Dart it costs *every* intra-package
+    edge. Only a **cross-package** `package:other_pkg/…` import resolves,
+    and only against a module whose path ends in that package's name
+    (`## packages/other_pkg`), which is a mono-repo layout, not the
+    single-package one most Flutter apps have.
+
+    The two misses compound, and the compound was measured rather than
+    assumed. In the Flutter application this language support was built
+    against, every one of the 232 internal imports is either relative (223)
+    or `package:` naming the app's own package (9). **Not one internal edge
+    is visible to the boundary gate.** It reports no findings, and that
+    result carries no information at all. Read a clean boundary run on a
+    single-package Flutter repository as "nothing was checked", not as
+    "nothing was wrong".
   - **A `package:` URI containing `../` is not normalised.**
     `package:app/features/../core/x.dart` is kept as the literal
     `app/features/../core/x`, and `..` is not a segment any declared module
