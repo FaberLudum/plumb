@@ -119,6 +119,9 @@ What this repository can already do, and where. Regenerate with
 ## crates/plumb-core/src/languages/csharp.rs
 - struct `CSharp`
 
+## crates/plumb-core/src/languages/dart.rs
+- struct `Dart`
+
 ## crates/plumb-core/src/languages/javascript.rs
 - struct `JavaScript`
 
