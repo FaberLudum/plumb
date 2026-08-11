@@ -21,11 +21,12 @@ pub trait Language {
     fn symbols(&self, text: &str) -> Vec<Symbol>;
 }
 
-static ALL: [&(dyn Language + Sync); 4] = [
+static ALL: [&(dyn Language + Sync); 5] = [
     &rust::Rust,
     &python::Python,
     &javascript::JavaScript,
     &csharp::CSharp,
+    &dart::Dart,
 ];
 
 pub fn all() -> &'static [&'static (dyn Language + Sync)] {
