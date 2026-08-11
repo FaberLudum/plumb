@@ -5,6 +5,7 @@
 //! Adding a language = implement `Language` in a new file, add it to `ALL`.
 
 mod csharp;
+mod dart;
 mod javascript;
 mod python;
 mod rust;
