@@ -92,6 +92,9 @@ What this repository can already do, and where. Regenerate with
 ## crates/plumb-core/src/ecosystems/nuget.rs
 - struct `NuGet`
 
+## crates/plumb-core/src/ecosystems/pub_dev.rs
+- struct `PubDev`
+
 ## crates/plumb-core/src/ecosystems/pypi.rs
 - fn `parse_requirements`
 - fn `parse_pyproject`

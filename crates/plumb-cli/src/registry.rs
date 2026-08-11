@@ -1155,6 +1155,13 @@ impl Registry for RegistryRouter {
             Ecosystem::PyPi => self.pypi.exists(name),
             Ecosystem::Npm => self.npm.exists(name),
             Ecosystem::NuGet => self.nuget.exists(name),
+            // No pub.dev registry client yet — that is Task 2. `Unknown` is
+            // the honest answer for a registry this router cannot consult:
+            // "never a violation", exactly as it is for a PyPI, npm or
+            // NuGet lookup that could not reach the network. This must not
+            // become `Missing`, which would block every build with an added
+            // pub.dev package on a registry nobody asked.
+            Ecosystem::Pub => Existence::Unknown,
         }
     }
 }

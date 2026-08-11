@@ -459,6 +459,10 @@ fn package_does_not_exist(dependency: &AddedDependency) -> Finding {
         Ecosystem::PyPi => "PyPI",
         Ecosystem::Npm => "npm",
         Ecosystem::NuGet => "NuGet",
+        // Dead arm for now: `RegistryRouter::exists` answers `Unknown` for
+        // every pub.dev lookup until Task 2 wires a real registry client,
+        // and `Unknown` never reaches this function — see `registry.rs`.
+        Ecosystem::Pub => "pub.dev",
     };
 
     Finding {

@@ -26,7 +26,8 @@ pub trait EcosystemSpec {
     fn parse(&self, filename: &str, text: &str) -> crate::manifest::Manifest;
 }
 
-static ALL: [&(dyn EcosystemSpec + Sync); 3] = [&pypi::PyPi, &npm::Npm, &nuget::NuGet];
+static ALL: [&(dyn EcosystemSpec + Sync); 4] =
+    [&pypi::PyPi, &npm::Npm, &nuget::NuGet, &pub_dev::PubDev];
 
 pub fn specs() -> &'static [&'static (dyn EcosystemSpec + Sync)] {
     &ALL
@@ -47,7 +48,7 @@ pub fn for_path(path: &str) -> Option<&'static (dyn EcosystemSpec + Sync)> {
 mod tests {
     use super::*;
 
-    const PROBES: [&str; 7] = [
+    const PROBES: [&str; 8] = [
         "requirements.txt",
         "requirements-dev.txt",
         "pyproject.toml",
@@ -55,6 +56,7 @@ mod tests {
         "Api.csproj",
         "Directory.Packages.props",
         "packages.config",
+        "pubspec.yaml",
     ];
 
     #[test]
@@ -117,5 +119,9 @@ mod tests {
         // `package.json` matched nothing at all either way — see this
         // module's history.
         assert!(for_path("a/b/package.json").is_some());
+        // Same pin for pub.dev: a monorepo's Flutter package is never at
+        // the repository root, so this is the ordinary case, not an edge
+        // case.
+        assert!(for_path("packages/app/pubspec.yaml").is_some());
     }
 }
