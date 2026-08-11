@@ -57,7 +57,7 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
 
     // export function NAME, export async function NAME
     if let Some(rest) = trimmed.strip_prefix("export async function ") {
-        let name = crate::index::identifier(rest);
+        let name = super::identifier(rest);
         if !name.is_empty() {
             return Some(Symbol {
                 kind: "function".to_string(),
@@ -67,7 +67,7 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
     }
 
     if let Some(rest) = trimmed.strip_prefix("export function ") {
-        let name = crate::index::identifier(rest);
+        let name = super::identifier(rest);
         if !name.is_empty() {
             return Some(Symbol {
                 kind: "function".to_string(),
@@ -78,7 +78,7 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
 
     // export default function NAME, export default async function NAME
     if let Some(rest) = trimmed.strip_prefix("export default async function ") {
-        let name = crate::index::identifier(rest);
+        let name = super::identifier(rest);
         if !name.is_empty() {
             return Some(Symbol {
                 kind: "function".to_string(),
@@ -88,7 +88,7 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
     }
 
     if let Some(rest) = trimmed.strip_prefix("export default function ") {
-        let name = crate::index::identifier(rest);
+        let name = super::identifier(rest);
         if !name.is_empty() {
             return Some(Symbol {
                 kind: "function".to_string(),
@@ -99,7 +99,7 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
 
     // export class NAME
     if let Some(rest) = trimmed.strip_prefix("export class ") {
-        let name = crate::index::identifier(rest);
+        let name = super::identifier(rest);
         if !name.is_empty() {
             return Some(Symbol {
                 kind: "class".to_string(),
@@ -110,7 +110,7 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
 
     // export const NAME
     if let Some(rest) = trimmed.strip_prefix("export const ") {
-        let name = crate::index::identifier(rest);
+        let name = super::identifier(rest);
         if !name.is_empty() {
             return Some(Symbol {
                 kind: "const".to_string(),
@@ -121,7 +121,7 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
 
     // export let NAME
     if let Some(rest) = trimmed.strip_prefix("export let ") {
-        let name = crate::index::identifier(rest);
+        let name = super::identifier(rest);
         if !name.is_empty() {
             return Some(Symbol {
                 kind: "let".to_string(),
@@ -132,7 +132,7 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
 
     // export interface NAME
     if let Some(rest) = trimmed.strip_prefix("export interface ") {
-        let name = crate::index::identifier(rest);
+        let name = super::identifier(rest);
         if !name.is_empty() {
             return Some(Symbol {
                 kind: "interface".to_string(),
@@ -143,7 +143,7 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
 
     // export type NAME
     if let Some(rest) = trimmed.strip_prefix("export type ") {
-        let name = crate::index::identifier(rest);
+        let name = super::identifier(rest);
         if !name.is_empty() {
             return Some(Symbol {
                 kind: "type".to_string(),
@@ -154,7 +154,7 @@ fn javascript_symbol(line: &str) -> Option<Symbol> {
 
     // export enum NAME
     if let Some(rest) = trimmed.strip_prefix("export enum ") {
-        let name = crate::index::identifier(rest);
+        let name = super::identifier(rest);
         if !name.is_empty() {
             return Some(Symbol {
                 kind: "enum".to_string(),

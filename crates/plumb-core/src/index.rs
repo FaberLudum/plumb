@@ -74,13 +74,6 @@ pub fn render(entries: &[(String, Vec<Symbol>)]) -> String {
     doc
 }
 
-/// Extract an identifier from the start of a string.
-pub(crate) fn identifier(text: &str) -> String {
-    text.chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

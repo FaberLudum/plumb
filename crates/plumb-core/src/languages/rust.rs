@@ -64,7 +64,7 @@ fn rust_symbol(line: &str, kinds: &[&str]) -> Option<Symbol> {
             .filter(|tail| tail.starts_with(|c: char| c.is_whitespace()))
             .map(|tail| (*kind, tail))
     })?;
-    let name = crate::index::identifier(rest.trim_start());
+    let name = super::identifier(rest.trim_start());
     (!name.is_empty()).then(|| Symbol {
         kind: kind.to_string(),
         name,
