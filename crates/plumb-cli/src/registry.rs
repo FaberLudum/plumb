@@ -534,6 +534,22 @@ impl PyPiRegistry {
 
     /// Answers from the cache, then from PyPI, then not at all.
     ///
+    /// The empty name is rejected before anything else runs. `all()` over an
+    /// empty iterator is vacuously true, so [`is_valid_pypi_name`]'s charset
+    /// check alone cannot catch `""` — it has no first or last character
+    /// for an ends anchor to fail on either — which is why this checks
+    /// emptiness directly rather than delegating to the full predicate.
+    /// The full predicate is deliberately *not* the gate here:
+    /// `exists_via`'s legacy-cache-key fallback intentionally answers a
+    /// colon-bearing name like `"npm:foo"` from the cache-miss path rather
+    /// than treating it as invalid syntax — see
+    /// `the_legacy_fallback_does_not_read_another_ecosystems_prefixed_key`
+    /// — and gating on the whole charset predicate here would take that
+    /// path away from it. Left unguarded, `""` would reach `exists_via`
+    /// unchanged and, on a cache miss while online, build
+    /// `https://pypi.org/pypi//json` and let the server decide what
+    /// answers.
+    ///
     /// Anything that is not a definite success or 404 — a timeout, a proxy, a
     /// firewall, a 5xx — is [`Existence::Unknown`], and `Unknown` is never
     /// cached: it is a fact about this run's network, not about the package.
@@ -541,6 +557,9 @@ impl PyPiRegistry {
     /// See [`PyPiRegistry::exists_via`] for the order this resolves in, and
     /// for the latch that stops a dead network being retried once per name.
     pub fn exists(&self, name: &str) -> Existence {
+        if name.is_empty() {
+            return Existence::Missing;
+        }
         self.exists_via(name, |name| self.lookup(name))
     }
 
@@ -588,8 +607,17 @@ impl PyPiRegistry {
 /// inline in [`PyPiRegistry::lookup`] so the character set can be pinned
 /// without a request, the same reasoning [`npm_url`] and
 /// [`is_valid_npm_name`] follow for npm.
+///
+/// Non-empty is checked explicitly, ahead of the charset check rather than
+/// folded into it: `all()` over an empty iterator is vacuously true, so the
+/// charset test alone calls `""` a legal PyPI name. [`PyPiRegistry::exists`]
+/// gates on this the same way NuGet's own guard gates
+/// [`NuGetRegistry::exists`] — see [`is_valid_nuget_id`]'s doc comment for
+/// the sibling bug this mirrors, and why an empty id is the one case an
+/// ends anchor alone cannot catch: an empty string has no first or last
+/// character to anchor.
 fn is_valid_pypi_name(name: &str) -> bool {
-    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// The agent every lookup runs on.
@@ -698,9 +726,36 @@ fn npm_url(name: &str) -> String {
 /// is already a safe, literal URL path-segment character — [`npm_url`]
 /// only ever has to encode the `/` of a scoped name, never anything this
 /// function would have rejected.
+///
+/// The first and last character must also be ASCII alphanumeric, with one
+/// exception: the *first* character may instead be `@`, because a scoped
+/// name legitimately starts with one — see [`npm_url`] for how
+/// `@scope/name` reaches the wire. A charset check alone is not enough
+/// here, the same lesson [`is_valid_nuget_id`] documents for NuGet: `.` is
+/// otherwise an ordinary character, so it admitted `.` and `..` whole — RFC
+/// 3986 dot-segments — and `npm_url("..")` emitted
+/// `https://registry.npmjs.org/..`. The pinned http client does not
+/// normalise a dot-segment out of the path client-side, so that request
+/// reached the wire as written; npm's own server-side path normalisation
+/// resolves it to the registry root and answers 200, which would have
+/// cached `npm:..` as `Exists` on a blocking gate for a name nobody could
+/// ever publish. Anchoring the end alphanumeric — and the start
+/// alphanumeric-or-`@` — kills `.` and `..` structurally, along with the
+/// wider family of leading/trailing `.` or `-`, neither of which npm issues
+/// a real package name with.
 fn is_valid_npm_name(name: &str) -> bool {
-    name.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '/'))
+    let charset_ok = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '/'));
+    let starts_ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '@');
+    let ends_ok = name
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    charset_ok && starts_ok && ends_ok
 }
 
 /// Resolves names against npm, with the same on-disk cache, offline mode and
