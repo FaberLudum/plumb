@@ -2226,6 +2226,33 @@ mod tests {
         );
     }
 
+    /// `.` and `..` are RFC 3986 dot-segments: `is_valid_nuget_id`'s old
+    /// charset admitted both, since `.` is otherwise a legal character, so
+    /// `nuget_url("..")` emitted `.../v3-flat2/../index.json` — a path the
+    /// pinned http client does not normalise client-side, leaving
+    /// server-side normalisation to decide what actually answers, cached
+    /// under `nuget:..` as a Tier A verdict regardless. Leading or trailing
+    /// `.`/`-` are the same family: a package ID with a punctuation end is
+    /// not one nuget.org would ever issue, so refusing it costs nothing.
+    /// `"Newtonsoft.Json"` is the positive control: an ordinary ID with
+    /// interior dots must still pass.
+    #[test]
+    fn a_dot_segment_id_is_missing_without_a_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NuGetRegistry::new(false, Some(cache_path.clone()));
+
+        for name in ["..", ".", ".leading", "trailing.", "-leading", "trailing-"] {
+            assert_eq!(registry.exists(name), Existence::Missing, "{name:?}");
+        }
+        assert!(
+            !cache_path.exists(),
+            "a dot-segment or edge-punctuated id should never create a cache file"
+        );
+
+        assert!(is_valid_nuget_id("Newtonsoft.Json"), "positive control");
+    }
+
     /// NuGet package IDs are case-insensitive, so two spellings of the same
     /// ID must share one cache entry. Offline, so the only way this can
     /// answer at all is from the cache.
