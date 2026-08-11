@@ -114,6 +114,21 @@ warning: crates/plumb-core/src/lib.rs imports `plumb_cli`, but crates/plumb-core
   evidence: taxonomy §4.5
 ```
 
+**A file under no declared module is not checked, and the skip is
+silent.** Attribution is by path prefix against the headings in
+`.plumb/architecture.md`; a source file no heading covers is skipped
+before a single import is extracted — deliberately, because flagging
+every unattributed file would make the gate unadoptable on any repository
+that declares its modules incrementally. The cost is that the silence is
+indistinguishable from a clean check. It is not hypothetical: on the
+Flutter repository used for calibration, 59 of 138 swept Dart files —
+`test/` and `integration_test/`, carrying 180 `package:` imports between
+them — sat under no declared module and could never have produced a
+finding. If you want a directory checked, declare it: a heading like
+`## test` with `May depend on: <your app module>` brings its files into
+the gate with one line. What the architecture file does not name, Plumb
+does not police.
+
 **Adapter drift.** Warns when the generated instruction files no longer
 match `.plumb/`. The same four files `plumb adapters` writes are compared
 against what re-rendering `.plumb/` right now would produce, byte for byte
