@@ -203,7 +203,10 @@ What it does not do yet, listed because a gate that stays quiet about them is
 worse than one that has none. The list is what has been found, not a proof
 that nothing else is there.
 
-- PyPI, npm and NuGet — three ecosystems, added one at a time.
+- **Only PyPI, npm and NuGet are read**, added one at a time. pub.dev/Dart
+  (`pubspec.yaml`) is queued as the next ecosystem; until it lands, a
+  dependency declared only there is invisible to Plumb — never looked up,
+  in either direction.
 - **NuGet checks existence only, and only what a `.csproj`,
   `.fsproj`/`.vbproj` or `Directory.Packages.props` states literally.**
   Concretely:
@@ -227,7 +230,7 @@ that nothing else is there.
   - `packages.config` is recognised by filename and deliberately never
     parsed, even when it is well-formed and holds what looks like an
     ordinary package declaration — always a `manifest-understood` warning
-    naming the migration path (`PackageReference`), never a lookup. Task 1's
+    naming the migration path (`PackageReference`), never a lookup. The
     tests pin this directly: a `packages.config` with a real-looking
     `<package id="…" version="…" />` still yields no name.
   - **Lockfiles are not read.** `packages.lock.json` is invisible to Plumb,

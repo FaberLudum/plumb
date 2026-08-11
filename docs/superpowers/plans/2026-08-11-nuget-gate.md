@@ -81,7 +81,7 @@ Run: `cargo test -p plumb-core --locked nuget` — expected: compile failure (mi
 ```rust
 an_illegal_nuget_id_is_missing_without_a_request   // "bad name" (space), "x?y", "" → Missing; assert no request recorded by the stub transport
 nuget_ids_are_case_insensitive_in_the_cache        // seed cache for "newtonsoft.json", ask "Newtonsoft.Json" → answered from cache, no request
-the_lookup_url_lowercases_the_id                   // stub transport captures the URL for "OpenAI" → ".../v3-flat2/openai/index.json"
+the_lookup_url_lowercases_the_id                   // stub transport captures the URL for "OpenAI" → ".../v3-flat2/openai/index.json" [WRONG, drafted from memory — the real path is v3-flatcontainer; Task 3's live smoke test against nuget.org caught it, see nuget_url's doc comment]
 an_unreachable_registry_is_unknown                 // transport error → Unknown, cached nothing
 a_404_is_missing_and_a_200_is_exists               // per the flat-container contract
 cache_keys_carry_the_nuget_prefix                  // written entry key starts "nuget:"
@@ -89,7 +89,7 @@ cache_keys_carry_the_nuget_prefix                  // written entry key starts "
 
 Valid-ID rule to implement: non-empty, ASCII `[A-Za-z0-9._-]` only. Run the nuget-filtered tests, watch them fail to compile. Commit: `test(registry): pin the NuGet registry client's contract`.
 
-- [ ] **Step 2: green.** Implement against `https://api.nuget.org/v3-flat2/{id_lowercased}/index.json`, cache key `format!("nuget:{}", id.to_ascii_lowercase())`. Follow npm's structure for freshness/`exists_via`/transport injection exactly — the reviewers will diff you against it. Full gates. Commit: `feat(registry): the package gate covers nuget.org`.
+- [ ] **Step 2: green.** Implement against `https://api.nuget.org/v3-flat2/{id_lowercased}/index.json` [WRONG, drafted from memory — the real path is `v3-flatcontainer`; `v3-flat2` 404s for every lookup, real packages included, and nothing caught it until Task 3's live smoke test ran the built binary against nuget.org for real — see `nuget_url`'s doc comment for the full story], cache key `format!("nuget:{}", id.to_ascii_lowercase())`. Follow npm's structure for freshness/`exists_via`/transport injection exactly — the reviewers will diff you against it. Full gates. Commit: `feat(registry): the package gate covers nuget.org`.
 
 ### Task 3: end-to-end, docs, honesty notes, dogfood
 
