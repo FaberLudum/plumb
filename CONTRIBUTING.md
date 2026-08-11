@@ -106,10 +106,18 @@ not several dispatch points to keep in sync.
    unread shape must warn (`manifest-understood`), never pass silently.
    Then **register it** with one line in the `ALL` table in
    `ecosystems/mod.rs`. That line is what makes `manifest::parse` see the
-   new ecosystem — there is no second dispatch to update. Structural tests
-   in `ecosystems/mod.rs` enforce table coherence automatically: no probe
-   filename is matched by two specs, and every spec matches at least one
-   probe.
+   new ecosystem, and it is the only dispatch point most ecosystems ever
+   need. Structural tests in `ecosystems/mod.rs` enforce table coherence
+   automatically: no probe filename is matched by two specs, and every spec
+   matches at least one probe.
+
+   The one thing the table cannot express is a full-path rule: `matches`
+   only ever sees the bare filename, never the directory it sits in. npm's
+   node_modules vendoring exclusion needs the full path — a vendored
+   `package.json` is recognised by where it sits, not by its name — so it
+   is declared as a hand-written check in `manifest::parse` itself, ahead of
+   the table lookup. If your ecosystem needs the same kind of rule, that is
+   where it goes; everything else stays in the one file above.
 2. **Added-name extraction**: `crates/plumb-core/src/deps.rs` already
    compares manifests by ecosystem; confirm the diff pairing picks up the
    new filename.
