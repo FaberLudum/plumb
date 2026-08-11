@@ -111,8 +111,9 @@ example; it followed these steps exactly.
      resolve to the wrong package and cache a poisoned answer. npm's
      validator exists because exactly that happened.
    - Cache entries answer for 30 days and live outside the repository.
-4. **Update the blind spots.** The README's *Blind spots* section lists
-   what each ecosystem's reader does not cover. Extend it in the same pull
+4. **Update the blind spots.** The *Blind spots* section of
+   [docs/gates.md](docs/gates.md) lists what each ecosystem's reader does
+   not cover. Extend it in the same pull
    request; an undocumented gap in a blocking gate is the failure mode this
    project exists to catch.
 
