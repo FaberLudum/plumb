@@ -627,7 +627,14 @@ that nothing else is there.
   package — was swept a second time against a `.plumb/architecture.md`
   declaring `## lib/core`, `## lib/features`, `## lib/shared` and
   `## lib/l10n`, with `lib/shared` permitted nothing. Every tracked `.dart`
-  file was put through the gate in one run. It reported four findings, all
+  file was put through the gate in one run — but "put through" is not
+  "checked": 59 of those 138 files live under `test/` and
+  `integration_test/`, outside every declared module, and their 180
+  `package:` imports are attributed to no module and so can never produce a
+  finding. That skip is by design — `module_of` returns `None` for a path no
+  module heading covers, and a file the gate cannot attribute is a file it
+  will not judge — but it belongs next to the measurement rather than only
+  in the design notes. It reported four findings, all
   four in `lib/shared/models/enum_mappers.dart`, all four the
   `shared → features` crossings the repository genuinely has, and nothing
   else anywhere in the tree. Declaring each feature its own module and

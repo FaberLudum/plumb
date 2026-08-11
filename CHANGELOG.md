@@ -59,7 +59,11 @@ here explicitly.
   the pub package name and Dart keeps library code under `lib/`, which no
   import path spells. All 232 internal imports of the Flutter application
   this was built against fell into one of those two holes, so the gate saw
-  no edges whatsoever. **Both holes are closed by the entry above, which
+  no edges whatsoever. That 232 was itself an undercount — bare-filename
+  relative imports such as `import 'chat_state.dart';` were invisible to
+  the tally for the same reason they were invisible to the gate, and the
+  measurement in [docs/gates.md](docs/gates.md) puts the real figure at 271
+  internal imports over the same tree. **Both holes are closed by the entry above, which
   supersedes this passage**; what is still current here is the shape of the
   extractor, not its reach. Indexing was unaffected throughout and works on
   both languages. Tier B throughout; evidence: taxonomy §4.5, §11.
