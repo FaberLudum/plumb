@@ -36,7 +36,7 @@ pub struct Violation {
 /// because of heuristics like this one.
 pub fn imports(path: &str, text: &str) -> Vec<String> {
     match crate::languages::for_extension(&crate::languages::extension_of(path)) {
-        Some(language) => language.imports(text),
+        Some(language) => language.imports(path, text),
         None => Vec::new(),
     }
 }

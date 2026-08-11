@@ -106,7 +106,7 @@ impl Language for Python {
     fn extensions(&self) -> &'static [&'static str] {
         &["py"]
     }
-    fn imports(&self, text: &str) -> Vec<String> {
+    fn imports(&self, _path: &str, text: &str) -> Vec<String> {
         python_imports(text)
     }
     fn symbols(&self, text: &str) -> Vec<Symbol> {

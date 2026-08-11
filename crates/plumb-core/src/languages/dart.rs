@@ -189,7 +189,7 @@ impl Language for Dart {
     fn extensions(&self) -> &'static [&'static str] {
         &["dart"]
     }
-    fn imports(&self, text: &str) -> Vec<String> {
+    fn imports(&self, _path: &str, text: &str) -> Vec<String> {
         dart_imports(text)
     }
     fn symbols(&self, text: &str) -> Vec<Symbol> {

@@ -168,7 +168,7 @@ impl Language for CSharp {
     fn extensions(&self) -> &'static [&'static str] {
         &["cs"]
     }
-    fn imports(&self, text: &str) -> Vec<String> {
+    fn imports(&self, _path: &str, text: &str) -> Vec<String> {
         csharp_imports(text)
     }
     fn symbols(&self, text: &str) -> Vec<Symbol> {

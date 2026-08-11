@@ -16,7 +16,14 @@ pub trait Language {
     /// Lowercased extensions this language claims.
     fn extensions(&self) -> &'static [&'static str];
     /// Import paths as written, line-based heuristic (see boundaries.rs docs).
-    fn imports(&self, text: &str) -> Vec<String>;
+    ///
+    /// `path` is the importing file's own path. Languages whose imports are
+    /// absolute (Rust's `use`, C#'s `using`) do not need it, but a language
+    /// with relative imports cannot resolve one without knowing where the
+    /// importing file sits: Dart's `import '../shared/x.dart'` names a
+    /// sibling of the importer's directory, so the same import line in two
+    /// files means two different targets.
+    fn imports(&self, path: &str, text: &str) -> Vec<String>;
     /// Public symbols, line-based heuristic (see index.rs docs).
     fn symbols(&self, text: &str) -> Vec<Symbol>;
 }
