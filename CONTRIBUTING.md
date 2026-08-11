@@ -61,6 +61,69 @@ Other conventions, all checked by review rather than by tooling:
 - Conventional Commits, one commit per step. A test and the change that makes
   it pass are two commits, in that order.
 
+## Adding a language
+
+Boundary checking and index scanning dispatch on file extension, in two
+places that must stay in agreement — and tests pin that they do, so half an
+addition is a red test, not a silent gap.
+
+1. **Imports** — `crates/plumb-core/src/boundaries.rs`: add the extension to
+   the `match` in `imports` with an extraction function for the language's
+   import syntax, and to the extension list `is_scannable` consults. The pin
+   test `every_known_extension_is_dispatched_by_imports` fails until both
+   agree.
+2. **Symbols** — `crates/plumb-core/src/index.rs`: add the extension to the
+   `symbols` dispatch with a `<language>_symbols` extractor, and to
+   `is_known_extension`. Pinned by
+   `every_known_extension_is_dispatched_by_symbols`.
+
+Extractors are heuristic and line-based on purpose — no parser dependency,
+no AST. Look at `python_symbols` for the shape: recognise the declaration
+forms that make up a public surface, skip the rest. Perfect recall is not
+the bar; a stable, deterministic surface map is.
+
+This needs no new taxonomy row: it extends rules that already have one
+(§4.5 for boundaries, §11 for the index) to another language.
+
+## Adding a package ecosystem
+
+The `package-exists` gate is Tier A — it blocks builds — so this path is
+stricter. The npm addition
+([PR #10](https://github.com/FaberLudum/plumb/pull/10)) is the worked
+example; it followed these steps exactly.
+
+1. **Manifest parsing** — `crates/plumb-core/src/manifest.rs`: add the
+   variant to `Ecosystem`, dispatch the manifest filename in `parse`, and
+   emit a `Gap` for every declaration shape you knowingly do not read —
+   an unread shape must warn (`manifest-understood`), never pass silently.
+2. **Added-name extraction** — `crates/plumb-core/src/deps.rs` already
+   compares manifests by ecosystem; confirm the diff pairing picks up the
+   new filename.
+3. **Registry client** — `crates/plumb-cli/src/registry.rs`: implement a
+   `<Name>Registry` with the same contract as `PyPiRegistry` and
+   `NpmRegistry`, add the arm in `RegistryRouter::exists`, and prefix cache
+   keys with the ecosystem (`npm:` is the precedent; bare keys are legacy
+   PyPI). Three properties are non-negotiable:
+   - An unreachable registry is `Existence::Unknown` — **never** a
+     violation. The gate blocks on proof of absence, not on absence of proof.
+   - A name that is illegal in the ecosystem's namespace is `Missing`
+     *without* a request — a malformed name interpolated into a URL can
+     resolve to the wrong package and cache a poisoned answer. npm's
+     validator exists because exactly that happened.
+   - Cache entries answer for 30 days and live outside the repository.
+4. **Update the blind spots.** The README's *Blind spots* section lists
+   what each ecosystem's reader does not cover. Extend it in the same pull
+   request; an undocumented gap in a blocking gate is the failure mode this
+   project exists to catch.
+
+Documenting the registry's lookup endpoint and its failure modes in the pull
+request is expected — reviewers verify the `Unknown`/`Missing` mapping
+against the registry's actual behaviour, not against its documentation.
+
+No new taxonomy row is needed for another registry (§4.1 covers package
+hallucination as a defect). A genuinely new *rule* — a different defect,
+not a different ecosystem — needs its row first.
+
 ## Tests must not contact the network
 
 No test in `plumb-core` can reach a registry — that is what the boundary above
