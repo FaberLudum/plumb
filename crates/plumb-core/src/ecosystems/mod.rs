@@ -70,6 +70,30 @@ mod tests {
         }
     }
 
+    /// A spec's `parse` must stamp the same `Ecosystem` its own `ecosystem()`
+    /// declares. Nothing in the trait enforces this — `parse` builds a
+    /// `Manifest` by hand and `ecosystem()` is a separate method — so a new
+    /// spec (NuGet is queued) could set them inconsistently with no other
+    /// test failing, and the first caller to route on `ecosystem()` (a
+    /// tabled `RegistryRouter`) would then send lookups to the wrong
+    /// registry.
+    #[test]
+    fn parse_stamps_the_ecosystem_the_spec_declares() {
+        for spec in specs() {
+            let probe = PROBES
+                .iter()
+                .find(|probe| spec.matches(probe))
+                .unwrap_or_else(|| panic!("a spec matched none of the known probes"));
+            let manifest = spec.parse(probe, "");
+            assert_eq!(
+                manifest.ecosystem,
+                spec.ecosystem(),
+                "{:?}: parse stamped a different ecosystem than ecosystem() declares",
+                spec.ecosystem()
+            );
+        }
+    }
+
     /// `for_path` must extract the final path segment before asking a spec
     /// to match, the same lesson `languages::mod`'s
     /// `for_extension_answers_for_every_declared_extension` pins for
