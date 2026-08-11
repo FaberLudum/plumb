@@ -5,6 +5,7 @@
 //! line here. Adding an ecosystem = implement `EcosystemSpec` in a new file,
 //! add it to `ALL`.
 
+pub(crate) mod npm;
 pub(crate) mod pypi;
 
 /// One package ecosystem's manifest recognition and parsing.
@@ -23,7 +24,7 @@ pub trait EcosystemSpec {
     fn parse(&self, filename: &str, text: &str) -> crate::manifest::Manifest;
 }
 
-static ALL: [&(dyn EcosystemSpec + Sync); 1] = [&pypi::PyPi];
+static ALL: [&(dyn EcosystemSpec + Sync); 2] = [&pypi::PyPi, &npm::Npm];
 
 pub fn specs() -> &'static [&'static (dyn EcosystemSpec + Sync)] {
     &ALL
@@ -82,5 +83,10 @@ mod tests {
     fn for_path_extracts_the_final_path_segment_before_matching() {
         assert!(for_path("a/b/pyproject.toml").is_some());
         assert!(for_path("packages/api/requirements.txt").is_some());
+        // Pins the npm path through the same extraction: vacuous before the
+        // ecosystem table carried an npm spec, since a directory-qualified
+        // `package.json` matched nothing at all either way — see this
+        // module's history.
+        assert!(for_path("a/b/package.json").is_some());
     }
 }
