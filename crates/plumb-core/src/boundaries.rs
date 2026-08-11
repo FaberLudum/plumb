@@ -36,7 +36,9 @@ pub struct Violation {
 /// because of heuristics like this one.
 pub fn imports(path: &str, text: &str) -> Vec<String> {
     match extension(path).as_str() {
-        "rs" => rust_imports(text),
+        "rs" => crate::languages::for_extension("rs")
+            .map(|language| language.imports(text))
+            .unwrap_or_default(),
         "py" => python_imports(text),
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => javascript_imports(text),
         _ => Vec::new(),
@@ -263,40 +265,6 @@ fn resolve_module<'a>(permitted: &str, architecture: &'a Architecture) -> Option
         .find(|module| names_module(permitted, module))
 }
 
-/// Stops the path at `;`, whitespace, `{` or `(` — whichever comes first —
-/// and strips a trailing `::` left behind when a brace group followed
-/// (`plumb_core::{a, b}` stops at `{`, leaving `plumb_core::` to trim).
-fn rust_name(rest: &str) -> &str {
-    let end = rest
-        .find(|c: char| c == ';' || c.is_whitespace() || c == '{' || c == '(')
-        .unwrap_or(rest.len());
-    let name = &rest[..end];
-    name.strip_suffix("::").unwrap_or(name)
-}
-
-/// `use NAME[::…];` / `use NAME;` (also `pub use`), `extern crate NAME;`,
-/// kept as the full path written in the source. `crate`, `self` and `super`
-/// name the current crate, not a dependency, so a path is skipped whenever
-/// its *first* segment is one of them.
-fn rust_imports(text: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let rest = trimmed
-            .strip_prefix("pub use ")
-            .or_else(|| trimmed.strip_prefix("use "))
-            .or_else(|| trimmed.strip_prefix("extern crate "));
-        if let Some(rest) = rest {
-            let name = rust_name(rest);
-            let head = name.split("::").next().unwrap_or("");
-            if !name.is_empty() && head != "crate" && head != "self" && head != "super" {
-                names.push(name.to_string());
-            }
-        }
-    }
-    names
-}
-
 /// Stops a dotted Python module path at `,`, whitespace or `(` — the dots
 /// inside the path are kept, so the whole dotted path comes back as written.
 fn python_name(rest: &str) -> &str {
@@ -378,31 +346,6 @@ fn javascript_imports(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::architecture;
-
-    #[test]
-    fn rust_use_lines_yield_the_full_path() {
-        let text = "use plumb_core::manifest;\npub use serde::Serialize;\nuse std::path::Path;\n";
-        assert_eq!(
-            imports("crates/x/src/main.rs", text),
-            vec![
-                "plumb_core::manifest",
-                "serde::Serialize",
-                "std::path::Path"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_rust_brace_group_yields_the_path_before_the_brace() {
-        let text = "use plumb_core::{manifest, finding};\n";
-        assert_eq!(imports("crates/x/src/main.rs", text), vec!["plumb_core"]);
-    }
-
-    #[test]
-    fn rust_crate_self_and_super_are_not_imports() {
-        let text = "use crate::git;\nuse self::inner;\nuse super::outer;\n";
-        assert!(imports("crates/x/src/main.rs", text).is_empty());
-    }
 
     #[test]
     fn python_imports_yield_the_dotted_path() {
