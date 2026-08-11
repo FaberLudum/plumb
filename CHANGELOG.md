@@ -6,6 +6,22 @@ Notable changes, most recent first. Format follows
 contract can change in minor versions, and each such change is called out
 here explicitly.
 
+## [Unreleased]
+
+- **NuGet: the `package-exists` gate's third ecosystem.** `.csproj`,
+  `.fsproj`, `.vbproj` and `Directory.Packages.props` are read for
+  `PackageReference`, `PackageVersion` and `GlobalPackageReference`
+  elements' `Include` attribute; a nonexistent package id blocks exactly
+  like a PyPI or npm one, against nuget.org's flat-container index, cached
+  outside the repository under the same 30-day/1-hour split. `Version`
+  ranges are unchecked (existence only); an MSBuild property expression
+  (`$(...)`) in `Include` is a `manifest-understood` gap, not a lookup;
+  `packages.config` is recognised by filename and deliberately never
+  parsed, always `manifest-understood`. Evidence: taxonomy §4.1, with the
+  honesty note that Spracklen and Churilov measured Python and JavaScript
+  hallucination rates, not C#/.NET — the NuGet extension rests on the
+  defect class and objective detection alone.
+
 ## [0.1.1] — 2026-08-11
 
 No behaviour change to the gate or the CLI. This release exists to ship

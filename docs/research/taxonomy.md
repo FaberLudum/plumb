@@ -79,7 +79,7 @@ tried and does not work.
 | Metric | Share of non-existent packages among packages referenced |
 | Effect, 2025 | 440,445 of 2.23M samples (19.7%); open-source 21.7% against commercial 5.2% |
 | Effect, 2026 | 4.62% (Claude Haiku 4.5) to 6.10% (GPT-5.4-mini) across roughly 200k prompts |
-| Limits | Python and JavaScript only; temperature-sensitive; the replication covers 5 models |
+| Limits | Python and JavaScript only; temperature-sensitive; the replication covers 5 models; the NuGet/.NET extension rests on the defect class and objective detection alone — Spracklen and Churilov measured Python and JavaScript, not C#/.NET, so a hallucination rate for NuGet packages specifically is unmeasured |
 
 The rate has dropped three- to fourfold on recent models but is not zero, and
 the 2026 replication notes that 53 hallucinated names remain registrable by an
