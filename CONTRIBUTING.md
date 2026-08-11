@@ -92,14 +92,24 @@ This needs no new taxonomy row. It extends rules that already have one
 ## Adding a package ecosystem
 
 The `package-exists` gate is Tier A and blocks builds, so this path is
-stricter. The npm addition
-([PR #10](https://github.com/FaberLudum/plumb/pull/10)) is the worked
-example; it followed these steps exactly.
+stricter. Manifest recognition and parsing both dispatch on a single
+ecosystem table, `crates/plumb-core/src/ecosystems/mod.rs` — the same shape
+as the language table above. There is one place to register an ecosystem,
+not several dispatch points to keep in sync.
 
-1. **Manifest parsing**, in `crates/plumb-core/src/manifest.rs`: add the
-   variant to `Ecosystem`, dispatch the manifest filename in `parse`, and
-   emit a `Gap` for every declaration shape you knowingly do not read.
-   An unread shape must warn (`manifest-understood`), never pass silently.
+1. **Implement `EcosystemSpec`**, in a new file
+   `crates/plumb-core/src/ecosystems/<name>.rs`: `matches` recognises the
+   manifest filename, and `parse` reads it — dispatching on the `filename`
+   it is handed for an ecosystem with more than one manifest syntax (see
+   `ecosystems/pypi.rs`; `ecosystems/npm.rs` shows the single-syntax shape).
+   Emit a `Gap` for every declaration shape you knowingly do not read — an
+   unread shape must warn (`manifest-understood`), never pass silently.
+   Then **register it** with one line in the `ALL` table in
+   `ecosystems/mod.rs`. That line is what makes `manifest::parse` see the
+   new ecosystem — there is no second dispatch to update. Structural tests
+   in `ecosystems/mod.rs` enforce table coherence automatically: no probe
+   filename is matched by two specs, and every spec matches at least one
+   probe.
 2. **Added-name extraction**: `crates/plumb-core/src/deps.rs` already
    compares manifests by ecosystem; confirm the diff pairing picks up the
    new filename.
