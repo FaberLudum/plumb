@@ -590,20 +590,21 @@ fn check_exits_zero_for_a_legacy_uppercase_npm_dependency() {
         .stdout(predicates::str::contains("no findings"));
 }
 
-/// One change touching both a Python and an npm manifest, each with one bad
-/// name, must report both findings — proof that the router dispatches each
-/// manifest's added dependencies to its own registry within a single run,
-/// rather than one registry winning for the whole invocation.
+/// One change touching a Python, an npm and a NuGet manifest, each with one
+/// bad name, must report all three findings — proof that the router
+/// dispatches each manifest's added dependencies to its own registry within
+/// a single run, rather than one registry winning for the whole invocation.
 ///
-/// Only `package.json` needs staging: `requirements.txt` already exists at
-/// HEAD (from `repo_with_requirements`), so its edit is a tracked-file diff
-/// and is visible without it. Staging both via `-A` is harmless — a tracked
-/// file's working-tree content is what `check --diff` reads regardless of
-/// whether it is also staged, per `a_staged_addition_is_invisible_once_the_working_tree_matches_head`'s
+/// Only `package.json` and `Api.csproj` need staging: `requirements.txt`
+/// already exists at HEAD (from `repo_with_requirements`), so its edit is a
+/// tracked-file diff and is visible without it. Staging all three via `-A`
+/// is harmless — a tracked file's working-tree content is what `check
+/// --diff` reads regardless of whether it is also staged, per
+/// `a_staged_addition_is_invisible_once_the_working_tree_matches_head`'s
 /// finding in `check.rs`: staging only changes what `git diff --name-only
 /// HEAD` *lists*, and the working tree here matches what was staged.
 #[test]
-fn a_change_touching_both_pypi_and_npm_manifests_reports_both() {
+fn a_change_touching_all_three_ecosystems_reports_each() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
     std::fs::write(
         in_repo(dir.path(), "requirements.txt"),
@@ -615,12 +616,20 @@ fn a_change_touching_both_pypi_and_npm_manifests_reports_both() {
         r#"{"dependencies":{"left-pad-typo":"^1.0.0"}}"#,
     )
     .expect("write");
+    std::fs::write(
+        in_repo(dir.path(), "Api.csproj"),
+        r#"<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>
+            <PackageReference Include="surely-not-a-real-package-xyz" Version="1.0.0" />
+        </ItemGroup></Project>"#,
+    )
+    .expect("write");
     run_git(&repo(dir.path()), &["add", "-A"]);
     write_cache(
         dir.path(),
         &[
             cache_entry("pypi:requestz", false, 0),
             cache_entry("npm:left-pad-typo", false, 0),
+            cache_entry("nuget:surely-not-a-real-package-xyz", false, 0),
         ]
         .join(","),
     );
@@ -633,7 +642,9 @@ fn a_change_touching_both_pypi_and_npm_manifests_reports_both() {
             predicates::str::contains("requestz")
                 .and(predicates::str::contains("PyPI"))
                 .and(predicates::str::contains("left-pad-typo"))
-                .and(predicates::str::contains("npm")),
+                .and(predicates::str::contains("npm"))
+                .and(predicates::str::contains("surely-not-a-real-package-xyz"))
+                .and(predicates::str::contains("NuGet")),
         );
 }
 
