@@ -538,18 +538,19 @@ impl super::EcosystemSpec for PyPi {
     }
 
     /// PyPI has two unrelated manifest syntaxes, and nothing in `text` alone
-    /// says which one this is. `manifest::parse` always knows the answer from
-    /// the filename that reached it via `matches`, and calls
-    /// [`parse_pyproject`] or [`parse_requirements`] directly rather than
-    /// through this method — so this implementation exists to satisfy the
-    /// trait for a caller with text but no filename, not for that dispatch.
-    /// It tries the TOML syntax first, since a well-formed requirements.txt
-    /// line essentially never parses as a TOML document, and falls back to
-    /// the requirements syntax when it does not.
-    fn parse(&self, _filename: &str, text: &str) -> Manifest {
-        match text.parse::<toml::Table>() {
-            Ok(_) => parse_pyproject(text),
-            Err(_) => parse_requirements(text),
+    /// says which one this is: a malformed `pyproject.toml` is also,
+    /// usually, syntactically valid (if useless) requirements.txt content,
+    /// so sniffing `text` reads it as the wrong format instead of surfacing
+    /// `Gap::Unparseable`. `filename` is what `matches` already used to
+    /// admit this file, and it resolves the ambiguity deterministically:
+    /// `pyproject.toml` routes to [`parse_pyproject`]; every other name
+    /// `matches` admits is a member of the requirements-file family and
+    /// routes to [`parse_requirements`].
+    fn parse(&self, filename: &str, text: &str) -> Manifest {
+        if filename == "pyproject.toml" {
+            parse_pyproject(text)
+        } else {
+            parse_requirements(text)
         }
     }
 }
