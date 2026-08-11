@@ -267,6 +267,22 @@ mod tests {
         assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
     }
 
+    /// MSBuild itself trims an `Include` value before using it — XML
+    /// attribute-value normalisation only touches line endings, not spaces,
+    /// so this is real, writable syntax and not an edge case invented for
+    /// the test. Without trimming, `"  Newtonsoft.Json  "` would flow into
+    /// the registry lookup verbatim and produce a spurious Tier A block on a
+    /// project that restores fine.
+    #[test]
+    fn an_include_with_surrounding_whitespace_is_trimmed() {
+        let text = r#"<Project><ItemGroup>
+            <PackageReference Include="  Newtonsoft.Json  " Version="13.0.1" />
+        </ItemGroup></Project>"#;
+        let manifest = NuGet.parse("Api.csproj", text);
+        assert_eq!(manifest.names, set(&["Newtonsoft.Json"]));
+        assert!(manifest.gaps.is_empty(), "gaps: {:?}", manifest.gaps);
+    }
+
     #[test]
     fn an_msbuild_expression_is_a_gap_not_a_name() {
         let text = r#"<Project><ItemGroup>
