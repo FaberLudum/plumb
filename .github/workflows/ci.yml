@@ -39,14 +39,6 @@ jobs:
     # writer. Every one of those has a test. Development happened on Windows,
     # so Linux and macOS are the platforms whose behaviour nobody has watched.
     #
-    # But not all three on every pull request. On a private repository a
-    # macOS minute bills at 10x and a Windows minute at 2x, so the full
-    # matrix costs roughly eight times what its Linux slice does. Pull
-    # requests get Linux — the platform the developer's own machine is not —
-    # and the full matrix runs where it protects the thing that lasts: every
-    # push to main, and any run started by hand. A platform-specific break
-    # can therefore land and be found one merge late; that trade is taken
-    # knowingly, minutes being finite and main being fixable.
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     # A full run takes a few minutes. This is a bound on a hang, not a target:
@@ -56,14 +48,17 @@ jobs:
     strategy:
       # A failure on one platform must not hide a different failure on another;
       # telling those apart is the entire reason for the matrix.
+      #
+      # The full matrix runs on pull requests too. It was cut to the Linux
+      # slice while this repository was private — a macOS minute billed at
+      # 10x there — but on a public repository standard hosted runners are
+      # free, so the pull request gets back the platform coverage and a
+      # platform-specific break is caught before merge, not one merge late.
+      # Branch protection requires all three, so this list and the required
+      # checks move together.
       fail-fast: false
-      # The list is chosen by event, not by a job-level `if` — the matrix
-      # context is not available there and GitHub rejects the file. The
-      # fromJSON pair is the documented way to make a matrix conditional.
       matrix:
-        os: ${{ github.event_name == 'pull_request'
-          && fromJSON('["ubuntu-latest"]')
-          || fromJSON('["ubuntu-latest", "windows-latest", "macos-latest"]') }}
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       # Pinned to the commit rather than to the `v7` tag, which moves. A
       # project whose one shipped rule is about unverified dependencies should
