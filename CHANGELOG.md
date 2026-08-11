@@ -6,6 +6,19 @@ Notable changes, most recent first. Format follows
 contract can change in minor versions, and each such change is called out
 here explicitly.
 
+## [0.1.1] — 2026-08-11
+
+No behaviour change to the gate or the CLI. This release exists to ship
+the public-readiness layer and to exercise the release pipeline for the
+first time.
+
+- Release workflow: binaries for Linux, Windows and macOS attached to
+  every version tag, built from the tag itself with the tests re-run.
+- README: Installing and Quick start sections; the Status opener updated
+  to the actual surface (five commands, six kinds of finding).
+- CONTRIBUTING: recipes for adding a language and a package ecosystem.
+- This changelog.
+
 ## [0.1.0] — 2026-08-11
 
 First tagged release. Everything below traces to a row in
