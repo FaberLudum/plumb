@@ -887,6 +887,13 @@ impl Registry for RegistryRouter {
         match ecosystem {
             Ecosystem::PyPi => self.pypi.exists(name),
             Ecosystem::Npm => self.npm.exists(name),
+            // No NuGet registry client yet — that is Task 2. `Unknown` is
+            // the honest answer for a registry this router cannot consult:
+            // "never a violation", exactly as it is for a PyPI or npm lookup
+            // that could not reach the network. This must not become
+            // `Missing`, which would block every build with an added NuGet
+            // package on a registry nobody asked.
+            Ecosystem::NuGet => Existence::Unknown,
         }
     }
 }

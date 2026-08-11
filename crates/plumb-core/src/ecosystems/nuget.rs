@@ -6,6 +6,130 @@
 
 use super::EcosystemSpec;
 use crate::manifest::{Ecosystem, Gap, Manifest};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::{Decoder, Reader, XmlVersion};
+use std::collections::BTreeSet;
+
+/// The element names whose `Include` attribute names a NuGet package.
+///
+/// `PackageReference` is the ordinary way a project declares one.
+/// `PackageVersion` and `GlobalPackageReference` are Central Package
+/// Management's counterparts in `Directory.Packages.props` — the former
+/// pins a version centrally, the latter declares an analyzer/build-tooling
+/// package every project should reference. All three carry the package name
+/// the same way, in an `Include` attribute, so one reader serves both files
+/// this module parses: a `.csproj` and a `Directory.Packages.props` differ
+/// in which of the three they conventionally use, not in the shape.
+const PACKAGE_ELEMENTS: [&[u8]; 3] = [
+    b"PackageReference",
+    b"PackageVersion",
+    b"GlobalPackageReference",
+];
+
+/// Builds the [`Gap::Unparseable`] manifest, discarding any names already
+/// read.
+///
+/// A file that cannot be fully read must not present as partially clean —
+/// the same rule `pypi::parse_pyproject` and `npm::parse_package_json`
+/// already take for a document that fails to parse at all. Here it also
+/// covers a document left with an element open at end of input, which
+/// `quick_xml::Reader` does not treat as an error on its own: a streaming
+/// reader has no obligation to demand a complete document, so [`parse_project`]
+/// tracks open-element depth itself and calls this when it is not back to
+/// zero at [`Event::Eof`].
+fn unparseable() -> Manifest {
+    Manifest {
+        names: BTreeSet::new(),
+        gaps: vec![Gap::Unparseable],
+        ecosystem: Ecosystem::NuGet,
+    }
+}
+
+/// Reads the `Include` attribute off a `PackageReference`, `PackageVersion`
+/// or `GlobalPackageReference` start/empty tag, and records it: a literal
+/// value becomes a name, an MSBuild property expression (`$(...)`) becomes a
+/// [`Gap::MsBuildExpression`], and any other element name is left alone —
+/// notably `ProjectReference`, which shares the `Include` convention but
+/// names a sibling project rather than a NuGet package.
+fn read_package(
+    start: &BytesStart,
+    decoder: Decoder,
+    names: &mut BTreeSet<String>,
+    gaps: &mut Vec<Gap>,
+) {
+    if !PACKAGE_ELEMENTS.contains(&start.name().local_name().as_ref()) {
+        return;
+    }
+    let Some(include) = start
+        .attributes()
+        .flatten()
+        .find(|attr| attr.key.local_name().as_ref() == b"Include")
+        .and_then(|attr| {
+            attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+                .ok()
+        })
+        .map(|value| value.into_owned())
+    else {
+        return;
+    };
+    if include.contains("$(") {
+        gaps.push(Gap::MsBuildExpression(include));
+    } else {
+        names.insert(include);
+    }
+}
+
+/// Parses a `.csproj`/`.fsproj`/`.vbproj` or a `Directory.Packages.props`:
+/// the three element names in [`PACKAGE_ELEMENTS`], read wherever they
+/// appear as a start or self-closing tag, for their `Include` attribute.
+///
+/// One code path for both files, because both read the same three elements
+/// — a `.csproj` conventionally uses `PackageReference` and a
+/// `Directory.Packages.props` conventionally uses `PackageVersion` and
+/// `GlobalPackageReference`, but nothing here needs to know which file it is
+/// reading to make sense of any of the three.
+fn parse_project(text: &str) -> Manifest {
+    let mut names = BTreeSet::new();
+    let mut gaps = Vec::new();
+    // Counts elements opened by a `Start` and not yet closed by a matching
+    // `End`. Self-closing (`Empty`) tags never touch it, since they open and
+    // close in a single event.
+    let mut depth: u32 = 0;
+
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => {
+                if depth != 0 {
+                    return unparseable();
+                }
+                break;
+            }
+            Ok(Event::Start(start)) => {
+                depth += 1;
+                read_package(&start, reader.decoder(), &mut names, &mut gaps);
+            }
+            Ok(Event::Empty(start)) => {
+                read_package(&start, reader.decoder(), &mut names, &mut gaps);
+            }
+            Ok(Event::End(_)) => {
+                depth -= 1;
+            }
+            Ok(_) => {}
+            Err(_) => return unparseable(),
+        }
+        buf.clear();
+    }
+
+    Manifest {
+        names,
+        gaps,
+        ecosystem: Ecosystem::NuGet,
+    }
+}
 
 /// NuGet: `.csproj`/`.fsproj`/`.vbproj`, `Directory.Packages.props`, and
 /// `packages.config`.
@@ -13,15 +137,39 @@ pub struct NuGet;
 
 impl EcosystemSpec for NuGet {
     fn ecosystem(&self) -> Ecosystem {
-        todo!()
+        Ecosystem::NuGet
     }
 
-    fn matches(&self, _filename: &str) -> bool {
-        todo!()
+    /// Windows filesystems are case-insensitive, so a project file named
+    /// `Api.CSPROJ` is exactly as real as one named `Api.csproj`; the
+    /// comparison is done on a lowercased copy rather than by slicing a
+    /// fixed-length suffix off the end, which would risk landing off a
+    /// UTF-8 character boundary on a filename with a multi-byte character
+    /// near the end.
+    fn matches(&self, filename: &str) -> bool {
+        let lower = filename.to_ascii_lowercase();
+        lower.ends_with(".csproj")
+            || lower.ends_with(".fsproj")
+            || lower.ends_with(".vbproj")
+            || lower == "directory.packages.props"
+            || lower == "packages.config"
     }
 
-    fn parse(&self, _filename: &str, _text: &str) -> Manifest {
-        todo!()
+    /// `packages.config` is recognised only to a [`Gap::PackagesConfig`],
+    /// never parsed — not even when it is well-formed and holds what looks
+    /// like a package declaration. Every other filename `matches` admits is
+    /// a `.csproj`/`.fsproj`/`.vbproj` or a `Directory.Packages.props`, and
+    /// all four route to [`parse_project`], which reads the same three
+    /// elements regardless of which of them it is given.
+    fn parse(&self, filename: &str, text: &str) -> Manifest {
+        if filename.eq_ignore_ascii_case("packages.config") {
+            return Manifest {
+                names: BTreeSet::new(),
+                gaps: vec![Gap::PackagesConfig],
+                ecosystem: Ecosystem::NuGet,
+            };
+        }
+        parse_project(text)
     }
 }
 

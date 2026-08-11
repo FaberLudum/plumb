@@ -458,6 +458,10 @@ fn package_does_not_exist(dependency: &AddedDependency) -> Finding {
     let registry_name = match dependency.ecosystem {
         Ecosystem::PyPi => "PyPI",
         Ecosystem::Npm => "npm",
+        // Dead arm for now: `RegistryRouter::exists` answers `Unknown` for
+        // every NuGet lookup until Task 2 wires a real registry client, and
+        // `Unknown` never reaches this function — see `registry.rs`.
+        Ecosystem::NuGet => "NuGet",
     };
 
     Finding {

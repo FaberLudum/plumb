@@ -85,6 +85,9 @@ What this repository can already do, and where. Regenerate with
 - fn `parse_package_json`
 - struct `Npm`
 
+## crates/plumb-core/src/ecosystems/nuget.rs
+- struct `NuGet`
+
 ## crates/plumb-core/src/ecosystems/pypi.rs
 - fn `parse_requirements`
 - fn `parse_pyproject`

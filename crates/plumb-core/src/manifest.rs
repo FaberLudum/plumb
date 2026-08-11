@@ -57,6 +57,18 @@
 //! dependency rather than to this project, so it is not recognised at all —
 //! [`parse`] returns `None` for it, the same answer a lock file gets. See
 //! `ecosystems::npm::is_vendored`.
+//!
+//! NuGet gets the same split again, over `.csproj`/`.fsproj`/`.vbproj` and
+//! `Directory.Packages.props`: a `PackageReference`, `PackageVersion` or
+//! `GlobalPackageReference` element's `Include` attribute is a name, an
+//! `Include` that is an MSBuild property expression is a
+//! [`Gap::MsBuildExpression`], and a project file that does not parse as XML
+//! at all, or is left with an element open at end of input, is
+//! [`Gap::Unparseable`] — discarding any names already read, because a file
+//! that cannot be fully read must not present as partially clean.
+//! `packages.config` is recognised by filename and deliberately never
+//! parsed: always [`Gap::PackagesConfig`], even when it is well-formed. See
+//! `ecosystems::nuget`.
 
 use std::collections::BTreeSet;
 
@@ -65,6 +77,7 @@ use std::collections::BTreeSet;
 pub enum Ecosystem {
     PyPi,
     Npm,
+    NuGet,
 }
 
 /// A manifest Plumb recognised: what it read, and what it did not.
@@ -167,6 +180,24 @@ pub enum Gap {
     /// JSON's bare keys — and a message built from the wrong convention
     /// reads as a typo rather than as help.
     MalformedTable(String),
+    /// The legacy `packages.config` format, recognised by filename and
+    /// deliberately never parsed.
+    ///
+    /// `packages.config` predates both `PackageReference` and Central
+    /// Package Management, and NuGet has treated it as legacy since 2017.
+    /// Its own variant rather than folding it into [`Gap::Unparseable`], so
+    /// the message can name the migration path — moving to
+    /// `PackageReference` — instead of implying the file itself is broken.
+    PackagesConfig,
+    /// A NuGet `Include` attribute whose value is an MSBuild property
+    /// expression (`$(...)`) rather than a literal package name, carrying
+    /// the raw `Include` text.
+    ///
+    /// The attribute is positive evidence of a declaration — the project
+    /// does reference a package here — but its value is resolved by MSBuild
+    /// from a property at build time, which Plumb does not evaluate, so
+    /// there is no literal name to look up.
+    MsBuildExpression(String),
 }
 
 impl Gap {
@@ -210,6 +241,15 @@ impl Gap {
             Gap::MalformedTable(table) => format!(
                 "`{table}` in package.json is declared but is not an object, so Plumb read no \
                  names from it"
+            ),
+            Gap::PackagesConfig => "the file is a packages.config, NuGet's legacy manifest \
+                 format — Plumb reads PackageReference (in a .csproj/.fsproj/.vbproj or a \
+                 Directory.Packages.props) but not packages.config; migrating to \
+                 PackageReference is what makes it visible"
+                .to_string(),
+            Gap::MsBuildExpression(include) => format!(
+                "`Include=\"{include}\"` is an MSBuild property expression, resolved at build \
+                 time, so Plumb has no literal package name to look up"
             ),
         }
     }

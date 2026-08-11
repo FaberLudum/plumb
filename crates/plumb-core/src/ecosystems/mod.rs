@@ -25,7 +25,7 @@ pub trait EcosystemSpec {
     fn parse(&self, filename: &str, text: &str) -> crate::manifest::Manifest;
 }
 
-static ALL: [&(dyn EcosystemSpec + Sync); 2] = [&pypi::PyPi, &npm::Npm];
+static ALL: [&(dyn EcosystemSpec + Sync); 3] = [&pypi::PyPi, &npm::Npm, &nuget::NuGet];
 
 pub fn specs() -> &'static [&'static (dyn EcosystemSpec + Sync)] {
     &ALL
@@ -46,11 +46,14 @@ pub fn for_path(path: &str) -> Option<&'static (dyn EcosystemSpec + Sync)> {
 mod tests {
     use super::*;
 
-    const PROBES: [&str; 4] = [
+    const PROBES: [&str; 7] = [
         "requirements.txt",
         "requirements-dev.txt",
         "pyproject.toml",
         "package.json",
+        "Api.csproj",
+        "Directory.Packages.props",
+        "packages.config",
     ];
 
     #[test]
