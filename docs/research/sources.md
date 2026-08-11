@@ -21,6 +21,7 @@ blocking gate.
 | S6 | Mao, Zhao, Tang, Wang, Zhang, *A Large-Scale Comprehensive Measurement of AI-Generated Code in Real-World Repositories*, arXiv 2603.27130 (2026-03-28, rev. 2026-07-01) | Preprint | VERIFIED (title, authors, design; detailed figures from the body not yet checked) |
 | S7 | Pearce, Ahmad, Tan, Dolan-Gavitt, Karri, *Asleep at the Keyboard? Assessing the Security of GitHub Copilot's Code Contributions*, IEEE S&P 2022 — arXiv 2108.09293 | Peer-reviewed | VERIFIED 2026-08-07 (title, authors, venue, 89 scenarios, 1,689 programs, "approximately 40%" vulnerable per the abstract; the 39.33%/40.73% split is a body figure, still from the sweep) |
 | S8 | Perry, Srivastava, Kumar, Boneh, *Do Users Write More Insecure Code with AI Assistants?*, ACM CCS 2023 — arXiv 2211.03622 | Peer-reviewed | VERIFIED 2026-08-07 (title, authors, venue; "significantly less secure code" and the belief/actual-security gap both verbatim in the abstract; the 4-of-5-tasks count is a body figure, still from the sweep) |
+| S19 | Tran, Lewis, Yang, Thakur, Kini, Patil, Hashemi, Ranganathan (Google), *Characterizing the Quality Profile of AI-Generated C++ in Production*, arXiv 2608.06640 (2026-08-06) | Preprint | VERIFIED 2026-08-11 (full text read: 3.52M submitted changes, 10.46M C++ LOC with authoring-time provenance; coupling+copy/alloc = 82.21% of the positive static gap; review-depth null result; taxonomy-targeted feedback −11.1% findings — all checked in the body) |
 
 ## Reported, not yet verified
 

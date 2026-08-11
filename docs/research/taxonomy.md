@@ -164,11 +164,62 @@ instructions-only framework and justifies the cost of executable gates. The
 authors conclude that agents need "explicit architectural foresight", which is
 the academic phrasing of architecture as a verifiable contract.
 
+§4.6 adds a production-scale nuance to point 3: taxonomy-targeted,
+category-specific feedback *did* reduce the targeted findings (−11.1%) where
+generic feedback did not. The claim that survives both studies is narrower
+and more useful than either alone — generic prompting fails, precisely
+scoped evidence-indexed feedback works.
+
 The phrase "Modular Mirage" attributed to this paper by the initial sweep
 **does not appear in the abstract** and has not been confirmed in the body. Do
 not cite it until verified.
 
-### 4.6 Verbosity and nesting
+### 4.6 System-level burden at production scale
+
+| Field | Value |
+|---|---|
+| Category | MEASURED (preprint) |
+| Verification | VERIFIED 2026-08-11 (full text read; all figures below checked in the body) |
+| Source | Tran et al. (Google), *Characterizing the Quality Profile of AI-Generated C++ in Production*, arXiv 2608.06640 (2026-08-06) — S19 |
+| Metric | Byte-level authoring-time provenance, Apr 2025–Apr 2026: 3.52M submitted changes, C++ slice of 10.46M LOC and 350k reviewable changes; static findings per KLOC, review friction, normalized production compute |
+| Effect | Excess static burden concentrated in two categories: Interface & Coupling Burden (1.15×) and Copy & Allocation Overhead (1.39×) together carry **82.21% of the positive rate gap**. Unit level at or better than parity: AI functions median 11 LOC vs 15 human, complexity δ = −0.029, Correctness & Safety **below** parity at 0.94×, revert rate 0.9×. Downstream: 1.92× blocking review threads, 1.39× comments, +5% compute and +8% memory growth vs the human cohort. Stylistic mechanism: ~2× explicit loops, 0.4× standard-library/API delegation |
+| Limits | One organization, C++ only, observational not causal; model identifiers masked, so older models may drive part of the effect; preprint, no peer review yet |
+
+The largest-scale confirmation of the central finding (§3) to date, and the
+first with authoring-time provenance instead of post-hoc AI detection: the
+unit level is fine — smaller functions, equal complexity, *fewer* correctness
+findings — while the excess burden is structural and concentrated in coupling.
+This moves "coupling is where AI code degrades" from our own calibration
+observation to a measured result on 3.52M production changes.
+
+Three findings in the body matter beyond the headline:
+
+1. **Review depth does not intercept these defects.** The authors looked for a
+   correlation between review effort (time, iterations) and survival of the
+   inefficiency findings, and found none — reviewers fail to catch these
+   localized defects "regardless of review depth". Their conclusion, verbatim
+   in spirit: upstream automated interventions are essential. This is direct
+   production evidence for the framework's second design decision (§3):
+   executable gates, not review prose.
+
+2. **Targeted feedback works where generic prompting does not.** Their
+   intervention regenerated 50 functions under three prompt stages: base,
+   generic feedback, and category-specific taxonomy-informed feedback. Generic
+   feedback barely moved findings; the taxonomy-targeted stage cut targeted
+   findings by 11.1% and improved the efficiency score by 31%. Read together
+   with Zhu (§4.5, point 3) this sharpens rather than contradicts: *detailed
+   generic* prompting does not mitigate, *narrow evidence-indexed* feedback
+   does. Precision of the rule is what matters — which is this project's
+   design bet, stated in someone else's data.
+
+3. **The standard-library preference now has a source.** AI-generated C++
+   authors ~2× the explicit loops and delegates to standard/optimized APIs
+   30–40% less often, with a measured runtime consequence (+3.46% relative
+   shift toward direct on-CPU execution, +5-8% compute/memory). The
+   "prefer the standard library" line in the While-writing protocol was a
+   convention; it is now backed by a quantified mechanism.
+
+### 4.7 Verbosity and nesting
 
 | Field | Value |
 |---|---|
@@ -200,6 +251,12 @@ the flow of commits over time, Mao observes the state of files. Both can be
 true — code can be duplicated heavily while being written and still end up
 less duplicated at rest. Until the contradiction resolves, duplication stays
 an observed signal and never a blocking gate.
+
+Production-scale corroboration (§4.6): on 3.52M production changes, AI C++
+functions are *smaller* than human ones (median 11 vs 15 LOC), identical in
+complexity (δ = −0.029), and carry *fewer* correctness findings (0.94×). The
+unit-level half of the central finding now holds at industrial scale, not
+just in repository studies.
 
 A cross-cutting note on distribution, which explains why existing tools fall
 short: human code has a **heavy tail**, a few enormous functions among many
@@ -235,7 +292,7 @@ formatters, autofixed, never a judgement — and keeps it out of defect counts.
 | H2 | Monolithic growth | **CONTRADICTED** | Removed from the design |
 | H3 | Cross-session drift | **UNMEASURED** | Declared hypothesis; measurement opportunity |
 | H4 | Dependency sprawl | **CONFIRMED** | Tier A blocking gate |
-| H5 | Missing architectural boundaries | QUALITATIVE, strengthened by Zhu | Tier B gate |
+| H5 | Missing architectural boundaries | QUALITATIVE, strengthened by Zhu; coupling burden MEASURED at production scale by Tran (§4.6) | Tier B gate |
 
 **On H3.** No peer-reviewed study or preprint measures style drift across
 successive sessions on the same project. Adjacent but different things exist:
@@ -261,10 +318,10 @@ until then H3 stays labelled as a hypothesis.
 | A | Declared dependencies match the runtime closure | 4.3 | Blocking |
 | A | A new external dependency requires explicit justification | 4.3 | Blocking |
 | B | Volume control as a leading indicator of decay | 4.5 | Warning |
-| B | Architectural boundaries declared and checked against imports | 4.5, H5 | Warning, promotable |
+| B | Architectural boundaries declared and checked against imports | 4.5, 4.6, H5 | Warning, promotable |
 | B | Debt analysis on the diff, at the moment of introduction | 4.4 | Warning |
 | C | Convention consistency across sessions | H3 | Measurement only |
-| H | Style consistency against the project baseline | §5.1, §4.6 | Delegated, autofixed, excluded from defect counts |
+| H | Style consistency against the project baseline | §5.1, §4.7 | Delegated, autofixed, excluded from defect counts |
 
 Tier A gates block because they rest on peer-reviewed sources and detect
 objective conditions: a package either exists or it does not, a dependency is
@@ -292,6 +349,10 @@ This taxonomy is dated by construction. Revisit it if:
   boundaries or cross-session drift with d > 0.5: H3 and H5 rise to MEASURED
 - The 2026 preprints cited here are published with figures different from
   those reported
+- Tran et al. (S19) fails to replicate outside C++ or outside that one
+  organization: the coupling-concentration claim in §4.6 falls back to our
+  own calibration evidence, and the review-depth null result stops carrying
+  weight for the executable-gates argument
 
 **Next review: 2027-02-05**, or sooner if the reference model changes.
 
