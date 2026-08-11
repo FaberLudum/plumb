@@ -11,8 +11,10 @@ One rule blocks: every package a change adds must actually exist on its
 registry. `plumb check --diff` asks git for the paths a change touched and
 reads each manifest among them, as it stands and as it stands at HEAD. On
 the PyPI side that means `requirements.txt`, `requirements-*.txt` and
-`pyproject.toml`; on the npm side, `package.json`. It looks up only the
-names the change adds, and blocks on a name its own registry does not have.
+`pyproject.toml`; on the npm side, `package.json`; on the NuGet side,
+`.csproj`/`.fsproj`/`.vbproj` and `Directory.Packages.props`. It looks up
+only the names the change adds, and blocks on a name its own registry does
+not have.
 
 ```console
 $ plumb check --diff
@@ -37,9 +39,23 @@ $ echo $?
 1
 ```
 
+NuGet reads the same way again, against a `PackageReference`, `PackageVersion`
+or `GlobalPackageReference` element's `Include` attribute in a `.csproj`,
+`.fsproj`, `.vbproj` or `Directory.Packages.props`, and blocks on the same
+shape of finding with `NuGet` in place of `PyPI`:
+
+```console
+$ plumb check --diff
+blocking: package `surely-not-a-real-package-xyz` does not exist on NuGet [package-exists]
+  Api.csproj
+  evidence: taxonomy §4.1
+$ echo $?
+1
+```
+
 A name already in the manifest is not re-checked and does not appear in
 that output at all. Only a name the change actually adds is looked up, on
-either registry.
+any of the three registries.
 
 `--json` emits the same findings as an array, and `--offline` never
 contacts a registry. Exit codes are a fixed contract: `0` clean, `1`
@@ -187,8 +203,40 @@ What it does not do yet, listed because a gate that stays quiet about them is
 worse than one that has none. The list is what has been found, not a proof
 that nothing else is there.
 
-- PyPI and npm, two ecosystems, added one at a time. .NET manifests are the
-  same shape of code and are still not read.
+- **Only PyPI, npm and NuGet are read**, added one at a time. pub.dev/Dart
+  (`pubspec.yaml`) is queued as the next ecosystem; until it lands, a
+  dependency declared only there is invisible to Plumb — never looked up,
+  in either direction.
+- **NuGet checks existence only, and only what a `.csproj`,
+  `.fsproj`/`.vbproj` or `Directory.Packages.props` states literally.**
+  Concretely:
+  - `Version` ranges are unchecked, the same trade npm's version ranges get:
+    the gate confirms a package id resolves, not that any particular
+    version does, so `Version="999.0.0"` on a real package id passes exactly
+    as cleanly as a version that actually shipped.
+  - An `Include` that is an MSBuild property expression (`$(SomeProp)`) is a
+    `manifest-understood` gap, not a lookup — the literal value is resolved
+    by MSBuild at build time, which Plumb does not evaluate, so there is no
+    name to check.
+  - `<Import>` indirection is not followed. A `.csproj` that pulls in
+    `PackageReference` elements from an imported `.props` or `.targets` file
+    is read as if that file were not there; only the elements literally
+    present in the file Plumb opened are seen.
+  - **A private NuGet feed false-positives**, the same gap a private PyPI
+    index or a private npm registry has (see below): a package id resolves
+    against `https://api.nuget.org` alone, the public flat-container index.
+    Plumb cannot tell "does not exist anywhere" from "does not exist on the
+    one feed it asked."
+  - `packages.config` is recognised by filename and deliberately never
+    parsed, even when it is well-formed and holds what looks like an
+    ordinary package declaration — always a `manifest-understood` warning
+    naming the migration path (`PackageReference`), never a lookup. The
+    tests pin this directly: a `packages.config` with a real-looking
+    `<package id="…" version="…" />` still yields no name.
+  - **Lockfiles are not read.** `packages.lock.json` is invisible to Plumb,
+    the same blind spot npm's lockfiles have: a name that exists only inside
+    it, never declared in a `PackageReference`, is never looked up in either
+    direction.
 - npm's coverage is one filename, `package.json`, at any depth, with any
   path segment named `node_modules` excluded entirely. A vendored
   `package.json` belongs to a dependency, not to this project, and checking

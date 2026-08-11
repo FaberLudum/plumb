@@ -534,6 +534,22 @@ impl PyPiRegistry {
 
     /// Answers from the cache, then from PyPI, then not at all.
     ///
+    /// The empty name is rejected before anything else runs. `all()` over an
+    /// empty iterator is vacuously true, so [`is_valid_pypi_name`]'s charset
+    /// check alone cannot catch `""` — it has no first or last character
+    /// for an ends anchor to fail on either — which is why this checks
+    /// emptiness directly rather than delegating to the full predicate.
+    /// The full predicate is deliberately *not* the gate here:
+    /// `exists_via`'s legacy-cache-key fallback intentionally answers a
+    /// colon-bearing name like `"npm:foo"` from the cache-miss path rather
+    /// than treating it as invalid syntax — see
+    /// `the_legacy_fallback_does_not_read_another_ecosystems_prefixed_key`
+    /// — and gating on the whole charset predicate here would take that
+    /// path away from it. Left unguarded, `""` would reach `exists_via`
+    /// unchanged and, on a cache miss while online, build
+    /// `https://pypi.org/pypi//json` and let the server decide what
+    /// answers.
+    ///
     /// Anything that is not a definite success or 404 — a timeout, a proxy, a
     /// firewall, a 5xx — is [`Existence::Unknown`], and `Unknown` is never
     /// cached: it is a fact about this run's network, not about the package.
@@ -541,6 +557,9 @@ impl PyPiRegistry {
     /// See [`PyPiRegistry::exists_via`] for the order this resolves in, and
     /// for the latch that stops a dead network being retried once per name.
     pub fn exists(&self, name: &str) -> Existence {
+        if name.is_empty() {
+            return Existence::Missing;
+        }
         self.exists_via(name, |name| self.lookup(name))
     }
 
@@ -588,8 +607,17 @@ impl PyPiRegistry {
 /// inline in [`PyPiRegistry::lookup`] so the character set can be pinned
 /// without a request, the same reasoning [`npm_url`] and
 /// [`is_valid_npm_name`] follow for npm.
+///
+/// Non-empty is checked explicitly, ahead of the charset check rather than
+/// folded into it: `all()` over an empty iterator is vacuously true, so the
+/// charset test alone calls `""` a legal PyPI name. [`PyPiRegistry::exists`]
+/// gates on this the same way NuGet's own guard gates
+/// [`NuGetRegistry::exists`] — see [`is_valid_nuget_id`]'s doc comment for
+/// the sibling bug this mirrors, and why an empty id is the one case an
+/// ends anchor alone cannot catch: an empty string has no first or last
+/// character to anchor.
 fn is_valid_pypi_name(name: &str) -> bool {
-    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// The agent every lookup runs on.
@@ -698,9 +726,36 @@ fn npm_url(name: &str) -> String {
 /// is already a safe, literal URL path-segment character — [`npm_url`]
 /// only ever has to encode the `/` of a scoped name, never anything this
 /// function would have rejected.
+///
+/// The first and last character must also be ASCII alphanumeric, with one
+/// exception: the *first* character may instead be `@`, because a scoped
+/// name legitimately starts with one — see [`npm_url`] for how
+/// `@scope/name` reaches the wire. A charset check alone is not enough
+/// here, the same lesson [`is_valid_nuget_id`] documents for NuGet: `.` is
+/// otherwise an ordinary character, so it admitted `.` and `..` whole — RFC
+/// 3986 dot-segments — and `npm_url("..")` emitted
+/// `https://registry.npmjs.org/..`. The pinned http client does not
+/// normalise a dot-segment out of the path client-side, so that request
+/// reached the wire as written; npm's own server-side path normalisation
+/// resolves it to the registry root and answers 200, which would have
+/// cached `npm:..` as `Exists` on a blocking gate for a name nobody could
+/// ever publish. Anchoring the end alphanumeric — and the start
+/// alphanumeric-or-`@` — kills `.` and `..` structurally, along with the
+/// wider family of leading/trailing `.` or `-`, neither of which npm issues
+/// a real package name with.
 fn is_valid_npm_name(name: &str) -> bool {
-    name.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '/'))
+    let charset_ok = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '/'));
+    let starts_ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '@');
+    let ends_ok = name
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    charset_ok && starts_ok && ends_ok
 }
 
 /// Resolves names against npm, with the same on-disk cache, offline mode and
@@ -844,41 +899,253 @@ impl NpmRegistry {
     }
 }
 
+/// The map key an answer about `name` is stored under for NuGet.
+///
+/// NuGet package IDs are case-insensitive, so the key lowercases `name`
+/// first: `"Newtonsoft.Json"` and `"newtonsoft.json"` must share the one
+/// cache entry rather than silently duplicating it under two keys that
+/// never see each other. No legacy bare form, for the same reason as
+/// [`npm_cache_key`]: a bare key predates NuGet's existence entirely.
+fn nuget_cache_key(name: &str) -> String {
+    format!("nuget:{}", name.to_ascii_lowercase())
+}
+
+/// Builds the nuget.org flat-container lookup URL for `name`.
+///
+/// NuGet package IDs are case-insensitive and the flat-container index is
+/// served at the lowercased path only, so `name` is lowercased before it is
+/// interpolated. Pure and separate from [`NuGetRegistry::lookup`] so the
+/// mapping can be pinned without a request, the same reasoning [`npm_url`]
+/// follows for npm.
+///
+/// `v3-flatcontainer`, not `v3-flat2`. The design spec and this file both
+/// carried `v3-flat2` from Task 2 through the whole of Task 3's automated
+/// test suite unnoticed, because every test that exercises `nuget_url`
+/// pins the *string this function builds*, never a real response — the
+/// stub transport in `exists_via`'s own tests never touches the network
+/// either. Nothing caught it until this task's live smoke test ran the
+/// built binary against nuget.org for real: `Newtonsoft.Json`, a package
+/// that has shipped for over a decade, came back 404 and blocked the
+/// build, in the same run that correctly blocked a genuinely nonexistent
+/// name — because *every* lookup 404s against the wrong path, real or
+/// hallucinated alike. Verified directly with `curl` outside the test
+/// suite: `v3-flat2/newtonsoft.json/index.json` is a 404
+/// `ResourceNotFound`; `v3-flatcontainer/newtonsoft.json/index.json` is a
+/// 200 listing its published versions. This is exactly the failure mode
+/// `CLAUDE.md`'s "check the current API before writing code against it"
+/// rule exists for — a URL path recalled from memory rather than looked
+/// up, and a mocked test suite is structurally unable to catch it because
+/// the mock and the code under test share the same wrong assumption.
+fn nuget_url(name: &str) -> String {
+    format!(
+        "https://api.nuget.org/v3-flatcontainer/{}/index.json",
+        name.to_ascii_lowercase()
+    )
+}
+
+/// Whether `name` is a syntactically ordinary NuGet package ID.
+///
+/// Non-empty, ASCII alphanumerics plus `.`, `_` and `-` only — narrower than
+/// [`is_valid_npm_name`] (no `@` or `/`), and unlike [`is_valid_pypi_name`]
+/// it explicitly rejects the empty string: the flat-container URL for an
+/// empty id collapses to `.../v3-flatcontainer//index.json`, a different,
+/// well-formed request nobody asked for, not a lookup for "no package".
+///
+/// The first and last character must also be ASCII alphanumeric. A charset
+/// check alone is not enough here: `.` is otherwise an ordinary character,
+/// so it admitted `.` and `..` whole — RFC 3986 dot-segments — and
+/// `nuget_url("..")` emitted `.../v3-flatcontainer/../index.json`. The pinned http
+/// client does not normalise a dot-segment out of the path client-side, so
+/// that request reached the wire as written and server-side normalisation
+/// alone decided what answered, with the result cached under `nuget:..` as
+/// a Tier A verdict regardless of what it was. Anchoring both ends on
+/// alphanumeric kills `.` and `..` structurally — neither has an
+/// alphanumeric character at all — along with the wider family of
+/// leading/trailing `.` or `-`, which matches nuget.org's real id shape:
+/// every id it actually serves starts and ends alphanumeric.
+///
+/// This is the gate [`NuGetRegistry::exists`] checks before it does
+/// anything else, exactly as [`is_valid_npm_name`] gates
+/// [`NpmRegistry::exists`]: an illegal id interpolated into the lookup URL
+/// unescaped could resolve to something else entirely and poison the cache
+/// under a name nobody searched for — the same class of bug
+/// [`is_valid_npm_name`]'s own doc comment describes for npm, and the same
+/// class the dot-segment case above turned out to be one member of.
+fn is_valid_nuget_id(name: &str) -> bool {
+    let charset_ok = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    let ends_alphanumeric = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+    charset_ok && ends_alphanumeric
+}
+
+/// Resolves package ids against nuget.org's flat-container index, with the
+/// same on-disk cache, offline mode and unreachable-network latch as
+/// [`PyPiRegistry`] and [`NpmRegistry`] — see [`PyPiRegistry`]'s doc comment
+/// for the reasoning behind all of them, none of which differs here. What
+/// differs is narrow and is all this type states of its own: the endpoint
+/// ([`nuget_url`]), the cache key prefix ([`nuget_cache_key`], lowercased
+/// for NuGet's case-insensitive ids and with no legacy bare-key fallback),
+/// and the character set an id must satisfy before it reaches the URL
+/// ([`is_valid_nuget_id`]).
+pub struct NuGetRegistry {
+    offline: bool,
+    cache_path: Option<PathBuf>,
+    cache: RefCell<Cache>,
+    agent: ureq::Agent,
+    unreachable: Cell<bool>,
+    honoured_stale: RefCell<BTreeSet<String>>,
+}
+
+impl NuGetRegistry {
+    /// See [`PyPiRegistry::new`]; identical, against the shared cache file.
+    pub fn new(offline: bool, cache_path: Option<PathBuf>) -> Self {
+        let cache = load_cache(cache_path.as_deref());
+
+        Self {
+            offline,
+            cache_path,
+            cache: RefCell::new(cache),
+            agent: lookup_agent(),
+            unreachable: Cell::new(false),
+            honoured_stale: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    /// See [`PyPiRegistry::stale_packages`].
+    pub fn stale_packages(&self) -> usize {
+        self.honoured_stale.borrow().len()
+    }
+
+    /// See [`PyPiRegistry::exists_via`]; identical but for the cache key,
+    /// which lowercases `name` and has no legacy bare-key fallback — see
+    /// [`nuget_cache_key`].
+    fn exists_via(&self, name: &str, lookup: impl Fn(&str) -> Outcome) -> Existence {
+        let cached = self
+            .cache
+            .borrow()
+            .known
+            .get(&nuget_cache_key(name))
+            .copied();
+        if let Some(entry) = cached
+            && entry.is_fresh(now_unix())
+        {
+            return entry.existence();
+        }
+
+        if self.offline {
+            let answer = honour_offline(cached);
+            if answer != Existence::Unknown {
+                self.honoured_stale.borrow_mut().insert(name.to_string());
+            }
+            return answer;
+        }
+
+        if self.unreachable.get() {
+            return Existence::Unknown;
+        }
+
+        let outcome = lookup(name);
+        if outcome == Outcome::Unreachable {
+            self.unreachable.set(true);
+        }
+
+        let existence = outcome.existence();
+        self.record(name, existence);
+        existence
+    }
+
+    /// Answers from the cache, then from nuget.org, then not at all. See
+    /// [`PyPiRegistry::exists`].
+    ///
+    /// A name [`is_valid_nuget_id`] refuses is answered `Missing`
+    /// immediately — no cache read, no offline fallback, no request — and
+    /// that runs first, ahead of everything
+    /// [`exists_via`](Self::exists_via) does, exactly as
+    /// [`NpmRegistry::exists`] gates on [`is_valid_npm_name`] first: an
+    /// illegal id must never reach the URL or the cache.
+    pub fn exists(&self, name: &str) -> Existence {
+        if !is_valid_nuget_id(name) {
+            return Existence::Missing;
+        }
+        self.exists_via(name, |name| self.lookup(name))
+    }
+
+    /// Asks nuget.org about one package id.
+    fn lookup(&self, name: &str) -> Outcome {
+        // `NuGetRegistry::exists` already refuses a name this check would
+        // reject, before `lookup` is ever reached. Kept as a debug-only
+        // tripwire, consistent with [`NpmRegistry::lookup`]'s own guard.
+        debug_assert!(
+            is_valid_nuget_id(name),
+            "nuget id reached the registry unvalidated: {name:?}"
+        );
+        classify(self.agent.get(&nuget_url(name)).call().map(|_| ()))
+    }
+
+    /// Records a definite answer and writes it into the shared cache file.
+    /// See [`PyPiRegistry::record`].
+    fn record(&self, name: &str, outcome: Existence) {
+        if outcome == Existence::Unknown {
+            return;
+        }
+        let entry = Entry {
+            exists: outcome == Existence::Exists,
+            checked: now_unix(),
+        };
+        let key = nuget_cache_key(name);
+        self.cache.borrow_mut().known.insert(key.clone(), entry);
+        if let Some(cache_path) = self.cache_path.as_deref() {
+            persist_entry(cache_path, &key, entry);
+        }
+    }
+}
+
 /// Dispatches a lookup to the registry for its ecosystem.
 ///
-/// One [`PyPiRegistry`] and one [`NpmRegistry`], both constructed against the
-/// same `cache_path` — see the cache key prefix functions for how the two
-/// share one file without colliding. `check.rs` holds this behind `&dyn
-/// Registry` for the whole run, exactly as it held a bare `PyPiRegistry`
-/// before npm existed: one router, not one per manifest, because the cache
-/// and the unreachable-network latch inside each concrete registry are
-/// per-process state that a fresh registry per lookup would throw away.
+/// One [`PyPiRegistry`], one [`NpmRegistry`] and one [`NuGetRegistry`], all
+/// constructed against the same `cache_path` — see the cache key prefix
+/// functions for how the three share one file without colliding. `check.rs`
+/// holds this behind `&dyn Registry` for the whole run, exactly as it held a
+/// bare `PyPiRegistry` before npm existed: one router, not one per manifest,
+/// because the cache and the unreachable-network latch inside each concrete
+/// registry are per-process state that a fresh registry per lookup would
+/// throw away.
 ///
 /// Holds the concrete types rather than `Box<dyn Registry>`, so
-/// [`RegistryRouter::stale_packages`] can read both registries'
+/// [`RegistryRouter::stale_packages`] can read every registry's
 /// `stale_packages()` — a method [`Registry`] deliberately does not carry,
 /// per [`PyPiRegistry::stale_packages`]'s own doc comment. A router of trait
 /// objects could dispatch lookups but could not report this.
 pub struct RegistryRouter {
     pypi: PyPiRegistry,
     npm: NpmRegistry,
+    nuget: NuGetRegistry,
 }
 
 impl RegistryRouter {
     pub fn new(offline: bool, cache_path: Option<PathBuf>) -> Self {
         Self {
             pypi: PyPiRegistry::new(offline, cache_path.clone()),
-            npm: NpmRegistry::new(offline, cache_path),
+            npm: NpmRegistry::new(offline, cache_path.clone()),
+            nuget: NuGetRegistry::new(offline, cache_path),
         }
     }
 
-    /// Distinct packages either registry answered from cache entries past
-    /// their lifetime, summed across both. See
+    /// Distinct packages any registry answered from cache entries past
+    /// their lifetime, summed across all three. See
     /// [`PyPiRegistry::stale_packages`] for what "stale" means and why
     /// offline honours it at all; the message this feeds only has to be
     /// truthful about the count, not about which ecosystem it came from.
     pub fn stale_packages(&self) -> usize {
-        self.pypi.stale_packages() + self.npm.stale_packages()
+        self.pypi.stale_packages() + self.npm.stale_packages() + self.nuget.stale_packages()
     }
 }
 
@@ -887,6 +1154,7 @@ impl Registry for RegistryRouter {
         match ecosystem {
             Ecosystem::PyPi => self.pypi.exists(name),
             Ecosystem::Npm => self.npm.exists(name),
+            Ecosystem::NuGet => self.nuget.exists(name),
         }
     }
 }
@@ -1707,6 +1975,33 @@ mod tests {
         assert_eq!(erased.exists("ruff", Ecosystem::PyPi), Existence::Exists);
     }
 
+    /// The PyPI counterpart of npm's dot-segment guard, below: `is_valid_pypi_name`'s
+    /// charset check is `all()` over the name's characters, which is
+    /// vacuously true when there are none, so `""` read as a syntactically
+    /// legal PyPI name with nothing to catch it — `PyPiRegistry::exists`,
+    /// unlike `NpmRegistry::exists` and `NuGetRegistry::exists`, had no
+    /// charset gate of its own at all. Left alone, `""` would flow through
+    /// `exists_via` unchanged and, on a cache miss while online, build
+    /// `https://pypi.org/pypi//json` and let the server decide what
+    /// answers. `offline: false` is deliberate, as in this file's other
+    /// charset-gate tests: if the guard did not run ahead of `exists_via`,
+    /// this call would fall through to a real connection attempt, which no
+    /// test in this suite may make.
+    #[test]
+    fn an_empty_pypi_name_is_missing_without_a_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = PyPiRegistry::new(false, Some(cache_path.clone()));
+
+        assert_eq!(registry.exists(""), Existence::Missing);
+        assert!(
+            !cache_path.exists(),
+            "an empty pypi name should never create a cache file"
+        );
+
+        assert!(is_valid_pypi_name("ruff"), "positive control");
+    }
+
     // -- npm and the router -------------------------------------------------
     //
     // `NpmRegistry` mirrors `PyPiRegistry` exactly, so its own tests below
@@ -1840,6 +2135,42 @@ mod tests {
             !cache_path.exists(),
             "an invalid-charset name should never create a cache file"
         );
+    }
+
+    /// The npm counterpart of NuGet's dot-segment guard (see
+    /// `a_dot_segment_id_is_missing_without_a_request` below): the old
+    /// `is_valid_npm_name` had no ends anchor, so `".."` satisfied its
+    /// charset check whole — `.` is otherwise an ordinary character in
+    /// npm's charset. `npm_url("..")` would emit
+    /// `https://registry.npmjs.org/..`, a path the pinned http client does
+    /// not normalise client-side, leaving server-side normalisation to
+    /// decide what answers; npm's own router resolves it to the registry
+    /// root and answers 200, which would cache `npm:..` as `Exists` on a
+    /// blocking gate for a name nobody could ever publish. `offline: false`
+    /// is deliberate, as in this file's other charset-gate tests: if the
+    /// anchor did not run ahead of `exists_via`, this call would fall
+    /// through to a real connection attempt, which no test in this suite
+    /// may make.
+    #[test]
+    fn a_dot_segment_npm_name_is_missing_without_a_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NpmRegistry::new(false, Some(cache_path.clone()));
+
+        for name in ["..", ".", ".leading", "trailing."] {
+            assert_eq!(registry.exists(name), Existence::Missing, "{name:?}");
+        }
+        assert!(
+            !cache_path.exists(),
+            "a dot-segment npm name should never create a cache file"
+        );
+
+        // Positive controls: an ordinary unscoped name, and a scoped name,
+        // which legitimately starts with `@` — the anchor must admit that
+        // leading character even though it is not alphanumeric, while still
+        // requiring the trailing character to be.
+        assert!(is_valid_npm_name("react"), "positive control");
+        assert!(is_valid_npm_name("@scope/pkg"), "positive control");
     }
 
     /// The exact shape of the reviewer's live poisoned-cache scenario, pinned
@@ -2020,6 +2351,157 @@ mod tests {
         assert_eq!(
             reloaded.exists("left-pad", Ecosystem::Npm),
             Existence::Exists
+        );
+    }
+
+    // -- NuGet ----------------------------------------------------------
+    //
+    // `NuGetRegistry` mirrors `NpmRegistry`, which mirrors `PyPiRegistry`;
+    // the shared machinery is already pinned above. This is the task's own
+    // test list: the validity guard, case-insensitive cache keys, the
+    // lowercased lookup URL, the unreachable-network answer, the
+    // flat-container status mapping, and the `nuget:` cache key prefix.
+
+    /// An ID [`is_valid_nuget_id`] refuses must never reach the network or
+    /// the cache — the npm lesson: an illegal name interpolated into a
+    /// lookup URL can resolve to something else entirely and poison the
+    /// cache under a name nobody searched for. `offline: false` is
+    /// deliberate, as in npm's own twin test: if the charset guard did not
+    /// run first, `exists` would fall through to a real connection attempt,
+    /// which no test in this suite may make.
+    #[test]
+    fn an_illegal_nuget_id_is_missing_without_a_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NuGetRegistry::new(false, Some(cache_path.clone()));
+
+        for name in ["bad name", "x?y", ""] {
+            assert_eq!(registry.exists(name), Existence::Missing, "{name:?}");
+        }
+
+        assert!(
+            !cache_path.exists(),
+            "an illegal id should never create a cache file, let alone a request"
+        );
+    }
+
+    /// `.` and `..` are RFC 3986 dot-segments: `is_valid_nuget_id`'s old
+    /// charset admitted both, since `.` is otherwise a legal character, so
+    /// `nuget_url("..")` emitted `.../v3-flatcontainer/../index.json` — a path the
+    /// pinned http client does not normalise client-side, leaving
+    /// server-side normalisation to decide what actually answers, cached
+    /// under `nuget:..` as a Tier A verdict regardless. Leading or trailing
+    /// `.`/`-` are the same family: a package ID with a punctuation end is
+    /// not one nuget.org would ever issue, so refusing it costs nothing.
+    /// `"Newtonsoft.Json"` is the positive control: an ordinary ID with
+    /// interior dots must still pass.
+    #[test]
+    fn a_dot_segment_id_is_missing_without_a_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NuGetRegistry::new(false, Some(cache_path.clone()));
+
+        for name in ["..", ".", ".leading", "trailing.", "-leading", "trailing-"] {
+            assert_eq!(registry.exists(name), Existence::Missing, "{name:?}");
+        }
+        assert!(
+            !cache_path.exists(),
+            "a dot-segment or edge-punctuated id should never create a cache file"
+        );
+
+        assert!(is_valid_nuget_id("Newtonsoft.Json"), "positive control");
+    }
+
+    /// NuGet package IDs are case-insensitive, so two spellings of the same
+    /// ID must share one cache entry. Offline, so the only way this can
+    /// answer at all is from the cache.
+    #[test]
+    fn nuget_ids_are_case_insensitive_in_the_cache() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("nuget:newtonsoft.json", true, 0)]),
+        )
+        .expect("write cache");
+
+        let registry = NuGetRegistry::new(true, Some(cache_path));
+
+        assert_eq!(registry.exists("Newtonsoft.Json"), Existence::Exists);
+    }
+
+    /// Pure and network-free, as the plan requires: the flat-container index
+    /// is served at the lowercased path only, so the URL builder must
+    /// lowercase the id itself rather than relying on every caller to.
+    ///
+    /// `v3-flatcontainer`, confirmed against the real service with `curl`
+    /// during this task's live smoke test — see `nuget_url`'s doc comment
+    /// for what the wrong path (`v3-flat2`, this test's own value until
+    /// then) cost: every lookup 404ing, real packages included.
+    #[test]
+    fn the_lookup_url_lowercases_the_id() {
+        assert_eq!(
+            nuget_url("OpenAI"),
+            "https://api.nuget.org/v3-flatcontainer/openai/index.json"
+        );
+    }
+
+    /// A transport failure is a fact about this run's network, not about the
+    /// package: `Unknown`, and never cached. See
+    /// [`PyPiRegistry::exists_via`] for the same property proven against
+    /// PyPI.
+    #[test]
+    fn an_unreachable_registry_is_unknown() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NuGetRegistry::new(false, Some(cache_path.clone()));
+
+        assert_eq!(
+            registry.exists_via("Newtonsoft.Json", |_| Outcome::Unreachable),
+            Existence::Unknown
+        );
+        assert!(
+            !cache_path.exists(),
+            "an unreachable registry cached something"
+        );
+    }
+
+    /// The flat-container contract: a 200 — [`classify`]'s
+    /// `Outcome::Answered(Existence::Exists)` — means the package exists, a
+    /// 404 — `Outcome::Answered(Existence::Missing)` — means it does not.
+    /// `classify` itself is shared with PyPI and npm and is pinned once,
+    /// against real status codes, in `only_a_404_reads_as_missing`; this
+    /// proves `NuGetRegistry` propagates what it is given rather than
+    /// reinterpreting it.
+    #[test]
+    fn a_404_is_missing_and_a_200_is_exists() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let registry = NuGetRegistry::new(false, Some(dir.path().join("registry.json")));
+
+        assert_eq!(
+            registry.exists_via("Missing.Package", |_| Outcome::Answered(Existence::Missing)),
+            Existence::Missing
+        );
+        assert_eq!(
+            registry.exists_via("Newtonsoft.Json", |_| Outcome::Answered(Existence::Exists)),
+            Existence::Exists
+        );
+    }
+
+    /// A definite answer is written under the `nuget:` prefix, lowercased —
+    /// see [`nuget_cache_key`].
+    #[test]
+    fn cache_keys_carry_the_nuget_prefix() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = NuGetRegistry::new(true, Some(cache_path.clone()));
+
+        registry.record("Newtonsoft.Json", Existence::Exists);
+
+        let written = std::fs::read_to_string(&cache_path).expect("read cache");
+        assert!(
+            written.contains("\"nuget:newtonsoft.json\""),
+            "written: {written}"
         );
     }
 }

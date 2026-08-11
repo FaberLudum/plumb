@@ -458,6 +458,7 @@ fn package_does_not_exist(dependency: &AddedDependency) -> Finding {
     let registry_name = match dependency.ecosystem {
         Ecosystem::PyPi => "PyPI",
         Ecosystem::Npm => "npm",
+        Ecosystem::NuGet => "NuGet",
     };
 
     Finding {
@@ -1673,6 +1674,18 @@ mod tests {
     /// gaps that becomes a warning on every run. `is_some()` alone passes
     /// against that implementation, which is why the emptiness is asserted
     /// here rather than assumed.
+    ///
+    /// `packages.config` is deliberately not in the probe list below, and
+    /// that is not an oversight to fix by adding it. Every other filename
+    /// `ecosystems::nuget::NuGet` recognises yields no gap on an empty body
+    /// — an empty `.csproj`, `.fsproj`, `.vbproj` or `Directory.Packages.props`
+    /// really is a legal, empty project file. `packages.config` is the one
+    /// designed exception: `NuGet::parse` returns `Gap::PackagesConfig`
+    /// unconditionally for it, regardless of what the body holds, because the
+    /// format is recognised by filename and deliberately never parsed — see
+    /// `ecosystems::nuget`'s doc comment. Adding it to this loop would not
+    /// catch a bug; it would fail against the design on purpose, on every
+    /// run, forever.
     #[test]
     fn a_manifest_is_recognised_from_its_path_alone() {
         for path in [
@@ -1682,6 +1695,9 @@ mod tests {
             "packages/api/pyproject.toml",
             "package.json",
             "packages/api/package.json",
+            "Api.csproj",
+            "src/Api.csproj",
+            "Directory.Packages.props",
         ] {
             let probed = manifest::parse(path, "")
                 .unwrap_or_else(|| panic!("{path} was not recognised from its name"));

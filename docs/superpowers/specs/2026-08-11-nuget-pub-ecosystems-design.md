@@ -51,11 +51,19 @@ Needs its row in docs/dependencies.md; exact version checked at
 implementation time, not recalled.
 
 **Registry.** NuGet V3 flat container:
-`GET https://api.nuget.org/v3-flat2/{id}/index.json` with `{id}`
-lowercased — 200 exists, 404 missing. IDs are case-insensitive; valid
-charset `[A-Za-z0-9._-]`, and an ID that violates it is `Missing` without
-a request (the npm lesson: an illegal name interpolated into a URL can
-resolve wrong and poison the cache). Cache keys `nuget:` + lowercased id —
+`GET https://api.nuget.org/v3-flatcontainer/{id}/index.json` with `{id}`
+lowercased — 200 exists, 404 missing. (First drafted as `v3-flat2` from
+memory; the live smoke test caught it — every online lookup answered
+Missing. The convention exists for a reason and it was this spec that
+broke it.) IDs are case-insensitive; valid
+charset `[A-Za-z0-9._-]`, both ends anchored alphanumeric — `.` is
+otherwise an ordinary character in that charset, so without the anchor it
+admits `.` and `..` whole, RFC 3986 dot-segments that a `../index.json`
+request would carry to the wire unnormalised and let server-side
+normalisation answer instead — and an ID that violates either the charset
+or the anchor is `Missing` without a request (the npm lesson: an illegal
+name interpolated into a URL can resolve wrong and poison the cache).
+Cache keys `nuget:` + lowercased id —
 two spellings of one ID must share an entry. Unreachable registry is
 `Unknown`, never a violation. The three registry properties in CONTRIBUTING
 bind verbatim.
