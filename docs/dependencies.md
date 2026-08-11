@@ -10,6 +10,7 @@ the standard library is not enough.
 | `serde` / `serde_json` | JSON report output and cache persistence. No serialisation in std. |
 | `toml` | `pyproject.toml` parsing. No TOML parser in std. |
 | `quick-xml` | `.csproj`/`Directory.Packages.props` parsing. No XML parser in std, and a blocking gate cannot fall back to a line heuristic — an XML comment would manufacture blocking findings on text nobody declared. |
+| `yaml-rust2` | `pubspec.yaml` parsing. No YAML parser in std, and pubspec's nested block shapes — `sdk:`, `git:`, `path:`, `hosted:` — are exactly what an indentation heuristic gets wrong, on a gate that blocks. Declared `default-features = false`: the default `encoding` feature exists for decoding byte streams, and the whole `encoding_rs` stack it pulls in is unreachable from `YamlLoader::load_from_str`, the only entry point Plumb calls — we hand the parser an already-decoded UTF-8 `&str`. |
 | `ureq` | Blocking HTTP for registry lookups. No HTTP client in std. Chosen over `reqwest` because it is blocking, has no async runtime, and pulls a far smaller tree. |
 | `assert_cmd`, `predicates`, `tempfile` | Test-only. Integration testing of a binary and temporary git repositories. |
 

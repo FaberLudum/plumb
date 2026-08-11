@@ -590,21 +590,22 @@ fn check_exits_zero_for_a_legacy_uppercase_npm_dependency() {
         .stdout(predicates::str::contains("no findings"));
 }
 
-/// One change touching a Python, an npm and a NuGet manifest, each with one
-/// bad name, must report all three findings — proof that the router
-/// dispatches each manifest's added dependencies to its own registry within
-/// a single run, rather than one registry winning for the whole invocation.
+/// One change touching a Python, an npm, a NuGet and a pub.dev manifest,
+/// each with one bad name, must report all four findings — proof that the
+/// router dispatches each manifest's added dependencies to its own registry
+/// within a single run, rather than one registry winning for the whole
+/// invocation.
 ///
-/// Only `package.json` and `Api.csproj` need staging: `requirements.txt`
-/// already exists at HEAD (from `repo_with_requirements`), so its edit is a
-/// tracked-file diff and is visible without it. Staging all three via `-A`
-/// is harmless — a tracked file's working-tree content is what `check
-/// --diff` reads regardless of whether it is also staged, per
+/// Only the new files need staging: `requirements.txt` already exists at
+/// HEAD (from `repo_with_requirements`), so its edit is a tracked-file diff
+/// and is visible without it. Staging all four via `-A` is harmless — a
+/// tracked file's working-tree content is what `check --diff` reads
+/// regardless of whether it is also staged, per
 /// `a_staged_addition_is_invisible_once_the_working_tree_matches_head`'s
 /// finding in `check.rs`: staging only changes what `git diff --name-only
 /// HEAD` *lists*, and the working tree here matches what was staged.
 #[test]
-fn a_change_touching_all_three_ecosystems_reports_each() {
+fn a_change_touching_all_four_ecosystems_reports_each() {
     let dir = repo_with_requirements("ruff==0.4.0\n");
     std::fs::write(
         in_repo(dir.path(), "requirements.txt"),
@@ -623,6 +624,11 @@ fn a_change_touching_all_three_ecosystems_reports_each() {
         </ItemGroup></Project>"#,
     )
     .expect("write");
+    std::fs::write(
+        in_repo(dir.path(), "pubspec.yaml"),
+        "name: app\ndependencies:\n  surely_not_a_real_package_xyz: ^1.0.0\n",
+    )
+    .expect("write");
     run_git(&repo(dir.path()), &["add", "-A"]);
     write_cache(
         dir.path(),
@@ -630,6 +636,7 @@ fn a_change_touching_all_three_ecosystems_reports_each() {
             cache_entry("pypi:requestz", false, 0),
             cache_entry("npm:left-pad-typo", false, 0),
             cache_entry("nuget:surely-not-a-real-package-xyz", false, 0),
+            cache_entry("pub:surely_not_a_real_package_xyz", false, 0),
         ]
         .join(","),
     );
@@ -644,7 +651,9 @@ fn a_change_touching_all_three_ecosystems_reports_each() {
                 .and(predicates::str::contains("left-pad-typo"))
                 .and(predicates::str::contains("npm"))
                 .and(predicates::str::contains("surely-not-a-real-package-xyz"))
-                .and(predicates::str::contains("NuGet")),
+                .and(predicates::str::contains("NuGet"))
+                .and(predicates::str::contains("surely_not_a_real_package_xyz"))
+                .and(predicates::str::contains("pub.dev")),
         );
 }
 
@@ -748,6 +757,112 @@ fn a_directory_packages_props_addition_is_checked_the_same_as_a_csproj() {
                 .and(predicates::str::contains("Directory.Packages.props"))
                 .and(predicates::str::contains("NuGet")),
         );
+}
+
+/// The pub.dev mirror of the PyPI/npm/NuGet existence tests above: a change
+/// adding a nonexistent package to a `pubspec.yaml`'s `dependencies` must
+/// block, and the message must name pub.dev rather than another registry.
+/// This is the first end-to-end proof that `check --diff` reaches
+/// `PubDevRegistry` through the router at all, rather than only the
+/// unit-level routing pinned in `registry.rs` and `check.rs`.
+///
+/// The cache is seeded under the `pub:`-prefixed key `pub_cache_key` builds
+/// (see `registry.rs`), which — unlike NuGet's — is *not* lowercased:
+/// pub.dev package names are case-sensitive, so `dio` and `Dio` are
+/// different lookups and must not collide in one cache entry.
+///
+/// `pubspec.yaml` is new here, staged for the same reason `package.json` is
+/// in the npm tests: `git diff --name-only HEAD` does not report an
+/// untracked file.
+#[test]
+fn check_exits_one_when_an_added_pub_dependency_does_not_exist() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "pubspec.yaml"),
+        "name: app\ndependencies:\n  surely_not_a_real_package_xyz: ^1.0.0\n",
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(
+        dir.path(),
+        &cache_entry("pub:surely_not_a_real_package_xyz", false, 0),
+    );
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .code(1)
+        .stdout(
+            predicates::str::contains("surely_not_a_real_package_xyz")
+                .and(predicates::str::contains("pubspec.yaml"))
+                .and(predicates::str::contains("pub.dev"))
+                .and(predicates::str::contains("taxonomy §4.1")),
+        );
+}
+
+/// The other half: an existing package, seeded `exists: true` under the same
+/// `pub:` prefix, must not block.
+///
+/// The name here is lowercase, so this test does not exercise the fact that
+/// `pub_cache_key` — unlike `nuget_cache_key` — leaves case alone. It cannot:
+/// the exit-0 direction is blind to a cache miss, because a missed key falls
+/// through to `Existence::Unknown` under `--offline` and `Unknown` does not
+/// block either. Seeding a mixed-case name here would look like coverage and
+/// provide none (checked: a `to_lowercase` mutant on `pub_cache_key` leaves
+/// this test green with `pub:Autolinker` seeded). The non-lowercasing is
+/// pinned where it can be — the seeded-`Autolinker` unit test in
+/// `registry.rs`, which asserts `Exists` rather than merely "did not block".
+///
+/// Staged for the same reason as the test above.
+#[test]
+fn check_exits_zero_when_an_added_pub_dependency_exists() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "pubspec.yaml"),
+        "name: app\ndependencies:\n  flutter_riverpod: ^2.5.1\n",
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(dir.path(), &cache_entry("pub:flutter_riverpod", true, 0));
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no findings"));
+}
+
+/// An added `sdk:` dependency is never a registry lookup — `flutter` ships
+/// with the SDK and has no pub.dev page — so it must produce nothing at all:
+/// no finding, no gap, exit 0. This is the false-positive-by-construction
+/// case pinned end to end.
+///
+/// The cache is seeded `pub:flutter` → `exists: false` as a tripwire, and
+/// that seeding is the whole point of the test. Leaving it unseeded would
+/// make the test vacuous: under `--offline` an unseeded name answers
+/// `Existence::Unknown`, which never blocks, so the run would exit 0 whether
+/// or not the reader had wrongly emitted `flutter` as a lookup. With the
+/// seed in place the two outcomes separate — a reader that emitted `flutter`
+/// would hit the seeded `Missing` and block with exit 1, while a reader that
+/// drops it (as `ecosystems::pub_dev` does) never consults the entry at all.
+/// Exit 0 therefore pins "never looked up", not merely "did not block".
+/// `no findings` additionally rules out a gap warning (exit 2) on the file.
+#[test]
+fn an_added_sdk_dependency_produces_no_finding() {
+    let dir = repo_with_requirements("ruff==0.4.0\n");
+    std::fs::write(
+        in_repo(dir.path(), "pubspec.yaml"),
+        "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    )
+    .expect("write");
+    run_git(&repo(dir.path()), &["add", "-A"]);
+    write_cache(dir.path(), &cache_entry("pub:flutter", false, 0));
+
+    plumb_in(dir.path())
+        .args(["check", "--diff", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no findings"));
 }
 
 /// `packages.config` is recognised by filename and deliberately never

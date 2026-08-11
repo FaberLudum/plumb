@@ -223,11 +223,12 @@ pub enum Existence {
 /// Object safe on purpose: `check.rs` holds `&dyn Registry` for the whole run
 /// so tests can inject a stub instead of reaching the network.
 ///
-/// Only [`RegistryRouter`] implements this trait. [`PyPiRegistry`] and
-/// [`NpmRegistry`] each expose an ecosystem-less inherent `exists(name)`
-/// instead: each already knows which registry it asks, so the parameter
-/// would be dead weight on both of them. The router is the one thing that
-/// needs it, to decide which of the two to ask — see its doc comment.
+/// Only [`RegistryRouter`] implements this trait. Every concrete registry
+/// exposes an ecosystem-less inherent `exists(name)` instead: each already
+/// knows which registry it asks, so the parameter would be dead weight on
+/// all of them. The router is the one thing that needs it, to decide which
+/// registry to ask — see its doc comment. [`Ecosystem`] names the full set,
+/// so this comment does not have to be revisited when the set grows.
 pub trait Registry {
     fn exists(&self, name: &str, ecosystem: Ecosystem) -> Existence;
 }
@@ -1108,11 +1109,237 @@ impl NuGetRegistry {
     }
 }
 
+/// The map key an answer about `name` is stored under for pub.dev.
+///
+/// **No case folding**, and this is the one place a reader would expect it,
+/// because [`nuget_cache_key`] — the mould this type follows — lowercases.
+/// NuGet ids are case-insensitive, so two spellings there are one package and
+/// must share one entry. pub.dev is the opposite: its API path is
+/// case-sensitive, live-verified alongside the endpoint itself (`Autolinker`
+/// 200, `autolinker` 404 — see [`pub_url`]). Folding here would let the `200`
+/// answer a question about the name that `404`s, which on a blocking gate is
+/// a dependency waved through under a name that does not resolve.
+///
+/// Most pub.dev names are lowercase already, so the fold would have looked
+/// harmless in every ordinary case and wrong only for the legacy mixed-case
+/// packages the registry still serves — see [`is_valid_pub_name`].
+///
+/// No legacy bare form, for the same reason as [`npm_cache_key`] and
+/// [`nuget_cache_key`]: a bare key predates pub.dev's arm entirely, so it can
+/// only ever have meant PyPI.
+fn pub_cache_key(name: &str) -> String {
+    format!("pub:{name}")
+}
+
+/// Builds the pub.dev package lookup URL for `name`.
+///
+/// Pure and separate from [`PubRegistry::lookup`] so the mapping can be
+/// pinned without a request, the same reasoning [`npm_url`] and [`nuget_url`]
+/// follow. Nothing is escaped and nothing is folded: [`is_valid_pub_name`]
+/// gates this to `[a-zA-Z0-9_]`, every character of which is a literal,
+/// unreserved URL path-segment character.
+///
+/// **Verified live before this constant was written**, exactly as
+/// `CLAUDE.md`'s "check the current API before writing code against it" rule
+/// requires and as [`nuget_url`]'s doc comment explains the cost of skipping:
+/// `curl -s -o /dev/null -w "%{http_code}" https://pub.dev/api/packages/…`
+/// answered `200` for `dio` and for `flutter_riverpod`, and `404` for a name
+/// nobody has published. The same run established the case-sensitivity this
+/// function and [`pub_cache_key`] both turn on: `Autolinker` `200`,
+/// `autolinker` `404`, `dio` `200`, `Dio` `404`. Lowercasing on the way to
+/// the wire — which is what the NuGet mould does — would therefore have
+/// turned every lookup of a legacy mixed-case package into a false `Missing`
+/// on a blocking gate.
+fn pub_url(name: &str) -> String {
+    format!("https://pub.dev/api/packages/{name}")
+}
+
+/// Whether `name` is a syntactically ordinary pub.dev package name.
+///
+/// ASCII alphanumerics and `_` only, and the first character must be an
+/// ASCII letter or `_`. That is pub.dev's own uploader rule, not a summary of
+/// the prose guidance: `pub_package_reader`'s `validatePackageName` checks
+/// `identifierExpr` (`^[a-zA-Z0-9_]+$`) and `startsWithLetterOrUnderscore`
+/// (`^[a-zA-Z_]`), and the `dart pub` client's `NameValidator` applies the
+/// same two patterns. `dart.dev/tools/pub/pubspec#name` states the intent the
+/// patterns implement: "Use only basic Latin letters and Arabic digits:
+/// `[a-z0-9_]`", and "make sure the name is a valid Dart identifier — that it
+/// doesn't start with digits".
+///
+/// **Both letter cases, not lowercase only.** The prose says
+/// `lowercase_with_underscores`, and following it here would have been the
+/// [`is_valid_npm_name`] `JSONStream` bug a second time: pub.dev enforces
+/// lowercase for *new* names only (`validateNewPackageName`), and carries a
+/// hard-coded `knownMixedCasePackages` allowlist — `Autolinker`, `Babylon`,
+/// `LoadingBox` among them — of packages published before that rule, all of
+/// which it still serves. A lowercase-only guard would answer `Missing` for
+/// them without asking, which on a Tier A gate blocks a build over a package
+/// that has done nothing wrong. This task's own brief listed `"Dio"` among
+/// the names to reject; the live check is what corrected it.
+///
+/// **A leading `_` is admitted**, for the same reason: the brief listed
+/// `"_leading"` as illegal, and both validators above explicitly permit it —
+/// `^[a-zA-Z_]`. Refusing it would be a guess dressed as syntax. It is also
+/// URL-safe, so the honest answer is to ask pub.dev, which returns `404` for
+/// it and yields the same `Missing` with evidence behind it.
+///
+/// **No ends anchor**, which is where this departs from
+/// [`is_valid_nuget_id`] and [`is_valid_npm_name`]. Both of those anchor
+/// their last character because `.` is an ordinary character in their
+/// charsets, so `.` and `..` — RFC 3986 dot-segments — slipped through as
+/// whole names and reached the wire unnormalised. `.` is not in pub.dev's
+/// charset at all, so a dot-segment is structurally impossible here and an
+/// ends anchor would be vacuous: it could only ever reject a trailing `_`,
+/// which pub.dev itself admits. The lesson from those two guards is that the
+/// charset must be checked against something that cannot become a path
+/// operator, not that every charset needs an anchor bolted on.
+///
+/// Length is not checked. pub.dev caps a name at 64 characters, but that is
+/// a publishing rule rather than a URL-safety property, and a longer name
+/// simply `404`s — which is the same answer, arrived at with evidence.
+///
+/// This is the gate [`PubRegistry::exists`] checks before it does anything
+/// else, exactly as [`is_valid_nuget_id`] gates [`NuGetRegistry::exists`]:
+/// an illegal name interpolated into the lookup URL unescaped could resolve
+/// to something else entirely and poison the cache under a name nobody
+/// searched for.
+///
+/// The empty string is rejected by the first-character check, which is
+/// `is_some_and` over `next()` and so fails on an empty iterator — the
+/// charset `all()` alone would call `""` legal, the vacuous-truth trap
+/// [`is_valid_pypi_name`] documents.
+fn is_valid_pub_name(name: &str) -> bool {
+    let charset_ok = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let starts_ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    charset_ok && starts_ok
+}
+
+/// Resolves package names against pub.dev, with the same on-disk cache,
+/// offline mode and unreachable-network latch as [`PyPiRegistry`],
+/// [`NpmRegistry`] and [`NuGetRegistry`] — see [`PyPiRegistry`]'s doc comment
+/// for the reasoning behind all of them, none of which differs here. What
+/// differs is narrow and is all this type states of its own: the endpoint
+/// ([`pub_url`]), the cache key prefix ([`pub_cache_key`], deliberately
+/// *not* case-folded, unlike NuGet's), and the character set a name must
+/// satisfy before it reaches the URL ([`is_valid_pub_name`]).
+pub struct PubRegistry {
+    offline: bool,
+    cache_path: Option<PathBuf>,
+    cache: RefCell<Cache>,
+    agent: ureq::Agent,
+    unreachable: Cell<bool>,
+    honoured_stale: RefCell<BTreeSet<String>>,
+}
+
+impl PubRegistry {
+    /// See [`PyPiRegistry::new`]; identical, against the shared cache file.
+    pub fn new(offline: bool, cache_path: Option<PathBuf>) -> Self {
+        let cache = load_cache(cache_path.as_deref());
+
+        Self {
+            offline,
+            cache_path,
+            cache: RefCell::new(cache),
+            agent: lookup_agent(),
+            unreachable: Cell::new(false),
+            honoured_stale: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    /// See [`PyPiRegistry::stale_packages`].
+    pub fn stale_packages(&self) -> usize {
+        self.honoured_stale.borrow().len()
+    }
+
+    /// See [`PyPiRegistry::exists_via`]; identical but for the cache key,
+    /// which is neither case-folded nor backed by a legacy bare-key
+    /// fallback — see [`pub_cache_key`].
+    fn exists_via(&self, name: &str, lookup: impl Fn(&str) -> Outcome) -> Existence {
+        let cached = self.cache.borrow().known.get(&pub_cache_key(name)).copied();
+        if let Some(entry) = cached
+            && entry.is_fresh(now_unix())
+        {
+            return entry.existence();
+        }
+
+        if self.offline {
+            let answer = honour_offline(cached);
+            if answer != Existence::Unknown {
+                self.honoured_stale.borrow_mut().insert(name.to_string());
+            }
+            return answer;
+        }
+
+        if self.unreachable.get() {
+            return Existence::Unknown;
+        }
+
+        let outcome = lookup(name);
+        if outcome == Outcome::Unreachable {
+            self.unreachable.set(true);
+        }
+
+        let existence = outcome.existence();
+        self.record(name, existence);
+        existence
+    }
+
+    /// Answers from the cache, then from pub.dev, then not at all. See
+    /// [`PyPiRegistry::exists`].
+    ///
+    /// A name [`is_valid_pub_name`] refuses is answered `Missing`
+    /// immediately — no cache read, no offline fallback, no request — and
+    /// that runs first, ahead of everything
+    /// [`exists_via`](Self::exists_via) does, exactly as
+    /// [`NuGetRegistry::exists`] gates on [`is_valid_nuget_id`] first: an
+    /// illegal name must never reach the URL or the cache.
+    pub fn exists(&self, name: &str) -> Existence {
+        if !is_valid_pub_name(name) {
+            return Existence::Missing;
+        }
+        self.exists_via(name, |name| self.lookup(name))
+    }
+
+    /// Asks pub.dev about one package name.
+    fn lookup(&self, name: &str) -> Outcome {
+        // `PubRegistry::exists` already refuses a name this check would
+        // reject, before `lookup` is ever reached. Kept as a debug-only
+        // tripwire, consistent with [`NpmRegistry::lookup`]'s and
+        // [`NuGetRegistry::lookup`]'s own guards.
+        debug_assert!(
+            is_valid_pub_name(name),
+            "pub name reached the registry unvalidated: {name:?}"
+        );
+        classify(self.agent.get(&pub_url(name)).call().map(|_| ()))
+    }
+
+    /// Records a definite answer and writes it into the shared cache file.
+    /// See [`PyPiRegistry::record`].
+    fn record(&self, name: &str, outcome: Existence) {
+        if outcome == Existence::Unknown {
+            return;
+        }
+        let entry = Entry {
+            exists: outcome == Existence::Exists,
+            checked: now_unix(),
+        };
+        let key = pub_cache_key(name);
+        self.cache.borrow_mut().known.insert(key.clone(), entry);
+        if let Some(cache_path) = self.cache_path.as_deref() {
+            persist_entry(cache_path, &key, entry);
+        }
+    }
+}
+
 /// Dispatches a lookup to the registry for its ecosystem.
 ///
-/// One [`PyPiRegistry`], one [`NpmRegistry`] and one [`NuGetRegistry`], all
+/// One [`PyPiRegistry`], one [`NpmRegistry`], one [`NuGetRegistry`] and one
+/// [`PubRegistry`], all
 /// constructed against the same `cache_path` — see the cache key prefix
-/// functions for how the three share one file without colliding. `check.rs`
+/// functions for how the four share one file without colliding. `check.rs`
 /// holds this behind `&dyn Registry` for the whole run, exactly as it held a
 /// bare `PyPiRegistry` before npm existed: one router, not one per manifest,
 /// because the cache and the unreachable-network latch inside each concrete
@@ -1128,6 +1355,7 @@ pub struct RegistryRouter {
     pypi: PyPiRegistry,
     npm: NpmRegistry,
     nuget: NuGetRegistry,
+    pub_dev: PubRegistry,
 }
 
 impl RegistryRouter {
@@ -1135,17 +1363,21 @@ impl RegistryRouter {
         Self {
             pypi: PyPiRegistry::new(offline, cache_path.clone()),
             npm: NpmRegistry::new(offline, cache_path.clone()),
-            nuget: NuGetRegistry::new(offline, cache_path),
+            nuget: NuGetRegistry::new(offline, cache_path.clone()),
+            pub_dev: PubRegistry::new(offline, cache_path),
         }
     }
 
     /// Distinct packages any registry answered from cache entries past
-    /// their lifetime, summed across all three. See
+    /// their lifetime, summed across all four. See
     /// [`PyPiRegistry::stale_packages`] for what "stale" means and why
     /// offline honours it at all; the message this feeds only has to be
     /// truthful about the count, not about which ecosystem it came from.
     pub fn stale_packages(&self) -> usize {
-        self.pypi.stale_packages() + self.npm.stale_packages() + self.nuget.stale_packages()
+        self.pypi.stale_packages()
+            + self.npm.stale_packages()
+            + self.nuget.stale_packages()
+            + self.pub_dev.stale_packages()
     }
 }
 
@@ -1155,6 +1387,7 @@ impl Registry for RegistryRouter {
             Ecosystem::PyPi => self.pypi.exists(name),
             Ecosystem::Npm => self.npm.exists(name),
             Ecosystem::NuGet => self.nuget.exists(name),
+            Ecosystem::Pub => self.pub_dev.exists(name),
         }
     }
 }
@@ -2503,5 +2736,263 @@ mod tests {
             written.contains("\"nuget:newtonsoft.json\""),
             "written: {written}"
         );
+    }
+
+    // -- pub.dev ----------------------------------------------------------
+    //
+    // `PubRegistry` mirrors `NuGetRegistry`, which mirrors `NpmRegistry`,
+    // which mirrors `PyPiRegistry`; the shared machinery — the TTLs, the
+    // latch, `classify`, the lookup timeout — is already pinned once above,
+    // and pinning it again here would only prove the copy was faithful. What
+    // is actually specific to pub.dev is what these cover: the validity
+    // guard, the endpoint, the case-*sensitive* cache key, and the router
+    // arm that replaced Task 1's interim `Unknown`.
+    //
+    // Two of these tests carry names their NuGet twins already use
+    // (`an_unreachable_registry_is_unknown`,
+    // `a_404_is_missing_and_a_200_is_exists`), so they are suffixed here:
+    // one `mod tests` cannot hold two functions of one name, and renaming
+    // NuGet's would touch assertions this task has no business touching.
+
+    /// A name [`is_valid_pub_name`] refuses must never reach the network or
+    /// the cache — the npm lesson: an illegal name interpolated into a
+    /// lookup URL can resolve to something else entirely and poison the
+    /// cache under a name nobody searched for. `offline: false` is
+    /// deliberate, as in npm's and NuGet's own twin tests: if the guard did
+    /// not run ahead of everything [`PubRegistry::exists_via`] does, this
+    /// call would fall through to a real connection attempt, which no test
+    /// in this suite may make.
+    ///
+    /// The cache-file assertion is the thing that proves no request
+    /// happened, and it has to be: a real lookup of any of these names would
+    /// also come back `Missing`, so the return value alone cannot tell the
+    /// two apart. A real answer would be *recorded*, creating the file; the
+    /// guard's answer is not.
+    ///
+    /// `"."` and `".."` are here for completeness rather than as the
+    /// dot-segment guard npm and NuGet need. `.` is not in pub.dev's
+    /// character set at all, so a dot-segment cannot survive the charset
+    /// check and there is nothing for an ends anchor to add — see
+    /// [`is_valid_pub_name`].
+    #[test]
+    fn an_illegal_pub_name_is_missing_without_a_request() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = PubRegistry::new(false, Some(cache_path.clone()));
+
+        for name in [
+            "",
+            "1pkg",
+            "a-b",
+            "..",
+            ".",
+            "flutter riverpod",
+            "dio?bogus",
+            "lodash.merge",
+            "@scope/pkg",
+            "café",
+        ] {
+            assert_eq!(registry.exists(name), Existence::Missing, "{name:?}");
+        }
+
+        assert!(
+            !cache_path.exists(),
+            "an illegal pub name should never create a cache file, let alone a request"
+        );
+    }
+
+    /// The other half of the guard, and the half that carries the risk: a
+    /// name pub.dev really serves must not be refused, because a refusal is
+    /// a `Missing` and a `Missing` blocks the build.
+    ///
+    /// This task's brief listed `"Dio"` (uppercase) and `"_leading"` among
+    /// the names to reject. Both are wrong, and checking the registry rather
+    /// than recalling the rule is what caught it — see [`is_valid_pub_name`]
+    /// for the sources and the live status codes. pub.dev's own uploader
+    /// admits `[a-zA-Z0-9_]` starting with a letter or underscore, and it
+    /// still serves a hard-coded list of legacy mixed-case packages that
+    /// predate the lowercase requirement. `Autolinker`, `Babylon` and
+    /// `LoadingBox` are three of them, and all three answer 200 today. This
+    /// is [`is_valid_npm_name`]'s `JSONStream` bug exactly, and it is not
+    /// reintroduced here.
+    #[test]
+    fn is_valid_pub_name_admits_the_names_pub_dev_really_serves() {
+        for name in [
+            "dio",
+            "flutter_riverpod",
+            "path",
+            "http2",
+            "Autolinker",
+            "Babylon",
+            "LoadingBox",
+            "_leading",
+            "trailing_",
+        ] {
+            assert!(
+                is_valid_pub_name(name),
+                "pub.dev's own rules admit {name:?}"
+            );
+        }
+    }
+
+    /// Pure and network-free, as the plan requires. Unlike [`nuget_url`],
+    /// nothing is lowercased on the way to the wire: the pub.dev API path is
+    /// case-sensitive, so lowercasing would turn a lookup for a real
+    /// mixed-case package into a 404 — see [`pub_url`].
+    #[test]
+    fn a_valid_pub_name_reaches_the_url() {
+        assert_eq!(
+            pub_url("flutter_riverpod"),
+            "https://pub.dev/api/packages/flutter_riverpod"
+        );
+        assert_eq!(
+            pub_url("Autolinker"),
+            "https://pub.dev/api/packages/Autolinker",
+            "lowercasing this name would ask about a package that 404s"
+        );
+    }
+
+    /// A transport failure is a fact about this run's network, not about the
+    /// package: `Unknown`, and never cached. See [`PyPiRegistry::exists_via`]
+    /// for the same property proven against PyPI.
+    #[test]
+    fn an_unreachable_pub_registry_is_unknown() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = PubRegistry::new(false, Some(cache_path.clone()));
+
+        assert_eq!(
+            registry.exists_via("flutter_riverpod", |_| Outcome::Unreachable),
+            Existence::Unknown
+        );
+        assert!(
+            !cache_path.exists(),
+            "an unreachable registry cached something"
+        );
+    }
+
+    /// The endpoint's contract: a 200 means the package exists, a 404 means
+    /// it does not — both live-verified against pub.dev, quoted in
+    /// [`pub_url`]'s doc comment. `classify` itself is shared with the other
+    /// three registries and is pinned once, against real status codes, in
+    /// `only_a_404_reads_as_missing`; this proves `PubRegistry` propagates
+    /// what it is given rather than reinterpreting it.
+    #[test]
+    fn a_404_is_missing_and_a_200_is_exists_for_pub() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let registry = PubRegistry::new(false, Some(dir.path().join("registry.json")));
+
+        assert_eq!(
+            registry.exists_via("missing_package", |_| Outcome::Answered(Existence::Missing)),
+            Existence::Missing
+        );
+        assert_eq!(
+            registry.exists_via("flutter_riverpod", |_| Outcome::Answered(Existence::Exists)),
+            Existence::Exists
+        );
+    }
+
+    /// A definite answer is written under the `pub:` prefix — see
+    /// [`pub_cache_key`].
+    #[test]
+    fn cache_keys_carry_the_pub_prefix() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        let registry = PubRegistry::new(true, Some(cache_path.clone()));
+
+        registry.record("flutter_riverpod", Existence::Exists);
+
+        let written = std::fs::read_to_string(&cache_path).expect("read cache");
+        assert!(
+            written.contains("\"pub:flutter_riverpod\""),
+            "written: {written}"
+        );
+    }
+
+    /// The deliberate opposite of `nuget_ids_are_case_insensitive_in_the_cache`.
+    /// NuGet ids are case-insensitive, so two spellings must share one entry;
+    /// pub.dev's API path is case-sensitive, so two spellings are two
+    /// different resources and must not. `Autolinker` answers 200 and
+    /// `autolinker` answers 404 — folding the key would let the 200 answer
+    /// for the 404, which on a blocking gate is a package waved through
+    /// under a name that does not resolve.
+    ///
+    /// Offline, so the only way either call can answer at all is from the
+    /// cache.
+    #[test]
+    fn pub_names_are_case_sensitive_in_the_cache() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(&cache_path, cache_json(&[("pub:Autolinker", true, 0)]))
+            .expect("write cache");
+
+        let registry = PubRegistry::new(true, Some(cache_path));
+
+        assert_eq!(registry.exists("Autolinker"), Existence::Exists);
+        assert_eq!(
+            registry.exists("autolinker"),
+            Existence::Unknown,
+            "a case-folded key answered for a name pub.dev serves separately"
+        );
+    }
+
+    /// A bare key predates pub.dev's arm entirely — it can only ever have
+    /// meant PyPI — so, unlike [`PyPiRegistry`], pub must not answer from
+    /// one. See [`pub_cache_key`].
+    #[test]
+    fn pub_does_not_fall_back_to_a_legacy_bare_key() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(&cache_path, cache_json(&[("dio", true, 0)])).expect("write cache");
+
+        let registry = PubRegistry::new(true, Some(cache_path));
+
+        assert_eq!(registry.exists("dio"), Existence::Unknown);
+    }
+
+    /// The arm Task 1 left returning a blanket [`Existence::Unknown`] must be
+    /// gone: a pub.dev name now reaches a registry that can actually answer
+    /// about it, and no ecosystem is answered by another's namespace.
+    ///
+    /// `Unknown` for a seeded, fresh, favourable entry is precisely what the
+    /// interim arm returned for every input, so an `Exists` here is what
+    /// proves it was replaced rather than merely edited around.
+    #[test]
+    fn the_router_dispatches_a_pub_name_to_pub_dev() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("pub:dio", true, 0), ("pub:diio", false, 0)]),
+        )
+        .expect("write cache");
+
+        let router = RegistryRouter::new(true, Some(cache_path));
+
+        assert_eq!(router.exists("dio", Ecosystem::Pub), Existence::Exists);
+        assert_eq!(router.exists("diio", Ecosystem::Pub), Existence::Missing);
+        // Same name, wrong ecosystem: no registry may read another's
+        // namespace.
+        assert_eq!(router.exists("dio", Ecosystem::PyPi), Existence::Unknown);
+        assert_eq!(router.exists("dio", Ecosystem::Npm), Existence::Unknown);
+    }
+
+    /// [`RegistryRouter::stale_packages`] has to sum pub.dev's count too, or
+    /// an offline run that leaned on an unbounded-age pub entry would report
+    /// nothing and the concession [`EXISTS_TTL`] documents would go unsaid.
+    #[test]
+    fn the_router_counts_a_stale_pub_answer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("registry.json");
+        std::fs::write(
+            &cache_path,
+            cache_json(&[("pub:dio", true, well_past_every_lifetime())]),
+        )
+        .expect("write cache");
+        let router = RegistryRouter::new(true, Some(cache_path));
+
+        assert_eq!(router.stale_packages(), 0, "nothing has been asked yet");
+        assert_eq!(router.exists("dio", Ecosystem::Pub), Existence::Exists);
+        assert_eq!(router.stale_packages(), 1);
     }
 }

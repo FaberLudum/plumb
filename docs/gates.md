@@ -12,9 +12,9 @@ registry. `plumb check --diff` asks git for the paths a change touched and
 reads each manifest among them, as it stands and as it stands at HEAD. On
 the PyPI side that means `requirements.txt`, `requirements-*.txt` and
 `pyproject.toml`; on the npm side, `package.json`; on the NuGet side,
-`.csproj`/`.fsproj`/`.vbproj` and `Directory.Packages.props`. It looks up
-only the names the change adds, and blocks on a name its own registry does
-not have.
+`.csproj`/`.fsproj`/`.vbproj` and `Directory.Packages.props`; on the pub.dev
+side, `pubspec.yaml`. It looks up only the names the change adds, and blocks
+on a name its own registry does not have.
 
 ```console
 $ plumb check --diff
@@ -53,9 +53,29 @@ $ echo $?
 1
 ```
 
+pub.dev reads `pubspec.yaml`'s `dependencies`, `dev_dependencies` and
+`dependency_overrides`, and blocks with `pub.dev` in place of `PyPI`:
+
+```console
+$ plumb check --diff
+blocking: package `surely_not_a_real_package_xyz` does not exist on pub.dev [package-exists]
+  pubspec.yaml
+  evidence: taxonomy §4.1
+$ echo $?
+1
+```
+
+Only registry-hosted entries are looked up. A dependency declared with
+`sdk:`, `git:` or `path:` is not a pub.dev package at all — `flutter` ships
+with the SDK and has no pub.dev page — so it is dropped before any lookup
+happens rather than checked and forgiven. Package names are matched
+case-sensitively, because pub.dev treats them that way: a handful of
+packages published before pub required lowercase names, `Autolinker` among
+them, resolve only under their original spelling.
+
 A name already in the manifest is not re-checked and does not appear in
 that output at all. Only a name the change actually adds is looked up, on
-any of the three registries.
+any of the four registries.
 
 `--json` emits the same findings as an array, and `--offline` never
 contacts a registry. Exit codes are a fixed contract: `0` clean, `1`
@@ -203,10 +223,40 @@ What it does not do yet, listed because a gate that stays quiet about them is
 worse than one that has none. The list is what has been found, not a proof
 that nothing else is there.
 
-- **Only PyPI, npm and NuGet are read**, added one at a time. pub.dev/Dart
-  (`pubspec.yaml`) is queued as the next ecosystem; until it lands, a
-  dependency declared only there is invisible to Plumb — never looked up,
-  in either direction.
+- **Only PyPI, npm, NuGet and pub.dev are read**, added one at a time.
+  Maven/Gradle (`pom.xml`, `build.gradle`), Go (`go.mod`) and crates.io
+  (`Cargo.toml`) are the frontier now, and none of them is read: a
+  dependency declared only in one of those is invisible to Plumb — never
+  looked up, in either direction. Nothing is scheduled, so treat every
+  ecosystem outside the four as unchecked rather than as coming soon.
+- **pub.dev checks existence only, and only what `pubspec.yaml` states
+  literally.** Concretely:
+  - Version constraints are unchecked, the same trade npm's ranges and
+    NuGet's `Version` get: the gate confirms a package name resolves, not
+    that any particular version does, so `^999.0.0` on a real package
+    passes exactly as cleanly as a constraint that actually resolves.
+  - **A custom `hosted:` dependency is a `manifest-understood` gap, not a
+    lookup** — the private-registry false-positive class again, handled the
+    other way round. Where a private PyPI index or NuGet feed silently
+    false-positives (Plumb asks the public registry and blocks on a name
+    that exists only privately), a `pubspec.yaml` names its alternate host
+    inline, so Plumb can see that it is being asked about a registry it
+    does not know and warn instead of guessing. A `hosted:` that names
+    pub.dev itself — including the retired `pub.dartlang.org` — is an
+    ordinary lookup, not a gap.
+  - **`pubspec.lock` is invisible.** The same blind spot npm's and NuGet's
+    lockfiles have: a name that exists only inside the lockfile, never
+    declared in `pubspec.yaml`, is never looked up in either direction.
+  - **`pubspec_overrides.yaml` is not read.** It is recognised by neither
+    filename nor content, so it produces no finding and no gap — a change
+    that adds a nonexistent package there passes silently. This is a
+    stronger gap than the lockfile one: an override is hand-written, so it
+    is exactly the kind of file a hallucinated name reaches.
+  - **Workspace and mono-repo layouts are not resolved.** A `resolution:`
+    key is not read and pub workspaces are not followed. Each `pubspec.yaml`
+    the diff touches is read on its own; a package resolved through a
+    workspace root rather than declared in the file Plumb opened is not
+    seen.
 - **NuGet checks existence only, and only what a `.csproj`,
   `.fsproj`/`.vbproj` or `Directory.Packages.props` states literally.**
   Concretely:

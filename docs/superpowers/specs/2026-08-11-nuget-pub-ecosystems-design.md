@@ -88,8 +88,20 @@ recalled from memory). Whichever wins, malformed YAML is `Gap::Unparseable`,
 never an empty manifest — the PyPI precedent.
 
 **Registry.** `GET https://pub.dev/api/packages/{name}` — 200 exists,
-404 missing. Package names: lowercase `[a-z0-9_]`, must not start with a
-digit; illegal name is `Missing` without a request. Cache prefix `pub:`.
+404 missing, and the path is **case-sensitive**. Package names: charset
+`[a-zA-Z0-9_]`, first character `[a-zA-Z_]` — what pub.dev's own uploader
+enforces (`validatePackageName`, and the `dart pub` client's
+`NameValidator`), not the `lowercase_with_underscores` prose, which binds
+*new* names only while a hard-coded allowlist keeps the grandfathered
+mixed-case packages served. (Live-verified during implementation:
+`Autolinker` answered 200 and `autolinker` 404, so the lowercase-only rule
+this paragraph first carried would have blocked a build over a package
+pub.dev still serves — the npm `JSONStream` lesson a second time, caught
+the same way, by asking the registry instead of recalling the rule.) An
+illegal name is `Missing` without a request. Cache keys `pub:` + the name
+**unfolded** — the deliberate opposite of NuGet's above: two spellings are
+two resources here, and folding them would let the 200 answer a question
+about the name that 404s, on a blocking gate.
 
 ## What both PRs inherit unchanged
 

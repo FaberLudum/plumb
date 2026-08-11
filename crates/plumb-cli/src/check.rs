@@ -459,6 +459,7 @@ fn package_does_not_exist(dependency: &AddedDependency) -> Finding {
         Ecosystem::PyPi => "PyPI",
         Ecosystem::Npm => "npm",
         Ecosystem::NuGet => "NuGet",
+        Ecosystem::Pub => "pub.dev",
     };
 
     Finding {

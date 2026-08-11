@@ -46,6 +46,10 @@ What this repository can already do, and where. Regenerate with
 - fn `new`
 - fn `stale_packages`
 - fn `exists`
+- struct `PubRegistry`
+- fn `new`
+- fn `stale_packages`
+- fn `exists`
 - struct `RegistryRouter`
 - fn `new`
 - fn `stale_packages`
@@ -91,6 +95,9 @@ What this repository can already do, and where. Regenerate with
 
 ## crates/plumb-core/src/ecosystems/nuget.rs
 - struct `NuGet`
+
+## crates/plumb-core/src/ecosystems/pub_dev.rs
+- struct `PubDev`
 
 ## crates/plumb-core/src/ecosystems/pypi.rs
 - fn `parse_requirements`

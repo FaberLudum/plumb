@@ -69,6 +69,18 @@
 //! `packages.config` is recognised by filename and deliberately never
 //! parsed: always [`Gap::PackagesConfig`], even when it is well-formed. See
 //! `ecosystems::nuget`.
+//!
+//! pub.dev reads `pubspec.yaml`'s `dependencies`, `dev_dependencies` and
+//! `dependency_overrides` tables, and a dependency's value decides whether
+//! it is a lookup at all: a scalar version constraint or a null value is a
+//! name, and so is a mapping holding only `version`. A mapping naming `sdk`,
+//! `git` or `path` is never a lookup and never a gap — those are Flutter
+//! itself, a git checkout and a local package, none of them things pub.dev
+//! resolves. A mapping naming `hosted` at some URL other than pub.dev itself
+//! is a [`Gap::HostedElsewhere`], the pub.dev analogue of a custom PyPI
+//! index. Any other mapping shape a dependency's value takes is a
+//! [`Gap::Malformed`], and a `pubspec.yaml` that does not parse as YAML at
+//! all is [`Gap::Unparseable`]. See `ecosystems::pub_dev`.
 
 use std::collections::BTreeSet;
 
@@ -78,6 +90,7 @@ pub enum Ecosystem {
     PyPi,
     Npm,
     NuGet,
+    Pub,
 }
 
 /// A manifest Plumb recognised: what it read, and what it did not.
@@ -158,6 +171,10 @@ pub enum Gap {
     /// why nothing came of it. Without this the reader's `as_array()` and
     /// `as_table()` are silent filters, and a file reports as fully understood
     /// because of a typo.
+    ///
+    /// The path is dotted TOML for `pyproject.toml`; `pubspec.yaml` reuses
+    /// the variant with a dotted `{section}.{name}` YAML path, which reads
+    /// the same way and locates the declaration just as precisely.
     Malformed(String),
     /// Dependency declarations under `[tool]` that this module does not read,
     /// named by their dotted TOML paths, sorted and never empty.
@@ -198,6 +215,14 @@ pub enum Gap {
     /// from a property at build time, which Plumb does not evaluate, so
     /// there is no literal name to look up.
     MsBuildExpression(String),
+    /// A pubspec `hosted:` dependency naming a registry other than pub.dev
+    /// itself, carrying the dependency's name.
+    ///
+    /// The private-registry class, same family as a custom PyPI index or a
+    /// scoped npm registry: the declaration is positive evidence of a real
+    /// dependency, but it resolves against a registry Plumb was never told
+    /// about and has no business guessing at.
+    HostedElsewhere(String),
 }
 
 impl Gap {
@@ -250,6 +275,11 @@ impl Gap {
             Gap::MsBuildExpression(include) => format!(
                 "`Include=\"{include}\"` is an MSBuild property expression, resolved at build \
                  time, so Plumb has no literal package name to look up"
+            ),
+            Gap::HostedElsewhere(name) => format!(
+                "`{name}` is declared with a `hosted:` block naming a registry other than \
+                 pub.dev — the pub.dev analogue of a custom PyPI index — so Plumb has no \
+                 registry to check it against"
             ),
         }
     }
