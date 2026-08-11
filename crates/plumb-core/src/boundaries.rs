@@ -506,6 +506,61 @@ mod tests {
         assert!(found.is_empty(), "{found:?}");
     }
 
+    /// A C# namespace is dotted where the directory holding it is one path
+    /// segment: `## src/Ummarell.Api` heading a project whose files say
+    /// `using Ummarell.Api.Services;`. Splitting module paths on `/` alone
+    /// yields the single segment `ummarell.api`, which can never equal the
+    /// import's first segment `ummarell`, so the import resolved to nothing
+    /// and the boundary was unenforceable for every dotted-project layout.
+    #[test]
+    fn a_dotted_module_heading_matches_a_csharp_namespace_import() {
+        let architecture = architecture::parse(
+            "## src/Ummarell.Api\n\nMay depend on: (none).\n\n\
+             ## src/Ummarell.Web\n\nMay depend on: (none).\n",
+        );
+        let found = violations(
+            &architecture,
+            "src/Ummarell.Web/Home.cs",
+            "using Ummarell.Api.Services;\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "src/Ummarell.Api");
+        assert_eq!(found[0].import, "Ummarell.Api.Services");
+    }
+
+    /// The dotted heading must still win against the shallower module it
+    /// lives under: `Ummarell.Api` scores 2 against `src/Ummarell.Api` and
+    /// nothing at all against `src`, so the deeper module is the target even
+    /// though `src` is declared first.
+    #[test]
+    fn a_dotted_module_heading_still_matches_by_plain_path() {
+        let architecture = architecture::parse(
+            "## src\n\nMay depend on: (none).\n\n\
+             ## src/Ummarell.Api\n\nMay depend on: (none).\n\n\
+             ## app\n\nMay depend on: (none).\n",
+        );
+        let found = violations(&architecture, "app/Program.cs", "using Ummarell.Api;\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "src/Ummarell.Api");
+    }
+
+    /// The dot-split must not disturb a module path that has no dot in it.
+    /// Fixture and expectations copied verbatim from
+    /// `a_subpackage_import_resolves_to_the_deepest_matching_module`: if the
+    /// change ever regresses undotted resolution, this fails alongside it
+    /// rather than leaving the regression class untested here.
+    #[test]
+    fn existing_resolution_is_unchanged_for_undotted_modules() {
+        let found = violations(
+            &monolith(),
+            "src/pkg/documents/store.py",
+            "from pkg.facts import totals\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].to_module, "src/pkg/facts");
+        assert_eq!(found[0].import, "pkg.facts");
+    }
+
     /// An entry naming one sub-module must not permit an unrelated sibling
     /// sub-module: `other` may depend on `documents`, which says nothing
     /// about `facts`.

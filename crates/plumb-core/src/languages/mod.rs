@@ -4,6 +4,7 @@
 //! The language table: one file per language, one registration line here.
 //! Adding a language = implement `Language` in a new file, add it to `ALL`.
 
+mod csharp;
 mod javascript;
 mod python;
 mod rust;
