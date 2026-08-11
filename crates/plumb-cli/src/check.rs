@@ -1695,6 +1695,9 @@ mod tests {
             "packages/api/pyproject.toml",
             "package.json",
             "packages/api/package.json",
+            "Api.csproj",
+            "src/Api.csproj",
+            "Directory.Packages.props",
         ] {
             let probed = manifest::parse(path, "")
                 .unwrap_or_else(|| panic!("{path} was not recognised from its name"));
